@@ -9,3 +9,10 @@ __pycache__/
 .venv/
 .pytest_cache/
 .DS_Store
+
+# python
+.venv/
+eval/results/
+eval/last_train_report.json
+data/metrics*.json
+data/BEST_VERSION

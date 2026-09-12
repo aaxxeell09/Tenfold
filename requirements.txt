@@ -1,0 +1,10 @@
+numpy>=1.26,<3
+weave>=0.51
+wandb>=0.19
+httpx>=0.27
+pytest>=8
+# process A (Axel)
+mediapipe>=0.10
+opencv-python>=4.9
+Pillow>=10
+marimo>=0.9
