@@ -4,6 +4,7 @@ wandb>=0.19
 httpx>=0.27
 pytest>=8
 # process A (Axel)
+aiohttp>=3.9
 mediapipe>=0.10
 opencv-python>=4.9
 Pillow>=10

@@ -1,0 +1,319 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tenfold</title>
+<link rel="icon" href="data:,">
+<!--
+  The live practice screen, SPEC.md section 9, as a page.
+
+  It is a thin renderer. app/server.py owns the camera, the perception and the
+  lesson; this file only draws what arrives on the websocket and sends back two
+  commands. Nothing here decides whether a pose is right.
+
+  Contract, both directions:
+
+    in   {type:"state", state, exercise, tally, wrong:[{hand,number}],
+          match:[{hand,number}], answer, reasoning:[str],
+          fingers:[{hand,number,x,y}]}
+    out  {type:"check", value:56}   {type:"next"}   {type:"repeat"}
+
+  x and y are 0..1 in the mirrored image, the same frame /video streams, so the
+  finger circles are placed over the video without this page knowing anything
+  about cameras or landmarks.
+
+  Keys: digits type the answer, Enter validates, Backspace deletes, n is the
+  next exercise, r repeats this one.
+-->
+<style>
+  :root {
+    --waiting: #9AA3AD;
+    --fix: #F5A623;
+    --ok: #2ECC71;
+    --tens: #3B82F6;
+    --units: #FACC15;
+    --text: #FFFFFF;
+    --band: rgba(15, 17, 21, 0.75);
+    --ground: #0B0D10;
+    --state: var(--waiting);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--text);
+    font-family: "Nunito", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+    font-weight: 700;
+    overflow: hidden;
+  }
+  #app { display: grid; grid-template-rows: 140px 1fr 180px; height: 100vh; }
+
+  /* top band: the exercise, on the colour of the state */
+  #top {
+    display: flex; align-items: center; justify-content: center;
+    background: var(--state);
+    color: #0B0D10;
+    transition: background 200ms linear;
+  }
+  #exercise { font-size: clamp(48px, 7vw, 120px); letter-spacing: 0.02em; }
+
+  /* middle: the mirrored video, darkened, with the finger numbers over it */
+  #stage { position: relative; overflow: hidden; background: #000; }
+  #video { width: 100%; height: 100%; object-fit: contain; display: block; }
+  #veil { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.35); pointer-events: none; }
+  #overlay { position: absolute; pointer-events: none; }
+  #overlay text { font-size: 0.052px; font-weight: 800; text-anchor: middle; }
+
+  /* the two waiting rectangles, only while no hand is placed */
+  .zone { fill: none; stroke: var(--waiting); stroke-width: 0.004; stroke-dasharray: 0.02 0.016; }
+  .zone-label { fill: var(--waiting); font-size: 0.038px; }
+  #overlay.pulsing .zone { animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.9; } }
+
+  /* the reasoning band, lower third, one line every 300 ms */
+  #reasoning {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    padding: 18px 40px; background: var(--band);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  #reasoning div {
+    font-size: clamp(22px, 2.6vw, 56px);
+    opacity: 0; transform: translateY(8px);
+    transition: opacity 200ms linear, transform 200ms linear;
+  }
+  #reasoning div.on { opacity: 1; transform: none; }
+  #reasoning div:nth-child(1) { color: var(--tens); }
+  #reasoning div:nth-child(2) { color: var(--units); }
+  #reasoning div:nth-child(3) { color: var(--text); }
+
+  #flash { position: absolute; inset: 0; background: var(--ok); opacity: 0; pointer-events: none; }
+  #flash.on { animation: flash 400ms ease-out; }
+  @keyframes flash { 0% { opacity: 0.55; } 100% { opacity: 0; } }
+
+  #result {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: clamp(90px, 16vw, 200px); color: var(--ok);
+    opacity: 0; transform: scale(0.6); pointer-events: none;
+  }
+  #result.on { opacity: 1; transform: scale(1); transition: opacity 250ms ease-out, transform 250ms ease-out; }
+
+  /* bottom band: what Tally says, and the answer field */
+  #bottom { display: grid; grid-template-columns: 70% 30%; background: var(--band); align-items: center; }
+  #tally { padding: 0 40px; font-size: clamp(20px, 2.2vw, 44px); opacity: 1; transition: opacity 150ms linear; }
+  #tally.fading { opacity: 0; }
+  #answer { display: flex; align-items: center; justify-content: center; gap: 4px; font-size: clamp(40px, 6vw, 96px); }
+  #answer.shake { animation: shake 300ms linear; }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    16% { transform: translateX(-8px); } 33% { transform: translateX(8px); }
+    50% { transform: translateX(-8px); } 66% { transform: translateX(8px); }
+    83% { transform: translateX(-8px); }
+  }
+  #caret { width: 4px; height: 0.9em; background: var(--text); animation: blink 1s step-end infinite; }
+  @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+  #link { position: fixed; top: 8px; right: 12px; font-size: 13px; color: #0B0D10; opacity: 0.55; }
+</style>
+
+<div id="app">
+  <div id="top"><div id="exercise">Tally is waking up</div></div>
+  <div id="stage">
+    <img id="video" alt="" src="/video">
+    <div id="veil"></div>
+    <svg id="overlay" viewBox="0 0 1 1" preserveAspectRatio="none"></svg>
+    <div id="flash"></div>
+    <div id="result"></div>
+    <div id="reasoning" hidden></div>
+  </div>
+  <div id="bottom">
+    <div id="tally">Hi, I am Tally.</div>
+    <div id="answer"><span id="typed"></span><span id="caret"></span></div>
+  </div>
+</div>
+<div id="link"></div>
+
+<script>
+const Tenfold = (() => {
+  const el = (id) => document.getElementById(id);
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const STATE_COLOR = {
+    intro: "--waiting", exercise_shown: "--waiting", waiting_pose: "--waiting",
+    waiting_answer: "--ok", wrong_pose: "--fix", correct_pose: "--ok",
+    answer_correct: "--ok", answer_wrong: "--ok",
+  };
+
+  let socket = null;
+  let typed = "";
+  let last = { state: "", tally: "", reasoning: [] };
+  /* Width of the overlay in its own units. The viewBox is kept at the video
+     aspect ratio rather than a unit square, otherwise the non uniform scale
+     turns every circle into an ellipse. Normalized x is multiplied by it. */
+  let span = 4 / 3;
+  let reasoningTimers = [];
+
+  /* The video is object-fit: contain, so the picture does not fill the stage.
+     The overlay is placed on the picture itself, which keeps the normalized
+     coordinates from the server valid at any window size. */
+  function fitOverlay() {
+    const stage = el("stage"), video = el("video"), overlay = el("overlay");
+    const W = stage.clientWidth, H = stage.clientHeight;
+    const ratio = (video.naturalWidth && video.naturalHeight)
+      ? video.naturalWidth / video.naturalHeight : 4 / 3;
+    const w = Math.min(W, H * ratio), h = w / ratio;
+    span = ratio;
+    overlay.setAttribute("viewBox", `0 0 ${ratio} 1`);
+    overlay.style.left = ((W - w) / 2) + "px";
+    overlay.style.top = ((H - h) / 2) + "px";
+    overlay.style.width = w + "px";
+    overlay.style.height = h + "px";
+  }
+
+  function zones(overlay) {
+    for (const [cx, label] of [[0.3, "left hand"], [0.7, "right hand"]]) {
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("class", "zone");
+      rect.setAttribute("x", (cx - 0.15) * span); rect.setAttribute("y", 0.55 - 0.275);
+      rect.setAttribute("width", 0.3 * span); rect.setAttribute("height", 0.55);
+      rect.setAttribute("rx", 0.02);
+      overlay.appendChild(rect);
+      const text = document.createElementNS(SVG_NS, "text");
+      text.setAttribute("class", "zone-label");
+      text.setAttribute("x", cx * span); text.setAttribute("y", 0.55 + 0.31);
+      text.textContent = label;
+      overlay.appendChild(text);
+    }
+  }
+
+  function drawFingers(message) {
+    const overlay = el("overlay");
+    overlay.replaceChildren();
+    const fingers = message.fingers || [];
+    const showZones = fingers.length === 0 &&
+      ["intro", "exercise_shown", "waiting_pose"].includes(message.state);
+    overlay.classList.toggle("pulsing", showZones);
+    if (showZones) { zones(overlay); return; }
+
+    const key = (f) => f.hand + ":" + f.number;
+    const wrong = new Set((message.wrong || []).map(key));
+    const match = new Set((message.match || []).map(key));
+
+    for (const finger of fingers) {
+      const id = key(finger);
+      const colour = wrong.has(id) ? "var(--fix)" : match.has(id) ? "var(--ok)" : "#FFFFFF";
+      const circle = document.createElementNS(SVG_NS, "circle");
+      circle.setAttribute("cx", finger.x * span); circle.setAttribute("cy", finger.y);
+      circle.setAttribute("r", 0.036);
+      circle.setAttribute("fill", "rgba(11,13,16,0.72)");
+      circle.setAttribute("stroke", colour);
+      circle.setAttribute("stroke-width", 0.006);
+      overlay.appendChild(circle);
+      const text = document.createElementNS(SVG_NS, "text");
+      text.setAttribute("x", finger.x * span); text.setAttribute("y", finger.y + 0.019);
+      text.setAttribute("fill", colour);
+      text.textContent = finger.number;
+      overlay.appendChild(text);
+    }
+  }
+
+  function sayTally(text) {
+    const node = el("tally");
+    if (text === last.tally) return;
+    last.tally = text;
+    node.classList.add("fading");
+    setTimeout(() => { node.textContent = text; node.classList.remove("fading"); }, 150);
+  }
+
+  function showReasoning(lines) {
+    reasoningTimers.forEach(clearTimeout);
+    reasoningTimers = [];
+    const band = el("reasoning");
+    if (!lines || lines.length === 0) { band.hidden = true; band.replaceChildren(); return; }
+    band.hidden = false;
+    band.replaceChildren(...lines.map((line) => {
+      const div = document.createElement("div");
+      div.textContent = line;
+      return div;
+    }));
+    [...band.children].forEach((child, index) => {
+      reasoningTimers.push(setTimeout(() => child.classList.add("on"), 300 * index));
+    });
+  }
+
+  function setTyped(value) {
+    typed = value;
+    el("typed").textContent = typed;
+  }
+
+  function render(message) {
+    if (!message || message.type !== "state") return;
+    document.body.dataset.state = message.state;
+    const colour = STATE_COLOR[message.state] || "--waiting";
+    document.documentElement.style.setProperty("--state", `var(${colour})`);
+    el("exercise").textContent = (message.exercise || "").replace(" x ", " × ") || "Tally is waking up";
+    sayTally(message.tally || "");
+    fitOverlay();
+    drawFingers(message);
+
+    const fresh = message.state !== last.state;
+    if (fresh && ["correct_pose", "waiting_answer", "answer_correct", "answer_wrong"].includes(message.state)) {
+      showReasoning(message.reasoning);
+    } else if (fresh) {
+      showReasoning(null);
+    }
+
+    if (fresh && message.state === "answer_correct") {
+      el("flash").classList.remove("on"); void el("flash").offsetWidth;
+      el("flash").classList.add("on");
+      el("result").textContent = message.answer;
+      el("result").classList.add("on");
+      setTyped("");
+    }
+    if (fresh && message.state !== "answer_correct") el("result").classList.remove("on");
+    if (fresh && message.state === "answer_wrong") {
+      const field = el("answer");
+      field.classList.remove("shake"); void field.offsetWidth; field.classList.add("shake");
+      setTyped("");
+    }
+    last.state = message.state;
+  }
+
+  function send(payload) {
+    if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(payload));
+  }
+
+  function connect(url) {
+    const target = url || `ws://${location.host}/ws`;
+    socket = new WebSocket(target);
+    socket.onmessage = (event) => render(JSON.parse(event.data));
+    socket.onopen = () => { el("link").textContent = ""; };
+    socket.onclose = () => {
+      el("link").textContent = "reconnecting";
+      setTimeout(() => connect(target), 1000);
+    };
+    return socket;
+  }
+
+  window.addEventListener("keydown", (event) => {
+    if (event.key >= "0" && event.key <= "9") {
+      if (typed.length < 3) setTyped(typed + event.key);
+    } else if (event.key === "Backspace") {
+      setTyped(typed.slice(0, -1));
+    } else if (event.key === "Enter") {
+      if (typed.length === 0) return;          // Enter on an empty field is ignored
+      send({ type: "check", value: Number(typed) });
+    } else if (event.key === "n") {
+      setTyped(""); send({ type: "next" });
+    } else if (event.key === "r") {
+      setTyped(""); send({ type: "repeat" });
+    }
+  });
+
+  window.addEventListener("resize", fitOverlay);
+  el("video").addEventListener("load", fitOverlay);
+  setInterval(fitOverlay, 1000);
+
+  return { connect, render, send, get typed() { return typed; } };
+})();
+
+Tenfold.connect();
+</script>

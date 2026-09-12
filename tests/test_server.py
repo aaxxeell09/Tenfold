@@ -1,0 +1,187 @@
+"""app/server.py end to end in mock mode: no camera, no browser, no port.
+
+The mock loop drives the real Engine with synthetic GestureStates, so these
+tests exercise the same path the webcam takes, minus MediaPipe.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+
+import pytest
+from aiohttp.test_utils import TestClient, TestServer
+
+from app import server
+from classifier.schema import HandFrame, Window
+from lesson.engine import Engine, Exercise
+
+
+def run(coroutine):
+    return asyncio.run(coroutine)
+
+
+# --- the message the browser receives ---------------------------------------
+
+
+def settled(engine: Engine, gesture, t0: float = 0.0):
+    engine.observe(gesture, t0)
+    return engine.observe(gesture, t0 + 0.3 + 0.01)
+
+
+def test_build_message_carries_everything_the_page_renders():
+    from classifier.schema import GestureState
+
+    engine = Engine([Exercise(8, 7)])
+    engine.start()
+    update = settled(engine, GestureState(method="6-10", left=8, right=9,
+                                          contact=False, confidence=0.9))
+    fingers = [{"hand": "left", "number": 8, "x": 0.3, "y": 0.5}]
+    message = server.build_message(update, fingers, hands_seen=2)
+
+    assert set(message) == {"type", "state", "exercise", "tally", "wrong", "match",
+                            "answer", "reasoning", "fingers"}
+    assert message["state"] == "wrong_pose"
+    assert message["exercise"] == "8 x 7"
+    assert message["wrong"] == [{"hand": "right", "number": 9}]
+    assert message["match"] == [{"hand": "left", "number": 8}]
+    assert message["tally"].startswith("Almost")
+    assert message["fingers"] == fingers
+    assert json.dumps(message), "the message has to be JSON serialisable"
+
+
+def test_one_hand_gets_its_own_line():
+    from classifier.schema import GestureState
+
+    engine = Engine([Exercise(8, 7)])
+    engine.start()
+    update = settled(engine, GestureState(method="unknown", confidence=0.1))
+    assert server.moment_of(update, hands_seen=1) == "one_hand"
+    assert server.moment_of(update, hands_seen=0) == "waiting_pose"
+
+
+def test_fingers_are_placed_in_mirrored_image_coordinates():
+    """One flat hand at the wrist, so every tip lands at a predictable spot."""
+    points = [(0.0, 0.0, 0.0)] * 21
+    for index in (4, 8, 12, 16, 20):
+        points[index] = (1.0, -1.0, 0.0)
+    hand = HandFrame(points=points, detection_conf=0.9, wrist_xy=(0.3, 0.6), scale=0.1)
+    window = Window(left=[hand], right=[])
+
+    fingers = server.fingers_from_window(window)
+    assert len(fingers) == 5
+    assert {f["hand"] for f in fingers} == {"left"}
+    assert sorted(f["number"] for f in fingers) == [6, 7, 8, 9, 10]
+    for finger in fingers:
+        assert finger["x"] == pytest.approx(0.4)
+        assert finger["y"] == pytest.approx(0.5)
+
+
+def test_an_absent_or_broken_hand_contributes_no_fingers():
+    absent = HandFrame(points=None, detection_conf=0.0, wrist_xy=None, scale=None)
+    nan = HandFrame(points=[(float("nan"), float("nan"), 0.0)] * 21,
+                    detection_conf=0.9, wrist_xy=(0.3, 0.5), scale=0.1)
+    assert server.fingers_from_window(Window(left=[absent], right=[absent])) == []
+    assert server.fingers_from_window(Window(left=[nan], right=[absent])) == []
+
+
+# --- the server itself ------------------------------------------------------
+
+
+async def _client(app):
+    server_ = TestServer(app)
+    await server_.start_server()
+    return server_, TestClient(server_)
+
+
+def test_the_page_is_served_at_the_root():
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            response = await client.get("/")
+            assert response.status == 200
+            body = await response.text()
+            assert "Tenfold.connect" in body
+            assert 'src="/video"' in body
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_the_video_endpoint_streams_mjpeg():
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            response = await client.get("/video")
+            assert "multipart/x-mixed-replace" in response.headers["Content-Type"]
+            chunk = await asyncio.wait_for(response.content.read(64), timeout=5)
+            assert b"--frame" in chunk
+            response.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_the_websocket_pushes_the_lesson_and_takes_commands():
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            ws = await client.ws_connect("/ws")
+            first = await asyncio.wait_for(ws.receive_json(), timeout=5)
+            assert first["type"] == "state"
+            assert first["exercise"]
+
+            # next moves the lesson on, and the answer follows the new exercise.
+            await ws.send_json({"type": "next"})
+            moved = await _await_state(ws, "exercise_shown")
+            assert moved["exercise"] != first["exercise"]
+
+            # a wrong answer before the pose is latched changes nothing.
+            await ws.send_json({"type": "check", "value": 1})
+            # a malformed command must not take the server down.
+            await ws.send_str("not json")
+            await ws.send_json({"type": "unknown_command"})
+            alive = await asyncio.wait_for(ws.receive_json(), timeout=5)
+            assert alive["type"] == "state"
+            await ws.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_the_mock_reaches_the_three_states():
+    """waiting_pose, wrong_pose and correct_pose, on the real engine."""
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            ws = await client.ws_connect("/ws")
+            seen = set()
+            deadline = asyncio.get_running_loop().time() + 12
+            while asyncio.get_running_loop().time() < deadline:
+                message = await asyncio.wait_for(ws.receive_json(), timeout=5)
+                seen.add(message["state"])
+                if {"waiting_pose", "wrong_pose", "correct_pose"} <= seen:
+                    break
+            assert {"waiting_pose", "wrong_pose", "correct_pose"} <= seen, seen
+            await ws.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+async def _await_state(ws, state: str, timeout: float = 6.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        message = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
+        if message["state"] == state:
+            return message
+    raise AssertionError(f"never reached {state}")
