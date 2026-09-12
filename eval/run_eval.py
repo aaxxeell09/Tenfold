@@ -35,6 +35,7 @@ from classifier.schema import window_from_json  # noqa: E402
 from eval import scorers  # noqa: E402
 
 PROJECTS = {"train": "tenfold", "heldout": "tenfold-heldout"}
+PROJECT_SUFFIX = os.environ.get("TENFOLD_PROJECT_SUFFIX", "")  # e.g. "-smoke" for rehearsals
 
 
 def samples_path(split: str, override: str | None) -> Path:
@@ -155,7 +156,7 @@ def publish_weave(split: str, tag: str, rows: list[dict], metrics: dict, sha: st
         import weave
 
         entity = os.environ.get("WANDB_ENTITY")
-        project = PROJECTS[split]
+        project = PROJECTS[split] + PROJECT_SUFFIX
         weave.init(f"{entity}/{project}" if entity else project)
         by_id = {r["id"]: r for r in rows}
 
