@@ -120,8 +120,8 @@ def test_combo_prompts_name_both_sides():
         if item.kind != "positive":
             continue
         left, right = (int(n) for n in item.cls.split("x"))
-        assert f"LEFT hand {left}" in item.prompt
-        assert f"RIGHT hand {right}" in item.prompt
+        assert f"LEFT {left}" in item.prompt
+        assert f"RIGHT {right}" in item.prompt
         assert item.label["left"] == left
         assert item.label["right"] == right
 

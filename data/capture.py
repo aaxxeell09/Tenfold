@@ -78,6 +78,12 @@ NEAR_CONTACT_PAIRS = (
     (8, 8), (9, 6), (9, 10), (10, 8), (10, 10),
 )
 
+# On screen banner. Solid, so the text needs no outline stroke to stay readable.
+BANNER_BG = (21, 17, 15)          # BGR, the dark band of SPEC.md section 9
+BANNER_TEXT = (255, 255, 255)
+BANNER_MUTED = (173, 163, 154)
+PHASE_ACCENT = {"prep": (173, 163, 154), "drop": (35, 166, 245), "hold": (113, 204, 46)}
+
 PHASE_PREP = "prep"
 PHASE_DROP = "drop"
 PHASE_HOLD = "hold"
@@ -112,12 +118,12 @@ def build_schedule() -> list[Item]:
                 Item(
                     cls=f"{left}x{right}",
                     kind="positive",
-                    prompt=f"LEFT hand {left}, RIGHT hand {right}, touch them tip to tip",
+                    prompt=f"LEFT {left} and RIGHT {right}, touch tip to tip",
                     label={"method": "6-10", "left": left, "right": right, "contact": True},
                 )
             )
     items.append(
-        Item(cls="rest", kind="rest", prompt="REST, both hands down and relaxed",
+        Item(cls="rest", kind="rest", prompt="REST, both hands down",
              label=dict(UNKNOWN_LABEL))
     )
     for left, right in NEAR_CONTACT_PAIRS:
@@ -125,7 +131,7 @@ def build_schedule() -> list[Item]:
             Item(
                 cls=f"near{left}x{right}",
                 kind="near_contact",
-                prompt=f"LEFT hand {left}, RIGHT hand {right}, about 2 cm apart, DO NOT touch",
+                prompt=f"LEFT {left} and RIGHT {right}, 2 cm apart, DO NOT touch",
                 label={"method": "6-10", "left": left, "right": right, "contact": False},
             )
         )
@@ -134,7 +140,7 @@ def build_schedule() -> list[Item]:
             Item(
                 cls=f"partial{finger}",
                 kind="partial_hand",
-                prompt=f"RIGHT hand only, show finger {finger}, LEFT hand out of frame",
+                prompt=f"RIGHT hand only, finger {finger}, LEFT out of frame",
                 label=dict(UNKNOWN_LABEL),
             )
         )
@@ -143,7 +149,7 @@ def build_schedule() -> list[Item]:
             Item(
                 cls=f"outofframe{n}",
                 kind="out_of_frame",
-                prompt=f"Move BOTH hands out of frame, then back in ({n} of 5)",
+                prompt=f"BOTH hands out of frame, then back in ({n} of 5)",
                 label=dict(UNKNOWN_LABEL),
             )
         )
@@ -173,6 +179,25 @@ def label_for(phase: str, item: Item) -> tuple[str, str, dict[str, Any]] | None:
     if phase == PHASE_HOLD:
         return item.cls, item.kind, dict(item.label)
     return None
+
+
+def phase_caption(phase: str, elapsed: float) -> str:
+    """Line 2 of the banner: what to do now, and how long is left to do it."""
+    if phase == PHASE_PREP:
+        return f"get ready  {max(0.0, PREP_S - elapsed):.1f} s"
+    if phase == PHASE_DROP:
+        return "HOLD"
+    return "HOLD  recording"
+
+
+def overlay_lines(item: Item, phase: str, elapsed: float, step: int,
+                  total_steps: int, written: int) -> list[str]:
+    """The three banner lines: the instruction, the phase, the counters."""
+    return [
+        item.prompt,
+        phase_caption(phase, elapsed),
+        f"step {step + 1}/{total_steps}   windows {written}   s skip   q quit",
+    ]
 
 
 def hold_id(session: str, cls: str, angle: str, distance: str, step: int) -> str:
@@ -346,8 +371,7 @@ def _wait_for_block(camera: Any, angle: str, distance: str) -> bool:
         if not ok:
             continue
         frame = cv2.flip(frame, 1)
-        _put(frame, banner, 40, 1.0)
-        _put(frame, "space to start, q to quit", 80, 0.7)
+        _draw_banner(frame, [banner, "space to start", "q to quit"], BANNER_TEXT)
         cv2.imshow("tenfold capture", frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord(" "):
@@ -403,7 +427,9 @@ def _run_step(camera: Any, detector: Any, normalizer: Normalizer, writer: Sample
                     writer.write(session, person, angle, distance, step,
                                  cls, kind, label, window)
 
-        _draw_step(frame, item, phase, STEP_S - elapsed, step, total_steps, writer.written)
+        _draw_banner(frame,
+                     overlay_lines(item, phase, elapsed, step, total_steps, writer.written),
+                     PHASE_ACCENT.get(phase, BANNER_TEXT))
         cv2.imshow("tenfold capture", frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
@@ -412,21 +438,38 @@ def _run_step(camera: Any, detector: Any, normalizer: Normalizer, writer: Sample
             return "skip", transition_seen
 
 
-def _draw_step(frame: Any, item: Item, phase: str, remaining: float, step: int,
-               total_steps: int, written: int) -> None:
-    colors = {PHASE_PREP: (150, 160, 170), PHASE_DROP: (35, 166, 245),
-              PHASE_HOLD: (113, 204, 46)}
-    _put(frame, item.prompt, 44, 0.9, colors.get(phase, (255, 255, 255)))
-    _put(frame, f"{phase}  {remaining:.1f} s", 84, 0.8, colors.get(phase, (255, 255, 255)))
-    _put(frame, f"step {step + 1}/{total_steps}   windows {written}   s skip   q quit", 120, 0.6)
-
-
-def _put(frame: Any, text: str, y: int, size: float,
-         color: tuple[int, int, int] = (255, 255, 255)) -> None:
+def _fit_scale(text: str, max_width: int, base: float, thickness: int) -> float:
+    """Largest scale at or below base that keeps the line inside the frame."""
     import cv2
 
-    cv2.putText(frame, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, size, (0, 0, 0), 4, cv2.LINE_AA)
-    cv2.putText(frame, text, (20, y), cv2.FONT_HERSHEY_SIMPLEX, size, color, 1, cv2.LINE_AA)
+    scale = base
+    while scale > 0.4:
+        (width, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, scale, thickness)
+        if width <= max_width:
+            return scale
+        scale -= 0.05
+    return 0.4
+
+
+def _draw_banner(frame: Any, lines: list[str], accent: tuple[int, int, int]) -> None:
+    """One solid dark band at the top, three lines, drawn once on the mirrored frame."""
+    import cv2
+
+    height, width = frame.shape[:2]
+    band = max(110, min(200, int(height * 0.24)))
+    cv2.rectangle(frame, (0, 0), (width, band), BANNER_BG, -1)
+
+    margin = 20
+    room = width - 2 * margin
+    styles = (
+        (0.30, 1.0, 2, BANNER_TEXT),
+        (0.60, 0.85, 2, accent),
+        (0.86, 0.55, 1, BANNER_MUTED),
+    )
+    for text, (position, base, thickness, color) in zip(lines, styles):
+        scale = _fit_scale(text, room, base, thickness)
+        cv2.putText(frame, text, (margin, int(band * position)),
+                    cv2.FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv2.LINE_AA)
 
 
 def main(argv: list[str] | None = None) -> int:
