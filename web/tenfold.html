@@ -23,6 +23,11 @@
 
   Keys: digits type the answer, Enter validates, Backspace deletes, n is the
   next exercise, r repeats this one.
+
+  The child can also say the answer. The Web Speech API listens only while the
+  pose is correct and an answer is expected, parses the first number it hears,
+  digits or words, and sends it. The keyboard always works, and when the browser
+  has no speech recognition the microphone simply never appears.
 -->
 <style>
   :root {
@@ -112,6 +117,25 @@
   #caret { width: 4px; height: 0.9em; background: var(--text); animation: blink 1s step-end infinite; }
   @keyframes blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
+  /* voice */
+  #mic {
+    /* font: inherit, so the em below follows the answer field and not the
+       browser default button size, which would draw a 5 px microphone. */
+    font: inherit; border: 0; background: none; padding: 0 16px 0 0;
+    cursor: pointer; color: var(--waiting); line-height: 0;
+  }
+  #mic svg { width: 0.55em; height: 0.55em; }
+  #mic[hidden] { display: none; }
+  #mic.listening { color: var(--ok); animation: breathe 1.6s ease-in-out infinite; }
+  #mic.denied { color: var(--fix); animation: none; }
+  @keyframes breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+  #heard {
+    position: absolute; bottom: 26px; right: 40px;
+    font-size: 20px; font-weight: 700; color: var(--waiting);
+    max-width: 28vw; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+  }
+  #bottom { position: relative; }
+
   #link { position: fixed; top: 8px; right: 12px; font-size: 13px; color: #0B0D10; opacity: 0.55; }
 </style>
 
@@ -127,7 +151,18 @@
   </div>
   <div id="bottom">
     <div id="tally">Hi, I am Tally.</div>
-    <div id="answer"><span id="typed"></span><span id="caret"></span></div>
+    <div id="answer">
+      <button id="mic" hidden type="button" title="say the answer" aria-label="say the answer">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" aria-hidden="true">
+          <rect x="9" y="2" width="6" height="11" rx="3"></rect>
+          <path d="M5 11a7 7 0 0 0 14 0"></path>
+          <path d="M12 18v4"></path>
+        </svg>
+      </button>
+      <span id="typed"></span><span id="caret"></span>
+    </div>
+    <div id="heard"></div>
   </div>
 </div>
 <div id="link"></div>
@@ -247,6 +282,7 @@ const Tenfold = (() => {
   function render(message) {
     if (!message || message.type !== "state") return;
     document.body.dataset.state = message.state;
+    listenWhileAnswering(message.state);
     const colour = STATE_COLOR[message.state] || "--waiting";
     document.documentElement.style.setProperty("--state", `var(${colour})`);
     el("exercise").textContent = (message.exercise || "").replace(" x ", " × ") || "Tally is waking up";
@@ -267,6 +303,7 @@ const Tenfold = (() => {
       el("result").textContent = message.answer;
       el("result").classList.add("on");
       setTyped("");
+      showHeard("");
     }
     if (fresh && message.state !== "answer_correct") el("result").classList.remove("on");
     if (fresh && message.state === "answer_wrong") {
@@ -275,6 +312,121 @@ const Tenfold = (() => {
       setTyped("");
     }
     last.state = message.state;
+  }
+
+  /* Number words, up to a hundred, which is the whole range of this lesson.
+     Speech recognition returns "56" as often as "fifty six", so both are read. */
+  const ONES = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6,
+                 seven: 7, eight: 8, nine: 9 };
+  const TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14,
+                  fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+  const TENS = { twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50,
+                 sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+
+  /* The first number in a spoken phrase, or null. "fifty six" and "56" both give
+     56, "one hundred" gives 100. Homophones like "for" and "to" are left out on
+     purpose: this submits an answer on its own, so a false reading costs the
+     child a wrong answer they never gave. */
+  function parseNumber(text) {
+    const tokens = String(text || "").toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, " ").split(/[\s-]+/).filter(Boolean);
+    let value = 0, started = false;
+    for (const token of tokens) {
+      if (/^\d+$/.test(token)) return Number(token);
+      if (token in TEENS) { value += TEENS[token]; started = true; continue; }
+      if (token in TENS) { value += TENS[token]; started = true; continue; }
+      if (token in ONES) { value += ONES[token]; started = true; continue; }
+      if (token === "hundred") { value = (value || 1) * 100; started = true; continue; }
+      if (token === "and" && started) continue;
+      if (started) return value;
+      // anything before the first number word is ignored
+    }
+    return started ? value : null;
+  }
+
+  const LISTENING_STATES = ["correct_pose", "waiting_answer"];
+  const voice = { recognition: null, wanted: false, running: false,
+                  lastValue: null, lastAt: 0 };
+
+  function showHeard(text) {
+    el("heard").textContent = text ? `heard: ${text}` : "";
+  }
+
+  function micClass(name) {
+    const mic = el("mic");
+    mic.classList.toggle("listening", name === "listening");
+    mic.classList.toggle("denied", name === "denied");
+  }
+
+  function submitSpoken(text) {
+    const value = parseNumber(text);
+    if (value === null) return;
+    const now = Date.now();
+    // the same number twice in a row is one answer, not two
+    if (value === voice.lastValue && now - voice.lastAt < 1500) return;
+    voice.lastValue = value;
+    voice.lastAt = now;
+    setTyped(String(value).slice(0, 3));
+    send({ type: "check", value });
+  }
+
+  function setupVoice() {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition) return;            // keyboard only, the microphone stays hidden
+
+    const recognition = new Recognition();
+    recognition.lang = "en-US";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+
+    recognition.onstart = () => { voice.running = true; micClass("listening"); };
+    recognition.onend = () => {
+      voice.running = false;
+      micClass("");
+      // Chrome ends the session on silence, so pick it back up while it is wanted
+      if (voice.wanted) setTimeout(startVoice, 300);
+    };
+    recognition.onerror = (event) => {
+      if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+        voice.wanted = false;
+        micClass("denied");
+        el("mic").title = "microphone blocked, type the answer";
+      }
+    };
+    recognition.onresult = (event) => {
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const text = result[0].transcript.trim();
+        showHeard(text);
+        if (result.isFinal) submitSpoken(text);
+      }
+    };
+
+    voice.recognition = recognition;
+    el("mic").hidden = false;
+    el("mic").addEventListener("click", () => {
+      if (voice.wanted) { voice.wanted = false; stopVoice(); }
+      else { voice.wanted = true; startVoice(); }
+    });
+  }
+
+  function startVoice() {
+    if (!voice.recognition || voice.running || !voice.wanted) return;
+    try { voice.recognition.start(); } catch (error) { /* already starting */ }
+  }
+
+  function stopVoice() {
+    showHeard("");
+    if (!voice.recognition || !voice.running) return;
+    try { voice.recognition.stop(); } catch (error) { /* already stopped */ }
+  }
+
+  function listenWhileAnswering(state) {
+    if (!voice.recognition) return;
+    const should = LISTENING_STATES.includes(state);
+    if (should === voice.wanted) return;
+    voice.wanted = should;
+    if (should) startVoice(); else stopVoice();
   }
 
   function send(payload) {
@@ -312,7 +464,9 @@ const Tenfold = (() => {
   el("video").addEventListener("load", fitOverlay);
   setInterval(fitOverlay, 1000);
 
-  return { connect, render, send, get typed() { return typed; } };
+  setupVoice();
+
+  return { connect, render, send, parseNumber, voice, get typed() { return typed; } };
 })();
 
 Tenfold.connect();
