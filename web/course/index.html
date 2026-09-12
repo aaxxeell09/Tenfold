@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Tenfold · Learn</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=3">
+</head>
+<body>
+<div class="app">
+  <aside class="side" aria-label="Main">
+    <div class="wordmark">tenfold</div>
+    <nav class="side-nav">
+      <a class="nav-item is-active" href="#learn"><span class="nav-icon" data-icon="home"></span><span>Learn</span></a>
+      <a class="nav-item" href="#board"><span class="nav-icon" data-icon="grid"></span><span>Board</span></a>
+      <a class="nav-item" href="#profile"><span class="nav-icon" data-icon="user"></span><span>Profile</span></a>
+    </nav>
+    <button class="dev-reset" data-action="reset" hidden>Reset progress</button>
+  </aside>
+
+  <main class="center" id="learn">
+    <div class="topstats" id="topstats"></div>
+    <div id="course"></div>
+  </main>
+
+  <aside class="right">
+    <div class="stats" id="stats"></div>
+    <section class="panel" id="quest"></section>
+    <section class="panel panel-camera">
+      <div class="panel-camera-art" data-icon="camera"></div>
+      <div>
+        <h3>Use your real hands</h3>
+        <p>Soon the camera checks your fingers while you count.</p>
+      </div>
+    </section>
+  </aside>
+</div>
+
+<nav class="tabbar" aria-label="Main">
+  <a class="tab is-active" href="#learn" aria-label="Learn"><span class="nav-icon" data-icon="home"></span></a>
+  <a class="tab" href="#board" aria-label="Board"><span class="nav-icon" data-icon="grid"></span></a>
+  <a class="tab" href="#profile" aria-label="Profile"><span class="nav-icon" data-icon="user"></span></a>
+</nav>
+
+<section class="lesson" id="lesson" hidden aria-live="polite"></section>
+<section class="finish" id="finish" hidden></section>
+<div class="toast" id="toast" role="status"></div>
+
+<script src="levels.js?v=3"></script>
+<script src="app.js?v=3"></script>
+</body>
+</html>
