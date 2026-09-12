@@ -17,7 +17,7 @@ def make_repo(tmp_path: Path) -> Path:
     """A throwaway copy of the repo with synthetic train/heldout data and one baseline commit."""
     from loop import synth
     dst = tmp_path / "tenfold"
-    for rel in ["classifier", "eval", "loop", "lesson", "tests"]:
+    for rel in ["classifier", "eval", "loop", "lesson", "tests", "tenfold"]:
         shutil.copytree(REPO / rel, dst / rel, ignore=shutil.ignore_patterns("__pycache__", "results", "transcripts"))
     (dst / "data").mkdir()
     synth.write_jsonl(synth.synthetic_dataset(seed=1, session="train"), dst / "data" / "samples.jsonl")
