@@ -31,6 +31,7 @@ pass for the real one.
 
 Usage:
     python data/capture.py --session axel_1 --person axel
+    python data/capture.py --session axel_1 --person axel --blocks side_near,top_near
     python data/capture.py --session axel_1 --person axel --resume
     python data/capture.py --session guest_3 --person guest_3 --heldout
     python data/capture.py --dry-run
@@ -68,6 +69,10 @@ STEP_S = PREP_S + DROP_S + KEEP_S
 
 ANGLES = ("front", "top", "side")
 DISTANCES = ("near", "far")
+# One block is one camera angle at one distance, named angle_distance.
+ALL_BLOCKS: tuple[tuple[str, str], ...] = tuple(
+    (angle, distance) for angle in ANGLES for distance in DISTANCES
+)
 
 # One transition window kept out of this many.
 TRANSITION_KEEP_ONE_IN = 5
@@ -181,6 +186,39 @@ def label_for(phase: str, item: Item) -> tuple[str, str, dict[str, Any]] | None:
     return None
 
 
+def block_name(angle: str, distance: str) -> str:
+    return f"{angle}_{distance}"
+
+
+def parse_blocks(spec: str | None) -> list[tuple[str, str]]:
+    """The blocks to record, in the order asked for.
+
+    None or an empty value means every block in the standard order. Otherwise a
+    comma separated list of angle_distance names, kept in the order given, so a
+    session can pick up the two blocks that are missing without walking the four
+    that are already recorded.
+    """
+    if not spec or not spec.strip():
+        return list(ALL_BLOCKS)
+
+    known = {block_name(a, d): (a, d) for a, d in ALL_BLOCKS}
+    blocks: list[tuple[str, str]] = []
+    for raw in spec.split(","):
+        name = raw.strip().lower()
+        if not name:
+            continue
+        if name not in known:
+            raise ValueError(
+                f"unknown block {name!r}. Known blocks: " + ", ".join(known)
+            )
+        block = known[name]
+        if block not in blocks:
+            blocks.append(block)
+    if not blocks:
+        raise ValueError("--blocks was given but named no block")
+    return blocks
+
+
 def phase_caption(phase: str, elapsed: float) -> str:
     """Line 2 of the banner: what to do now, and how long is left to do it."""
     if phase == PHASE_PREP:
@@ -291,27 +329,28 @@ class SampleWriter:
 # --- capture ----------------------------------------------------------------
 
 
-def run_dry(schedule: list[Item], fps: float = 30.0) -> None:
+def run_dry(schedule: list[Item], blocks: list[tuple[str, str]],
+            fps: float = 30.0) -> None:
     """Rehearse the prompts and the timing with no camera and no file."""
     per_step = sum(1 for _, phase in timeline(fps=fps) if phase == PHASE_HOLD) // WINDOW_SIZE
-    blocks = len(ANGLES) * len(DISTANCES)
-    print(f"dry run: {len(schedule)} steps per block, {blocks} blocks, "
+    print(f"dry run: {len(schedule)} steps per block, {len(blocks)} blocks, "
           f"{STEP_S:.1f} s per step")
-    print(f"expected windows: about {per_step * len(schedule) * blocks} class windows "
+    print("blocks: " + ", ".join(block_name(a, d) for a, d in blocks))
+    print(f"expected windows: about {per_step * len(schedule) * len(blocks)} class windows "
           f"at {fps:.0f} fps, plus transitions at one in {TRANSITION_KEEP_ONE_IN}")
-    for angle in ANGLES:
-        for distance in DISTANCES:
-            print(f"\n=== block: angle {angle}, distance {distance} ===")
-            for step, item in enumerate(schedule):
-                print(f"[{step + 1}/{len(schedule)}] {item.prompt}")
-                for phase in (PHASE_PREP, PHASE_DROP, PHASE_HOLD):
-                    seconds = {PHASE_PREP: PREP_S, PHASE_DROP: DROP_S, PHASE_HOLD: KEEP_S}[phase]
-                    print(f"    {phase:<5} {seconds:.1f} s")
-                    time.sleep(seconds)
+    for angle, distance in blocks:
+        print(f"\n=== block: angle {angle}, distance {distance} ===")
+        for step, item in enumerate(schedule):
+            print(f"[{step + 1}/{len(schedule)}] {item.prompt}")
+            for phase in (PHASE_PREP, PHASE_DROP, PHASE_HOLD):
+                seconds = {PHASE_PREP: PREP_S, PHASE_DROP: DROP_S, PHASE_HOLD: KEEP_S}[phase]
+                print(f"    {phase:<5} {seconds:.1f} s")
+                time.sleep(seconds)
 
 
 def run_capture(session: str, person: str, schedule: list[Item], writer: SampleWriter,
-                resume: bool, camera_index: int | None = None) -> int:
+                resume: bool, blocks: list[tuple[str, str]] | None = None,
+                camera_index: int | None = None) -> int:
     """The real capture loop. Returns a process exit code."""
     import cv2
 
@@ -326,31 +365,27 @@ def run_capture(session: str, person: str, schedule: list[Item], writer: SampleW
     detector = HandDetector(num_hands=2)
     normalizer = Normalizer()
     transition_seen = 0
-    quit_requested = False
 
     try:
-        for angle in ANGLES:
-            if quit_requested:
+        for angle, distance in (blocks if blocks is not None else list(ALL_BLOCKS)):
+            if not _wait_for_block(camera, angle, distance):
                 break
-            for distance in DISTANCES:
-                if quit_requested:
-                    break
-                if not _wait_for_block(camera, angle, distance):
+            quit_requested = False
+            for step, item in enumerate(schedule):
+                if resume and writer.already_done(
+                    hold_id(session, item.cls, angle, distance, step)
+                ):
+                    continue
+                normalizer.reset()
+                outcome, transition_seen = _run_step(
+                    camera, detector, normalizer, writer, session, person,
+                    angle, distance, step, item, len(schedule), transition_seen,
+                )
+                if outcome == "quit":
                     quit_requested = True
                     break
-                for step, item in enumerate(schedule):
-                    if resume and writer.already_done(
-                        hold_id(session, item.cls, angle, distance, step)
-                    ):
-                        continue
-                    normalizer.reset()
-                    outcome, transition_seen = _run_step(
-                        camera, detector, normalizer, writer, session, person,
-                        angle, distance, step, item, len(schedule), transition_seen,
-                    )
-                    if outcome == "quit":
-                        quit_requested = True
-                        break
+            if quit_requested:
+                break
     finally:
         detector.close()
         camera.release()
@@ -478,6 +513,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--person", default="", help="who is in front of the camera")
     parser.add_argument("--heldout", action="store_true",
                         help=f"write test rows to {HELDOUT_PATH} instead of the repo dataset")
+    parser.add_argument("--blocks", default="",
+                        help="comma separated angle_distance blocks to run, in that "
+                             "order, for example side_near,top_near. Default: all of "
+                             + ", ".join(block_name(a, d) for a, d in ALL_BLOCKS))
     parser.add_argument("--resume", action="store_true",
                         help="skip holds already recorded for this session")
     parser.add_argument("--dry-run", action="store_true",
@@ -486,9 +525,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="camera index, probed over 0 to 3 when not given")
     args = parser.parse_args(argv)
 
+    try:
+        blocks = parse_blocks(args.blocks)
+    except ValueError as error:
+        parser.error(str(error))
+
     schedule = build_schedule()
     if args.dry_run:
-        run_dry(schedule)
+        run_dry(schedule, blocks)
         return 0
 
     # F3: the held out set is recorded by someone who is not the dataset author,
@@ -500,7 +544,7 @@ def main(argv: list[str] | None = None) -> int:
     writer = SampleWriter(path, split)
     try:
         return run_capture(args.session, args.person or args.session, schedule, writer,
-                           args.resume, args.camera)
+                           args.resume, blocks, args.camera)
     finally:
         writer.close()
 

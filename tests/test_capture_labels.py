@@ -17,6 +17,7 @@ import pytest
 
 from classifier.schema import KINDS, HandFrame, Window, window_from_json
 from data.capture import (
+    ALL_BLOCKS,
     DROP_S,
     HELDOUT_PATH,
     KEEP_S,
@@ -30,9 +31,11 @@ from data.capture import (
     TRANSITION_KIND,
     Item,
     SampleWriter,
+    block_name,
     build_schedule,
     hold_id,
     label_for,
+    parse_blocks,
     phase_at,
     resolve_target,
     timeline,
@@ -192,3 +195,49 @@ def test_resume_skips_holds_already_recorded(tmp_path):
     assert not reopened.already_done(hold_id("axel_1", "8x7", "front", "far", 3))
     assert reopened.next_index == 1, "ids continue where the file stopped"
     reopened.close()
+
+
+# --- which blocks to record --------------------------------------------------
+
+
+def test_no_blocks_given_means_all_six_in_the_standard_order():
+    assert parse_blocks(None) == list(ALL_BLOCKS)
+    assert parse_blocks("") == list(ALL_BLOCKS)
+    assert parse_blocks("   ") == list(ALL_BLOCKS)
+    assert len(ALL_BLOCKS) == 6
+
+
+def test_blocks_run_in_the_order_they_were_asked_for():
+    """The point of the flag: pick up the two blocks that are missing, in that
+    order, without walking the four already recorded."""
+    asked = parse_blocks("side_near,top_near")
+    assert asked == [("side", "near"), ("top", "near")]
+    assert asked != [b for b in ALL_BLOCKS if b in asked], "the default order is not kept"
+
+
+def test_block_names_are_forgiving_about_spacing_and_case():
+    assert parse_blocks(" Side_Near , top_near ") == [("side", "near"), ("top", "near")]
+    assert parse_blocks("front_far,") == [("front", "far")]
+
+
+def test_a_block_named_twice_is_recorded_once():
+    assert parse_blocks("top_far,top_far") == [("top", "far")]
+
+
+def test_an_unknown_block_is_refused_and_says_what_exists():
+    with pytest.raises(ValueError) as excinfo:
+        parse_blocks("side_middle")
+    message = str(excinfo.value)
+    assert "side_middle" in message
+    assert "side_near" in message and "front_far" in message
+
+
+def test_a_list_that_names_nothing_is_refused():
+    with pytest.raises(ValueError):
+        parse_blocks(",,")
+
+
+def test_block_names_match_the_angle_and_distance():
+    assert block_name("side", "near") == "side_near"
+    assert {block_name(a, d) for a, d in ALL_BLOCKS} == {
+        "front_near", "front_far", "top_near", "top_far", "side_near", "side_far"}
