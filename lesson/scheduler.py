@@ -1,0 +1,855 @@
+"""Tally's brain: what to ask next, and what she noticed. No I/O, no clock.
+
+Beyond SPEC.md, which defers the learner model to the roadmap as amendment F7.
+Built on request. Everything here is a pure function of the state passed in plus
+the time passed in, so a whole week of sessions replays identically in a test and
+the demo is reproducible.
+
+Two dimensions are tracked apart, because they fail for different reasons and a
+child who can compute 8 x 7 but cannot hold the pose needs the opposite help of
+one who holds it and miscounts:
+
+  pose   per ordered pair, key "8x7" meaning 8 on the left hand, 7 on the right,
+         25 of them. A pose error only ever moves pose mastery.
+  math   per unordered fact, key "6x7" with the smaller factor first, 15 of them.
+         A math error only ever moves math mastery.
+
+Mastery is 0 to 5. A first try success adds one, a success that needed a hint
+adds nothing, an error takes one off and never goes below zero.
+
+Confidence rule, on math only, as specified: mastery only rises when the success
+lands in a later session than the previous rise. Five correct answers inside one
+session are one step, not five, because repeating a fact you were just shown is
+recall, not memory.
+
+Spacing by math mastery: 0 later in this session, 1 the next session, 2 one day,
+3 three days, 4 seven days, 5 fourteen days. The first two are session counted
+rather than clock counted, which is why a record carries both due_session and
+due_at: a child who practises twice in one evening should not be shown a mastery
+1 fact again that evening, and a child who skips three days is not punished.
+"""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Iterable, Sequence
+
+# --- the material ------------------------------------------------------------
+
+FACTORS = (6, 7, 8, 9, 10)
+MAX_MASTERY = 5
+
+# Easiest first. Fixed, and only overridden once there is enough personal data.
+DIFFICULTY_ORDER: tuple[str, ...] = (
+    "10x10", "6x10", "7x10", "8x10", "9x10", "9x9", "8x8", "7x7",
+    "8x9", "7x8", "6x9", "7x9", "6x8", "6x6", "6x7",
+)
+PERSONAL_ORDER_AFTER_SESSIONS = 3
+
+SPACING_DAYS = {2: 1, 3: 3, 4: 7, 5: 14}
+
+# --- session shape -----------------------------------------------------------
+
+SESSION_MIN_EXERCISES = 6
+SESSION_MAX_EXERCISES = 10
+SESSION_HARD_STOP_S = 6 * 60
+CONSECUTIVE_ERRORS_TO_STOP = 3
+SLOW_FACTOR = 2.0
+FAST_SUCCESS_S = 5.0
+FAST_SUCCESSES_FOR_LEVEL_UP = 3
+LEVEL_UP_STEPS = 2
+RETRY_AFTER_EXERCISES = 2
+MASTERED_FROM = 4
+ERRORS_BEFORE_CONFIDENCE = 2
+NEW_FACT_SUCCESSES_REQUIRED = 2
+# The next day plan: three due, one new, one mastered.
+NEXT_DAY_PLAN = ("due", "due", "due", "new", "mastered")
+
+# --- reactions, phrased by lesson/tally.py -----------------------------------
+
+REACTION_RETRY = "retry"
+REACTION_REVIEW = "review"
+REACTION_CONFIDENCE = "confidence"
+REACTION_NEXT_NEW = "next_new"
+REACTION_LEVEL_UP = "level_up"
+REACTION_HINT_1 = "hint_1"
+REACTION_HINT_2 = "hint_2"
+REACTION_HINT_3 = "hint_3"
+REACTION_SAME_HAND_TWICE = "same_hand_twice"
+REACTION_RECOUNT_TENS = "recount_tens"
+REACTION_RECOUNT_UNITS = "recount_units"
+REACTION_CANNOT_SEE = "cannot_see"
+REACTION_END_SUCCESS = "end_success"
+REACTION_END_TIRED = "end_tired"
+
+HINT_EVENTS = (REACTION_HINT_1, REACTION_HINT_2, REACTION_HINT_3)
+CANNOT_SEE_AFTER_S = 2.0
+
+
+def fact_key(a: int, b: int) -> str:
+    """Unordered, smaller factor first."""
+    low, high = sorted((a, b))
+    return f"{low}x{high}"
+
+
+def pose_key(left: int, right: int) -> str:
+    """Ordered: which finger on which hand."""
+    return f"{left}x{right}"
+
+
+def factors_of(key: str) -> tuple[int, int]:
+    a, b = key.split("x")
+    return int(a), int(b)
+
+
+def all_facts() -> tuple[str, ...]:
+    return DIFFICULTY_ORDER
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(moment: datetime | None) -> str | None:
+    return moment.isoformat() if moment else None
+
+
+def _parse(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+# --- state -------------------------------------------------------------------
+
+
+@dataclass
+class Attempt:
+    at: str
+    correct: bool
+    hinted: bool
+    response_time: float
+    session: int
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "Attempt":
+        return cls(
+            at=str(raw.get("at", "")),
+            correct=bool(raw.get("correct", False)),
+            hinted=bool(raw.get("hinted", False)),
+            response_time=float(raw.get("response_time", 0.0)),
+            session=int(raw.get("session", 0)),
+        )
+
+
+@dataclass
+class Record:
+    """One pose or one fact. Keeps the last five attempts and nothing older."""
+
+    mastery: int = 0
+    attempts: list[Attempt] = field(default_factory=list)
+    due_at: str | None = None
+    due_session: int | None = None
+    last_increase_session: int | None = None
+
+    def log(self, attempt: Attempt) -> None:
+        self.attempts.append(attempt)
+        del self.attempts[:-5]
+
+    @property
+    def seen(self) -> bool:
+        return bool(self.attempts)
+
+    @property
+    def error_rate(self) -> float:
+        if not self.attempts:
+            return 0.0
+        return sum(1 for a in self.attempts if not a.correct) / len(self.attempts)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mastery": self.mastery,
+            "attempts": [asdict(a) for a in self.attempts],
+            "due_at": self.due_at,
+            "due_session": self.due_session,
+            "last_increase_session": self.last_increase_session,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "Record":
+        return cls(
+            mastery=max(0, min(MAX_MASTERY, int(raw.get("mastery", 0)))),
+            attempts=[Attempt.from_dict(a) for a in raw.get("attempts", [])][-5:],
+            due_at=raw.get("due_at"),
+            due_session=raw.get("due_session"),
+            last_increase_session=raw.get("last_increase_session"),
+        )
+
+
+ERROR_KINDS = ("wrong_left", "wrong_right", "no_contact", "tens_error",
+               "units_error", "hint_level_needed")
+
+
+@dataclass
+class LearnerState:
+    """Everything Tally remembers. Round trips through the page's localStorage."""
+
+    learner_id: str = ""
+    display_name: str | None = None
+    created_at: str = ""
+    sessions: int = 0
+    last_session_at: str | None = None
+    pose: dict[str, Record] = field(default_factory=dict)
+    math: dict[str, Record] = field(default_factory=dict)
+    error_profile: dict[str, int] = field(
+        default_factory=lambda: {kind: 0 for kind in ERROR_KINDS})
+
+    @classmethod
+    def new(cls, now: datetime, display_name: str | None = None) -> "LearnerState":
+        return cls(learner_id=uuid.uuid4().hex[:12], display_name=display_name,
+                   created_at=_iso(now) or "")
+
+    def fact(self, key: str) -> Record:
+        return self.math.setdefault(key, Record())
+
+    def pose_record(self, key: str) -> Record:
+        return self.pose.setdefault(key, Record())
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "learner_id": self.learner_id,
+            "display_name": self.display_name,
+            "created_at": self.created_at,
+            "sessions": self.sessions,
+            "last_session_at": self.last_session_at,
+            "pose": {k: v.to_dict() for k, v in self.pose.items()},
+            "math": {k: v.to_dict() for k, v in self.math.items()},
+            "error_profile": dict(self.error_profile),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None, now: datetime | None = None) -> "LearnerState":
+        """Anything missing or malformed becomes a fresh learner rather than an error:
+        this arrives from a browser's localStorage and must never break a lesson."""
+        if not isinstance(raw, dict) or not raw.get("learner_id"):
+            return cls.new(now or now_utc())
+        profile = {kind: 0 for kind in ERROR_KINDS}
+        for kind, count in (raw.get("error_profile") or {}).items():
+            if kind in profile:
+                profile[kind] = int(count)
+        return cls(
+            learner_id=str(raw["learner_id"]),
+            display_name=raw.get("display_name"),
+            created_at=str(raw.get("created_at", "")),
+            sessions=int(raw.get("sessions", 0)),
+            last_session_at=raw.get("last_session_at"),
+            pose={k: Record.from_dict(v) for k, v in (raw.get("pose") or {}).items()},
+            math={k: Record.from_dict(v) for k, v in (raw.get("math") or {}).items()},
+            error_profile=profile,
+        )
+
+
+# --- what the scheduler hands back -------------------------------------------
+
+
+@dataclass(frozen=True)
+class Pick:
+    """One exercise, and why Tally chose it."""
+
+    fact: str
+    left: int
+    right: int
+    reason: str
+    is_new: bool = False
+
+    @property
+    def pose(self) -> str:
+        return pose_key(self.left, self.right)
+
+    @property
+    def result(self) -> int:
+        return self.left * self.right
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"fact": self.fact, "left": self.left, "right": self.right,
+                "pose": self.pose, "reason": self.reason, "is_new": self.is_new}
+
+
+@dataclass
+class Outcome:
+    """What happened on one exercise, as the server saw it."""
+
+    fact: str
+    left: int
+    right: int
+    correct: bool
+    response_time: float = 0.0
+    hint_level: int = 0
+    pose_error: bool = False
+    math_error: bool = False
+    given: int | None = None
+
+
+@dataclass
+class SessionSummary:
+    reason: str
+    opened: list[str] = field(default_factory=list)
+    became_solid: list[str] = field(default_factory=list)
+    tomorrow: str | None = None
+    exercises: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"reason": self.reason, "opened": self.opened,
+                "became_solid": self.became_solid, "tomorrow": self.tomorrow,
+                "exercises": self.exercises}
+
+
+# --- ordering ----------------------------------------------------------------
+
+
+def fact_order(state: LearnerState) -> list[str]:
+    """New facts easiest first.
+
+    The fixed list until there is enough personal history, then the child's own
+    error rate leads and the fixed list only breaks ties. A fact never attempted
+    has an error rate of zero, so untouched facts keep their fixed order among
+    themselves and sit ahead of the ones this child actually gets wrong.
+    """
+    if state.sessions < PERSONAL_ORDER_AFTER_SESSIONS:
+        return list(DIFFICULTY_ORDER)
+    index = {key: position for position, key in enumerate(DIFFICULTY_ORDER)}
+    return sorted(
+        DIFFICULTY_ORDER,
+        key=lambda key: (state.math.get(key, Record()).error_rate, index[key]),
+    )
+
+
+def is_due(record: Record, now: datetime, session: int) -> bool:
+    if not record.seen:
+        return False
+    if record.due_session is not None:
+        return session >= record.due_session
+    moment = _parse(record.due_at)
+    return moment is not None and now >= moment
+
+
+def schedule_next(record: Record, now: datetime, session: int) -> None:
+    """Set when this fact comes back, from its mastery."""
+    record.due_at = None
+    record.due_session = None
+    if record.mastery <= 0:
+        record.due_session = session          # again later in this same session
+    elif record.mastery == 1:
+        record.due_session = session + 1      # the next session, whenever that is
+    else:
+        record.due_at = _iso(now + timedelta(days=SPACING_DAYS[record.mastery]))
+
+
+def apply_result(record: Record, correct: bool, hinted: bool, session: int,
+                 confidence_rule: bool) -> str:
+    """Move one mastery. Returns up, down or flat, for the summary."""
+    if not correct:
+        record.mastery = max(0, record.mastery - 1)
+        return "down"
+    if hinted:
+        return "flat"                          # helped is not known
+    if confidence_rule and record.last_increase_session is not None \
+            and session <= record.last_increase_session:
+        return "flat"                          # already rose this session
+    if record.mastery >= MAX_MASTERY:
+        return "flat"
+    record.mastery += 1
+    record.last_increase_session = session
+    return "up"
+
+
+# --- in exercise reactions ---------------------------------------------------
+
+
+def answer_reaction(expected: int, given: int | None) -> str | None:
+    """Which half of the count went wrong, from the number the child gave."""
+    if given is None or given == expected:
+        return None
+    if given // 10 != expected // 10:
+        return REACTION_RECOUNT_TENS
+    if given % 10 != expected % 10:
+        return REACTION_RECOUNT_UNITS
+    return None
+
+
+def hint_event(level: int) -> str | None:
+    """hint_1 names the finger, hint_2 ghosts it, hint_3 shows the whole gesture."""
+    if 1 <= level <= len(HINT_EVENTS):
+        return HINT_EVENTS[level - 1]
+    return None
+
+
+def pose_reaction(detected_left: int | None, detected_right: int | None,
+                  pick: Pick) -> str | None:
+    """The same number on both hands is its own mistake, and its own advice."""
+    if detected_left is None or detected_right is None:
+        return None
+    if detected_left == detected_right and pick.left != pick.right:
+        return REACTION_SAME_HAND_TWICE
+    return None
+
+
+# --- onboarding --------------------------------------------------------------
+
+ONBOARDING_FACT = "7x8"          # shown as 8 on the left, 7 on the right
+ONBOARDING_LEFT, ONBOARDING_RIGHT = 8, 7
+
+
+def onboarding_steps() -> list[dict[str, Any]]:
+    """The first session only: hello, the numbers, then one guided exercise."""
+    return [
+        {"kind": "greeting", "event": "intro"},
+        {"kind": "numbers", "event": "count_fingers", "fingers": list(FACTORS)},
+        {"kind": "guided", "event": "guided", "fact": ONBOARDING_FACT,
+         "left": ONBOARDING_LEFT, "right": ONBOARDING_RIGHT},
+    ]
+
+
+# --- the scheduler -----------------------------------------------------------
+
+
+class Scheduler:
+    """Picks the next exercise and remembers what happened. Deterministic."""
+
+    def __init__(self, state: LearnerState | None = None,
+                 now: datetime | None = None) -> None:
+        moment = now or now_utc()
+        self.state = state or LearnerState.new(moment)
+        self.session = self.state.sessions
+        self.started_at = moment
+        self.onboarding = False
+        self.plan: list[str] = []
+        self.opening_fact: str | None = None
+
+        self.history: list[Pick] = []
+        self.outcomes: list[Outcome] = []
+        self.retry_queue: list[tuple[int, str]] = []      # (serve at index, fact)
+        self.new_this_session: list[str] = []
+        self.new_results: list[bool] = []
+        self.fast_streak = 0
+        self.level_bonus = 0
+        self.consecutive_errors = 0
+        self.served_confidence = False
+        self.errors_since_confidence = 0
+        self.ending_on_success = False
+        self.previous_session_failures: set[str] = set()
+
+    # -- session lifecycle --
+
+    def start_session(self, now: datetime | None = None) -> dict[str, Any]:
+        moment = now or now_utc()
+        self.started_at = moment
+        self.state.sessions += 1
+        self.session = self.state.sessions
+        self.onboarding = self.session == 1
+        self.previous_session_failures = self._failures_in(self.session - 1)
+
+        last = _parse(self.state.last_session_at)
+        another_day = last is not None and last.date() < moment.date()
+        if self.session >= 2 and another_day:
+            self.plan = list(NEXT_DAY_PLAN)
+            self.opening_fact = self._most_fragile(self.session - 1)
+        else:
+            self.plan = []
+            self.opening_fact = None
+        return {
+            "session": self.session,
+            "onboarding": self.onboarding,
+            "steps": onboarding_steps() if self.onboarding else [],
+            "plan": list(self.plan),
+            "opening_fact": self.opening_fact,
+        }
+
+    def _failures_in(self, session: int) -> set[str]:
+        return {
+            key for key, record in self.state.math.items()
+            if any(a.session == session and not a.correct for a in record.attempts)
+        }
+
+    def _most_fragile(self, session: int) -> str | None:
+        """Lowest mastery among the facts touched last time, then most missed."""
+        touched = [
+            key for key, record in self.state.math.items()
+            if any(a.session == session for a in record.attempts)
+        ]
+        if not touched:
+            return None
+        order = {key: position for position, key in enumerate(DIFFICULTY_ORDER)}
+        return min(touched, key=lambda key: (self.state.math[key].mastery,
+                                             -self.state.math[key].error_rate,
+                                             order.get(key, 99)))
+
+    # -- picking --
+
+    def next_exercise(self, now: datetime | None = None) -> Pick | None:
+        """The next exercise, or None when the session is over."""
+        moment = now or now_utc()
+        stop = self._stop_reason(moment)
+        if stop and not self._owes_a_success():
+            return None
+        if stop:
+            # Always end on a success: one mastered fact, then the session ends.
+            self.ending_on_success = True
+            pick = self._mastered_pick() or self._any_pick()
+            if pick is None:
+                return None
+            pick = Pick(pick.fact, pick.left, pick.right, REACTION_CONFIDENCE)
+            self.history.append(pick)
+            return pick
+
+        pick = self._choose(moment)
+        if pick is None:
+            return None
+        if pick.is_new:
+            self.new_this_session.append(pick.fact)
+        self.history.append(pick)
+        return pick
+
+    def _owes_a_success(self) -> bool:
+        return bool(self.outcomes) and not self.outcomes[-1].correct \
+            and not self.ending_on_success
+
+    def _choose(self, now: datetime) -> Pick | None:
+        index = len(self.history)
+        for candidate, reason, is_new in self._candidates(now, index):
+            if self._allowed(candidate):
+                left, right = self._orientation(candidate)
+                return Pick(candidate, left, right, reason, is_new)
+        # Nothing satisfied the constraints, so relax them rather than stall.
+        fallback = self._any_pick()
+        return fallback
+
+    def _candidates(self, now: datetime, index: int) -> Iterable[tuple[str, str, bool]]:
+        """Every candidate in priority order, best first."""
+        # Two errors in a row preempt everything else: a mastered fact, to break
+        # the spiral. The listed order puts this third, after retry and after the
+        # due queue, where it could never fire, because a failed fact is queued
+        # for retry and a mastery 0 fact is due in the same session, so one of the
+        # two always has a candidate. The stop rule that counts errors after a
+        # confidence exercise would never trigger either. Handing the child back
+        # the fact they just failed twice is also the opposite of the intent.
+        if self.consecutive_errors >= ERRORS_BEFORE_CONFIDENCE:
+            for key in self._mastered_facts():
+                yield key, REACTION_CONFIDENCE, False
+
+        # The session opens on the most fragile fact of the previous session.
+        if index == 0 and self.opening_fact:
+            yield self.opening_fact, REACTION_REVIEW, False
+
+        # 1. a fact queued for retry, served two exercises after the error
+        for due_index, key in self.retry_queue:
+            if index >= due_index:
+                yield key, REACTION_RETRY, False
+
+        # 2. the oldest due fact
+        for key in self._due_facts(now):
+            yield key, REACTION_REVIEW, False
+
+        # 4. the next new fact, only once the last two new ones landed first try
+        if self._may_open_a_new_fact():
+            new = self._next_new_fact()
+            if new is not None:
+                reason = REACTION_LEVEL_UP if self.level_bonus else REACTION_NEXT_NEW
+                yield new, reason, True
+
+        # 5. otherwise something half learned
+        for key in self._facts_at_mastery(1, 2):
+            yield key, REACTION_REVIEW, False
+
+        # and finally anything already seen, so a session never stalls
+        for key in fact_order(self.state):
+            if self.state.math.get(key, Record()).seen:
+                yield key, REACTION_REVIEW, False
+
+    def _due_facts(self, now: datetime) -> list[str]:
+        due = [key for key, record in self.state.math.items()
+               if is_due(record, now, self.session)]
+        order = {key: position for position, key in enumerate(DIFFICULTY_ORDER)}
+        return sorted(due, key=lambda key: (self._last_seen(key), order.get(key, 99)))
+
+    def _last_seen(self, key: str) -> str:
+        record = self.state.math.get(key)
+        return record.attempts[-1].at if record and record.attempts else ""
+
+    def _mastered_facts(self) -> list[str]:
+        return [key for key in fact_order(self.state)
+                if self.state.math.get(key, Record()).mastery >= MASTERED_FROM]
+
+    def _facts_at_mastery(self, low: int, high: int) -> list[str]:
+        return [key for key in fact_order(self.state)
+                if low <= self.state.math.get(key, Record()).mastery <= high
+                and self.state.math.get(key, Record()).seen]
+
+    def _may_open_a_new_fact(self) -> bool:
+        if len(self.new_results) < NEW_FACT_SUCCESSES_REQUIRED:
+            return True                       # nothing opened yet, go ahead
+        return all(self.new_results[-NEW_FACT_SUCCESSES_REQUIRED:])
+
+    def _next_new_fact(self) -> str | None:
+        unseen = [key for key in fact_order(self.state)
+                  if not self.state.math.get(key, Record()).seen]
+        if not unseen:
+            return None
+        step = min(self.level_bonus, len(unseen) - 1)
+        self.level_bonus = 0
+        return unseen[step]
+
+    def _mastered_pick(self) -> Pick | None:
+        for key in self._mastered_facts():
+            left, right = self._orientation(key)
+            return Pick(key, left, right, REACTION_CONFIDENCE)
+        return None
+
+    def _any_pick(self) -> Pick | None:
+        """The relief valve: a session must never stall for want of a candidate.
+
+        It still respects both pick rules when any fact satisfies them, and only
+        drops the repeated factor rule when literally nothing else is legal.
+        """
+        for key in fact_order(self.state):
+            if self._allowed(key):
+                left, right = self._orientation(key)
+                return Pick(key, left, right, REACTION_REVIEW)
+        previous = self.history[-1].fact if self.history else None
+        for key in fact_order(self.state):
+            if key != previous:
+                left, right = self._orientation(key)
+                return Pick(key, left, right, REACTION_REVIEW)
+        return None
+
+    def _orientation(self, key: str) -> tuple[int, int]:
+        """Alternate the two orientations of a fact across its attempts."""
+        low, high = factors_of(key)
+        if low == high:
+            return low, high
+        seen = len(self.state.math.get(key, Record()).attempts)
+        return (low, high) if seen % 2 == 0 else (high, low)
+
+    def _allowed(self, key: str) -> bool:
+        if self.history and self.history[-1].fact == key:
+            return False                      # never the same fact twice in a row
+        if len(self.history) >= 2:
+            recent = set(factors_of(self.history[-1].fact)) & set(factors_of(self.history[-2].fact))
+            if recent & set(factors_of(key)):
+                return False                  # never the same factor three in a row
+        return True
+
+    # -- recording --
+
+    def record(self, outcome: Outcome, now: datetime | None = None) -> dict[str, Any]:
+        moment = now or now_utc()
+        self.outcomes.append(outcome)
+        hinted = outcome.hint_level > 0
+        attempt = Attempt(at=_iso(moment) or "", correct=outcome.correct,
+                          hinted=hinted, response_time=outcome.response_time,
+                          session=self.session)
+
+        pose = self.state.pose_record(pose_key(outcome.left, outcome.right))
+        fact = self.state.fact(outcome.fact)
+        pose.log(attempt)
+        fact.log(attempt)
+
+        # A pose error only moves pose mastery, a math error only moves math.
+        pose_moved = "flat"
+        math_moved = "flat"
+        if outcome.pose_error:
+            pose_moved = apply_result(pose, False, hinted, self.session, False)
+        elif outcome.correct:
+            pose_moved = apply_result(pose, True, hinted, self.session, False)
+        if outcome.math_error:
+            math_moved = apply_result(fact, False, hinted, self.session, True)
+        elif outcome.correct:
+            math_moved = apply_result(fact, True, hinted, self.session, True)
+        schedule_next(fact, moment, self.session)
+
+        self._count_errors(outcome)
+        # The index of the exercise being recorded, not the one after it: a retry
+        # due "two exercises later" has to land on the third, not the fourth.
+        index = len(self.history) - 1
+        if outcome.correct:
+            self.consecutive_errors = 0
+            if not hinted and outcome.response_time <= FAST_SUCCESS_S:
+                self.fast_streak += 1
+                if self.fast_streak >= FAST_SUCCESSES_FOR_LEVEL_UP:
+                    self.fast_streak = 0
+                    self.level_bonus = LEVEL_UP_STEPS
+            else:
+                self.fast_streak = 0
+        else:
+            self.fast_streak = 0
+            self.consecutive_errors += 1
+            if self.served_confidence:
+                self.errors_since_confidence += 1
+            self.retry_queue.append((index + RETRY_AFTER_EXERCISES, outcome.fact))
+
+        self.retry_queue = [(at, key) for at, key in self.retry_queue
+                            if key != outcome.fact or at > index]
+        if self.history and self.history[-1].reason == REACTION_CONFIDENCE:
+            self.served_confidence = True
+        if outcome.fact in self.new_this_session and \
+                len(self.new_results) < len(self.new_this_session):
+            self.new_results.append(outcome.correct and not hinted)
+
+        return {"pose": pose_moved, "math": math_moved,
+                "pose_mastery": pose.mastery, "math_mastery": fact.mastery}
+
+    def _count_errors(self, outcome: Outcome) -> None:
+        profile = self.state.error_profile
+        if outcome.hint_level:
+            profile["hint_level_needed"] += outcome.hint_level
+        if outcome.pose_error:
+            profile["wrong_left" if outcome.left != outcome.right else "wrong_right"] += 1
+        if outcome.math_error and outcome.given is not None:
+            reaction = answer_reaction(outcome.left * outcome.right, outcome.given)
+            if reaction == REACTION_RECOUNT_TENS:
+                profile["tens_error"] += 1
+            elif reaction == REACTION_RECOUNT_UNITS:
+                profile["units_error"] += 1
+
+    def note_pose_error(self, kind: str) -> None:
+        """wrong_left, wrong_right or no_contact, straight from the engine event."""
+        if kind in self.state.error_profile:
+            self.state.error_profile[kind] += 1
+
+    # -- stopping --
+
+    def _stop_reason(self, now: datetime) -> str | None:
+        done = len(self.outcomes)
+        if (now - self.started_at).total_seconds() >= SESSION_HARD_STOP_S:
+            return REACTION_END_TIRED
+        if done >= SESSION_MAX_EXERCISES:
+            return REACTION_END_SUCCESS
+        if done < SESSION_MIN_EXERCISES:
+            return None
+        if self.served_confidence and self.errors_since_confidence >= CONSECUTIVE_ERRORS_TO_STOP:
+            return REACTION_END_TIRED
+        if self._slowing_down():
+            return REACTION_END_TIRED
+        if self.plan and done >= len(self.plan):
+            return REACTION_END_SUCCESS
+        return REACTION_END_SUCCESS
+
+    def _slowing_down(self) -> bool:
+        times = [o.response_time for o in self.outcomes if o.response_time > 0]
+        if len(times) < 6:
+            return False
+        early = sum(times[:3]) / 3
+        late = sum(times[-3:]) / 3
+        return early > 0 and late >= SLOW_FACTOR * early
+
+    def end_session(self, now: datetime | None = None) -> SessionSummary:
+        moment = now or now_utc()
+        reason = self._stop_reason(moment) or REACTION_END_SUCCESS
+        if self.outcomes and not self.outcomes[-1].correct:
+            reason = REACTION_END_TIRED
+        self.state.last_session_at = _iso(moment)
+
+        solid = [key for key in self.state.math
+                 if self.state.math[key].mastery >= MASTERED_FROM
+                 and any(a.session == self.session for a in self.state.math[key].attempts)]
+        weak = [o.fact for o in self.outcomes if not o.correct]
+        tomorrow = weak[-1] if weak else (self._most_fragile(self.session) or None)
+        return SessionSummary(reason=reason, opened=list(self.new_this_session),
+                              became_solid=solid, tomorrow=tomorrow,
+                              exercises=len(self.outcomes))
+
+    # -- metrics --
+
+    def metrics(self) -> dict[str, Any]:
+        total = len(self.outcomes)
+        first_try = sum(1 for o in self.outcomes if o.correct and not o.hint_level)
+        times = [o.response_time for o in self.outcomes if o.response_time > 0]
+        retained = sorted(
+            key for key in self.previous_session_failures
+            if any(o.fact == key and o.correct and not o.hint_level for o in self.outcomes)
+        )
+        return {
+            "session": self.session,
+            "exercises": total,
+            "first_try_success": first_try,
+            "first_try_rate": round(first_try / total, 3) if total else 0.0,
+            "hint_level_needed": sum(o.hint_level for o in self.outcomes),
+            "pose_errors": sum(1 for o in self.outcomes if o.pose_error),
+            "math_errors": sum(1 for o in self.outcomes if o.math_error),
+            "response_time": round(sum(times) / len(times), 2) if times else 0.0,
+            "retention": retained,
+            "retention_rate": (round(len(retained) / len(self.previous_session_failures), 3)
+                               if self.previous_session_failures else None),
+        }
+
+
+# --- demo mode ---------------------------------------------------------------
+
+DEFAULT_SCENARIO = "demo/scenario.json"
+
+
+class ScriptedScheduler(Scheduler):
+    """The same interface, but the sequence comes from a file.
+
+    The three minute demo has to run the same way every time, on a stage, with
+    the same beats. Recording and metrics stay the real ones, so the demo still
+    exercises the code the lesson uses.
+    """
+
+    def __init__(self, scenario: dict[str, Any], state: LearnerState | None = None,
+                 now: datetime | None = None) -> None:
+        super().__init__(state=state, now=now)
+        self.scenario = scenario
+        self.script = [
+            Pick(fact=str(step["fact"]), left=int(step["left"]), right=int(step["right"]),
+                 reason=str(step.get("reason", REACTION_REVIEW)),
+                 is_new=bool(step.get("is_new", False)))
+            for step in scenario.get("exercises", [])
+        ]
+        self.cursor = 0
+
+    @classmethod
+    def load(cls, path: Any, state: LearnerState | None = None,
+             now: datetime | None = None) -> "ScriptedScheduler":
+        import json
+        from pathlib import Path
+
+        raw = json.loads(Path(path).read_text(encoding="utf-8"))
+        return cls(raw, state=state, now=now)
+
+    def start_session(self, now: datetime | None = None) -> dict[str, Any]:
+        started = super().start_session(now)
+        # The demo never plays the onboarding, whatever the stored state says.
+        self.onboarding = bool(self.scenario.get("onboarding", False))
+        started["onboarding"] = self.onboarding
+        started["steps"] = onboarding_steps() if self.onboarding else []
+        started["plan"] = [step.fact for step in self.script]
+        started["opening_fact"] = self.script[0].fact if self.script else None
+        return started
+
+    def next_exercise(self, now: datetime | None = None) -> Pick | None:
+        if self.cursor >= len(self.script):
+            return None
+        pick = self.script[self.cursor]
+        self.cursor += 1
+        if pick.is_new:
+            self.new_this_session.append(pick.fact)
+        self.history.append(pick)
+        return pick
+
+    def end_session(self, now: datetime | None = None) -> SessionSummary:
+        summary = super().end_session(now)
+        end = self.scenario.get("end") or {}
+        return SessionSummary(
+            reason=str(end.get("reason", summary.reason)),
+            opened=list(end.get("opened", summary.opened)),
+            became_solid=list(end.get("became_solid", summary.became_solid)),
+            tomorrow=end.get("tomorrow", summary.tomorrow),
+            exercises=len(self.outcomes),
+        )

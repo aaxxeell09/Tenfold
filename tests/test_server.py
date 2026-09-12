@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from app import server
 from classifier.schema import HandFrame, Window
+from lesson import tally
 from lesson.engine import Engine, Exercise
 
 
@@ -40,7 +41,8 @@ def test_build_message_carries_everything_the_page_renders():
     message = server.build_message(update, fingers, hands_seen=2)
 
     assert set(message) == {"type", "state", "exercise", "tally", "wrong", "match",
-                            "answer", "reasoning", "fingers"}
+                            "answer", "reasoning", "fingers", "reason", "reaction",
+                            "hint_level", "fact", "session"}
     assert message["state"] == "wrong_pose"
     assert message["exercise"] == "8 x 7"
     assert message["wrong"] == [{"hand": "right", "number": 9}]
@@ -185,3 +187,63 @@ async def _await_state(ws, state: str, timeout: float = 6.0):
         if message["state"] == state:
             return message
     raise AssertionError(f"never reached {state}")
+
+
+# --- the scheduler driving the lesson ----------------------------------------
+
+
+def test_the_scheduler_picks_the_exercise_and_says_why():
+    from lesson.scheduler import Pick
+
+    engine = Engine([Exercise(8, 7)])
+    engine.start()
+    update = engine.snapshot()
+    pick = Pick("7x8", 8, 7, "next_new", is_new=True)
+    message = server.build_message(update, [], hands_seen=0, reaction="hint_1",
+                                   pick=pick, hint_level=1, session=3)
+    assert message["fact"] == "7x8"
+    assert message["reason"] == "next_new"
+    assert message["reaction"] == "hint_1"
+    assert message["hint_level"] == 1
+    assert message["session"] == 3
+    # the reaction wins over the screen state for what Tally says
+    assert message["tally"] == tally.phrase("hint_1", {"hint": update.hint})
+
+
+def test_demo_mode_loads_the_fixed_scenario():
+    from lesson.scheduler import ScriptedScheduler
+
+    scheduler = server.make_scheduler(demo=True)
+    assert isinstance(scheduler, ScriptedScheduler)
+    scheduler.start_session()
+    assert scheduler.next_exercise().fact == "7x8"
+    assert server.make_scheduler(demo=False).__class__.__name__ == "Scheduler"
+
+
+def test_a_session_ends_with_the_state_for_the_page_to_store():
+    """The page keeps the learner record, the server keeps nothing."""
+    async def scenario():
+        app = server.create_app(mock=True, demo=True)
+        srv, client = await _client(app)
+        try:
+            ws = await client.ws_connect("/ws")
+            await ws.send_json({"type": "hello", "state": None})
+            end = None
+            deadline = asyncio.get_running_loop().time() + 20
+            while asyncio.get_running_loop().time() < deadline:
+                message = await asyncio.wait_for(ws.receive_json(), timeout=5)
+                if message["type"] == "session_end":
+                    end = message
+                    break
+                if message["type"] == "state" and message.get("fact"):
+                    await ws.send_json({"type": "next"})
+            assert end is not None, "the session never ended"
+            assert end["state"]["learner_id"]
+            assert end["metrics"]["session"] == 1
+            assert end["summary"]["reason"] in ("end_success", "end_tired")
+            assert end["tally"]
+            await ws.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())

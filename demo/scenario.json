@@ -1,0 +1,19 @@
+{
+  "name": "three minute demo",
+  "comment": "Fixed sequence for the stage. SPEC.md section 14 beats: the opener, the deliberate wrong finger, a break, the retry, then two new facts.",
+  "onboarding": false,
+  "exercises": [
+    {"fact": "7x8", "left": 8, "right": 7, "reason": "review"},
+    {"fact": "7x9", "left": 9, "right": 7, "reason": "next_new", "is_new": true},
+    {"fact": "6x10", "left": 10, "right": 6, "reason": "confidence"},
+    {"fact": "7x8", "left": 7, "right": 8, "reason": "retry"},
+    {"fact": "9x9", "left": 9, "right": 9, "reason": "next_new", "is_new": true},
+    {"fact": "10x10", "left": 10, "right": 10, "reason": "level_up"}
+  ],
+  "end": {
+    "reason": "end_success",
+    "opened": ["7x9", "9x9"],
+    "became_solid": ["7x8"],
+    "tomorrow": "6x7"
+  }
+}

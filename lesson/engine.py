@@ -273,6 +273,17 @@ class Engine:
         """Same exercise, clean slate."""
         return self._rearm()
 
+    def load(self, exercise: Exercise) -> Update:
+        """Replace the current exercise outright.
+
+        The lesson order is the scheduler's business, not the engine's: the
+        engine only ever knows which exercise is up now.
+        """
+        if exercise not in self.exercises:
+            self.exercises.append(exercise)
+        self._index = self.exercises.index(exercise)
+        return self._rearm()
+
     def _rearm(self) -> Update:
         self._state = STATE_EXERCISE_SHOWN
         self._event = None

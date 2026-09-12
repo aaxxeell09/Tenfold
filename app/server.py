@@ -2,6 +2,7 @@
 
     python app/server.py                 # webcam, opens http://localhost:8000
     python app/server.py --mock          # no camera, cycles the three states every 2 s
+    python app/server.py --demo          # the fixed demo/scenario.json sequence
     python app/server.py --camera 1      # force a camera index
 
 One process. A worker thread owns the camera and runs the pipeline of SPEC.md
@@ -23,7 +24,19 @@ Messages to the browser:
 x and y are in 0..1 in the mirrored image, the same frame the MJPEG stream
 shows, so the overlay lines up without the page knowing anything about cameras.
 
-Messages from the browser: {"type": "check", "value": 56} and {"type": "next"}.
+Messages from the browser: {"type": "check", "value": 56}, {"type": "next"} and
+{"type": "hello", "state": {...}} which hands over the learner state the page
+kept in localStorage. Without a hello the server starts a fresh learner in
+memory, so the lesson still runs; nothing is persisted server side, on purpose,
+since the child's record belongs in the child's browser.
+
+At the end of a session the server sends
+{"type": "session_end", "state", "metrics", "summary"} and the page stores the
+state back. The page wiring for hello and for storing that state is not in this
+file.
+
+lesson/scheduler.py decides which exercise comes next and why; the reason rides
+on every state message as "reason" and lesson/tally.py phrases it.
 
 Weave traces lesson events only, never frames (CLAUDE.md), and only when
 WANDB_API_KEY is set.
@@ -52,7 +65,21 @@ from aiohttp import WSMsgType, web  # noqa: E402
 from classifier import features  # noqa: E402
 from classifier.schema import FINGER_NUMBERS, GestureState, Window  # noqa: E402
 from lesson import tally  # noqa: E402
-from lesson.engine import Engine, Update  # noqa: E402
+from lesson.engine import Engine, Exercise, Update  # noqa: E402
+from lesson.scheduler import (  # noqa: E402
+    CANNOT_SEE_AFTER_S,
+    DEFAULT_SCENARIO,
+    REACTION_CANNOT_SEE,
+    LearnerState,
+    Outcome,
+    Pick,
+    Scheduler,
+    ScriptedScheduler,
+    answer_reaction,
+    hint_event,
+    now_utc,
+    pose_reaction,
+)
 from tenfold.env import load_env  # noqa: E402
 
 log = logging.getLogger("tenfold.server")
@@ -70,6 +97,9 @@ VIDEO_FPS = 20.0
 FINGER_REFRESH_S = 1 / 15
 MOCK_STEP_S = 2.0
 JPEG_QUALITY = 80
+# How long a child may struggle before Tally offers the next level of help.
+# Not specified, chosen so a hint arrives before frustration does.
+HINT_AFTER_S = (6.0, 12.0, 20.0)
 
 # Which tally line to show when no event carries the moment.
 STATE_MOMENT = {
@@ -115,19 +145,29 @@ def moment_of(update: Update, hands_seen: int) -> str:
 
 
 def build_message(update: Update, fingers: list[dict[str, Any]],
-                  hands_seen: int) -> dict[str, Any]:
+                  hands_seen: int, reaction: str | None = None,
+                  pick: Pick | None = None, hint_level: int = 0,
+                  session: int = 0) -> dict[str, Any]:
     context = {"hint": update.hint, "answer": update.answer,
                "exercise": update.exercise.title}
+    # A reaction from the scheduler outranks the screen state: it is the thing
+    # Tally actually wants to say at this moment.
+    moment = reaction or moment_of(update, hands_seen)
     return {
         "type": "state",
         "state": update.state,
         "exercise": update.exercise.title,
-        "tally": tally.phrase(moment_of(update, hands_seen), context),
+        "tally": tally.phrase(moment, context),
         "wrong": [f.as_dict() for f in update.wrong],
         "match": [f.as_dict() for f in update.match],
         "answer": update.answer,
         "reasoning": list(update.reasoning),
         "fingers": fingers,
+        "reason": pick.reason if pick else None,
+        "reaction": reaction,
+        "hint_level": hint_level,
+        "fact": pick.fact if pick else None,
+        "session": session,
     }
 
 
@@ -186,51 +226,198 @@ class Hub:
 
 
 class Lesson:
-    """The engine plus the lock that keeps the camera thread and the browser apart."""
+    """The engine, the scheduler and the lock that keeps the threads apart.
 
-    def __init__(self, engine: Engine, hub: Hub) -> None:
+    The camera thread calls observe many times a second; the browser calls
+    command from the event loop. Every mutation of the engine or the scheduler
+    goes through the one lock here.
+    """
+
+    def __init__(self, engine: Engine, hub: Hub, scheduler: Scheduler) -> None:
         self.engine = engine
         self.hub = hub
+        self.scheduler = scheduler
         self._lock = threading.Lock()
         self._fingers: list[dict[str, Any]] = []
         self._hands_seen = 0
         self._last_push = 0.0
-        self.trace: Callable[[Update], None] = lambda update: None
+        self.trace: Callable[[str, dict[str, Any]], None] = lambda event, payload: None
 
-    def push(self, update: Update) -> None:
-        self.hub.publish(build_message(update, self._fingers, self._hands_seen))
+        self.pick: Pick | None = None
+        self.started_at = 0.0
+        self.hint_level = 0
+        self.pose_error = False
+        self.math_error = False
+        self.said_cannot_see = False
+        self.unknown_since: float | None = None
+        self.recorded = False
+        self.finished = False
+
+    # -- pushing --
+
+    def push(self, update: Update, reaction: str | None = None) -> None:
+        self.hub.publish(build_message(
+            update, self._fingers, self._hands_seen, reaction=reaction,
+            pick=self.pick, hint_level=self.hint_level,
+            session=self.scheduler.session))
         self._last_push = time.monotonic()
+
+    def start(self) -> None:
+        with self._lock:
+            started = self.scheduler.start_session(now_utc())
+            self.trace("session_start", started)
+            self.engine.start()
+            self._advance()
+
+    def _advance(self) -> None:
+        """Load the next exercise, or end the session. Call with the lock held."""
+        pick = self.scheduler.next_exercise(now_utc())
+        if pick is None:
+            self._end_session()
+            return
+        self.pick = pick
+        self.hint_level = 0
+        self.pose_error = False
+        self.math_error = False
+        self.said_cannot_see = False
+        self.unknown_since = None
+        self.recorded = False
+        self.started_at = time.monotonic()
+        update = self.engine.load(Exercise(pick.left, pick.right))
+        self.trace("exercise", pick.to_dict())
+        self.push(update, reaction=pick.reason)
+
+    def _end_session(self) -> None:
+        if self.finished:
+            return
+        self.finished = True
+        summary = self.scheduler.end_session(now_utc())
+        metrics = self.scheduler.metrics()
+        self.trace("session_end", {**metrics, **summary.to_dict()})
+        self.hub.publish({
+            "type": "session_end",
+            "state": self.scheduler.state.to_dict(),
+            "metrics": metrics,
+            "summary": summary.to_dict(),
+            "tally": tally.phrase(summary.reason,
+                                  {"tomorrow": _fact_title(summary.tomorrow)}),
+        })
+
+    # -- from the camera thread --
 
     def observe(self, gesture: GestureState, fingers: list[dict[str, Any]],
                 hands_seen: int, now: float) -> None:
         with self._lock:
             self._fingers = fingers
             self._hands_seen = hands_seen
+            if self.finished:
+                return
             update = self.engine.observe(gesture, now)
+            reaction = self._reaction(gesture, update, now)
             if update is not None:
-                self.trace(update)
-                self.push(update)
+                if update.state == "wrong_pose":
+                    self.pose_error = True
+                self.push(update, reaction=reaction)
+            elif reaction is not None:
+                self.push(self.engine.snapshot(), reaction=reaction)
             elif now - self._last_push >= FINGER_REFRESH_S:
                 self.push(self.engine.snapshot())
+
+    def _reaction(self, gesture: GestureState, update: Update | None,
+                  now: float) -> str | None:
+        """Anything Tally noticed that the engine does not model itself."""
+        if self.pick is None or self.engine.latched:
+            return None
+
+        # Hands not readable for more than two seconds. Not an error: the child
+        # may simply be out of the light, and being told off for that is unfair.
+        if gesture.method == "unknown":
+            self.unknown_since = self.unknown_since or now
+            if not self.said_cannot_see and now - self.unknown_since >= CANNOT_SEE_AFTER_S:
+                self.said_cannot_see = True
+                return REACTION_CANNOT_SEE
+            return None
+        self.unknown_since = None
+
+        same_hand = pose_reaction(gesture.left, gesture.right, self.pick)
+        if same_hand and update is not None:
+            return same_hand
+
+        elapsed = now - self.started_at
+        level = sum(1 for threshold in HINT_AFTER_S if elapsed >= threshold)
+        if level > self.hint_level:
+            self.hint_level = level
+            return hint_event(level)
+        return None
+
+    # -- from the browser --
 
     def command(self, message: dict[str, Any]) -> None:
         kind = message.get("type")
         with self._lock:
-            if kind == "check":
-                update = self.engine.check(_as_int(message.get("value")))
+            if kind == "hello":
+                self._hello(message.get("state"))
+            elif kind == "check":
+                self._check(_as_int(message.get("value")))
             elif kind == "next":
-                update = self.engine.next()
+                self._skip()
             elif kind == "repeat":
-                update = self.engine.repeat()
-            else:
-                return
-            if update is not None:
-                self.trace(update)
-                self.push(update)
+                self.push(self.engine.repeat())
 
-    def start(self) -> None:
-        with self._lock:
-            self.push(self.engine.start())
+    def _skip(self) -> None:
+        """The n key. A skipped exercise still counts and still comes back.
+
+        Without this a session could never end, because nothing would be
+        recorded, and the same unopened fact would be offered forever. It is not
+        counted as a failure either: mastery only moves on an actual pose or
+        math error, so skipping costs the child nothing.
+        """
+        if self.pick is not None and not self.recorded:
+            self._record(correct=False, given=None)
+        self._advance()
+
+    def _hello(self, raw: Any) -> None:
+        """The page hands over what it kept in localStorage."""
+        if self.finished or self.scheduler.outcomes:
+            return                      # a session is already running, keep it
+        self.scheduler.state = LearnerState.from_dict(raw, now=now_utc())
+        started = self.scheduler.start_session(now_utc())
+        self.trace("session_start", started)
+        self.finished = False
+        self._advance()
+
+    def _check(self, value: int | None) -> None:
+        update = self.engine.check(value)
+        if update is None or self.pick is None:
+            return
+        correct = update.state == "answer_correct"
+        reaction = None if correct else answer_reaction(self.pick.result, value)
+        if not correct:
+            self.math_error = True
+        self.push(update, reaction=reaction)
+        if not correct:
+            return
+        self._record(correct=True, given=value)
+        self._advance()
+
+    def _record(self, correct: bool, given: int | None) -> None:
+        if self.pick is None or self.recorded:
+            return
+        self.recorded = True
+        self.scheduler.record(Outcome(
+            fact=self.pick.fact, left=self.pick.left, right=self.pick.right,
+            correct=correct and not self.math_error and not self.pose_error,
+            response_time=round(time.monotonic() - self.started_at, 2),
+            hint_level=self.hint_level, pose_error=self.pose_error,
+            math_error=self.math_error, given=given,
+        ), now=now_utc())
+
+
+def _fact_title(fact: str | None) -> str | None:
+    if not fact:
+        return None
+    a, b = fact.split("x")
+    return f"{a} x {b}"
 
 
 def _as_int(value: Any) -> int | None:
@@ -355,29 +542,27 @@ def mock_loop(lesson: Lesson, stop: threading.Event) -> None:
 # --- weave -----------------------------------------------------------------
 
 
-def make_tracer() -> Callable[[Update], None]:
+def make_tracer() -> Callable[[str, dict[str, Any]], None]:
     """Trace lesson events only, and only with a key. Never one op per frame."""
     if not os.environ.get("WANDB_API_KEY"):
-        return lambda update: None
+        return lambda event, payload: None
     try:
         import weave
     except ImportError:
         log.warning("server: WANDB_API_KEY is set but weave is not installed")
-        return lambda update: None
+        return lambda event, payload: None
 
     project = "tenfold" + os.environ.get("TENFOLD_PROJECT_SUFFIX", "")
     entity = os.environ.get("WANDB_ENTITY")
     weave.init(f"{entity}/{project}" if entity else project)
 
     @weave.op
-    def lesson_event(event: str, state: str, exercise: str, answer: int | None) -> dict:
-        return {"event": event, "state": state, "exercise": exercise, "answer": answer}
+    def lesson_event(event: str, payload: dict[str, Any]) -> dict:
+        return {"event": event, **payload}
 
-    def trace(update: Update) -> None:
-        if not update.event:
-            return
+    def trace(event: str, payload: dict[str, Any]) -> None:
         try:
-            lesson_event(update.event, update.state, update.exercise.title, update.answer)
+            lesson_event(event, payload)
         except Exception:       # tracing must never take the demo down
             log.exception("server: weave trace failed")
 
@@ -449,14 +634,26 @@ def make_app(lesson: Lesson) -> web.Application:
     return app
 
 
-def create_app(mock: bool = False, camera: int | None = None) -> web.Application:
+def make_scheduler(demo: bool = False) -> Scheduler:
+    """The real scheduler, or the fixed demo sequence when asked for one."""
+    if not demo:
+        return Scheduler(now=now_utc())
+    path = REPO_ROOT / DEFAULT_SCENARIO
+    if not path.exists():
+        log.warning("server: %s is missing, falling back to the live scheduler", path)
+        return Scheduler(now=now_utc())
+    return ScriptedScheduler.load(path, now=now_utc())
+
+
+def create_app(mock: bool = False, camera: int | None = None,
+               demo: bool = False) -> web.Application:
     """Wire the hub, the lesson and the worker thread into one aiohttp app.
 
     Split out of main so the tests can drive the whole thing in mock mode without
     a camera, a browser or a port.
     """
     hub = Hub()
-    lesson = Lesson(Engine(), hub)
+    lesson = Lesson(Engine(), hub, make_scheduler(demo))
     lesson.trace = make_tracer()
     stop = threading.Event()
     worker = threading.Thread(
@@ -490,16 +687,19 @@ def main(argv: list[str] | None = None) -> int:
                         help="camera index, probed over 0 to 3 when not given")
     parser.add_argument("--mock", action="store_true",
                         help="no camera, cycle the three states every 2 s")
+    parser.add_argument("--demo", action="store_true",
+                        help=f"run the fixed sequence in {DEFAULT_SCENARIO}")
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     load_env()
 
-    app = create_app(mock=args.mock, camera=args.camera)
+    app = create_app(mock=args.mock, camera=args.camera, demo=args.demo)
 
     url = f"http://localhost:{args.port}"
-    print(f"tenfold: {url}" + ("  (mock)" if args.mock else ""))
+    labels = [name for name, on in (("mock", args.mock), ("demo", args.demo)) if on]
+    print(f"tenfold: {url}" + (f"  ({', '.join(labels)})" if labels else ""))
     if not args.no_open:
         threading.Timer(1.0, webbrowser.open, args=(url,)).start()
 
