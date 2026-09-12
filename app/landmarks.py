@@ -86,7 +86,14 @@ class HandDetector:
     ) -> None:
         resolved = Path(model_path) if model_path is not None else DEFAULT_MODEL_PATH
         options = vision.HandLandmarkerOptions(
-            base_options=mp_python.BaseOptions(model_asset_path=str(ensure_model(resolved))),
+            # CPU delegate, forced. On macOS the default delegate takes the Metal
+            # path and TensorsToDetectionsCalculator aborts the process with
+            # "DrishtiMetalHelper ... Service is unavailable". The classifier
+            # runs in a few milliseconds on CPU, so nothing is lost.
+            base_options=mp_python.BaseOptions(
+                model_asset_path=str(ensure_model(resolved)),
+                delegate=mp_python.BaseOptions.Delegate.CPU,
+            ),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=num_hands,
             min_hand_detection_confidence=min_detection_confidence,
