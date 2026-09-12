@@ -2,6 +2,12 @@
 
 Read SPEC.md before any task. SPEC.md is the source of truth. If a request contradicts SPEC.md, say so and stop. Section 19 of SPEC.md lists the amendments already folded into the text.
 
+## Ownership (see SPEC.md section 12 for the full table)
+- Axel owns app/, lesson/engine.py, lesson/tally.py, data capture, dashboard/, README, demo.
+- Ilan owns classifier/rules.py, eval/, loop/, lesson/tutor.py, Weave and MCP setup, doctor, Makefile.
+- classifier/schema.py and classifier/features.py are the shared contract, frozen by both.
+- Before editing a file, check its owner. If it is not yours, do not edit it: say what you need and stop.
+
 ## Execution Rules
 - When 2 or more tasks are independent (different files, no shared state), spawn parallel subagents, one per task.
 - Sequential only when task B needs task A's output or both touch the same file.

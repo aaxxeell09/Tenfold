@@ -266,11 +266,30 @@ Notebook marimo, stocké en .py dans le repo, hébergé sur molab pour la démo,
 
 ## 12. Répartition
 
-**Axel : produit, données, démo.** Apprendre les gestes. Test go/no-go MediaPipe à 11h45 avec le geste réel. `data/capture.py` et capture du dataset. `lesson/engine.py`, `lesson/tally.py`, `app/ui.py`. Notebook marimo. README, script de démo, vidéo, soumission, répétitions. Stand W&B pour ARIA, Sandboxes, MCP.
+Deux propriétaires, deux Claude Code, une frontière par dossier. Chaque Claude ne modifie que les fichiers de son propriétaire ; un besoin dans le dossier de l'autre se demande dans le canal de l'équipe, jamais par un commit direct.
 
-**Coéquipier : perception, évaluation, loop.** Squelette, `.env`, Weave init, CLAUDE.md. `landmarks.py`, `normalize.py`, `schema.py`, figés avant la capture. `rules.py` V0. `scorers.py`, `run_eval.py`. `loop/critic.py`, `loop/guard.py`, les trois prompts. `lesson/tutor.py` avec cache. Loop de nuit.
+| Dossier / fichier | Propriétaire | Contenu |
+|---|---|---|
+| `classifier/schema.py`, `classifier/features.py` | **contrat commun**, figés ensemble avant 13h45 | `HandFrame` (avec `wrist_xy`, `scale`), `Window`, `GestureState`, repère commun entre les mains |
+| `app/` (`camera.py`, `landmarks.py`, `normalize.py`, `capture.py`, `ui.py`, `main.py`, `replay.py`) | **Axel** | webcam, MediaPipe, normalisation, capture du dataset, interface, touche `p`, `make demo` |
+| `lesson/engine.py`, `lesson/tally.py` | **Axel** | machine à états du cours, événements, phrases de secours |
+| `data/samples.jsonl`, `../tenfold-heldout/test.jsonl` | **Axel** (capture), format défini par le contrat | train = Axel ; held-out = 3 à 5 inconnus, tous angles |
+| `dashboard/`, `README.md`, script de démo, vidéo, soumission AGI House, stand W&B pour ARIA | **Axel** | |
+| `classifier/rules.py` V0 | **Ilan** | le fichier que le loop édite ensuite |
+| `eval/` (`scorers.py`, `run_eval.py`, `baseline_knn.py`, `last_train_report.json`) | **Ilan** | six scorers, éval train et held-out (sous-processus, seconde clé), `--local`, ligne kNN |
+| `loop/` (`critic.py`, `guard.py`, `smoke.py`, `prompts/`, `CLAUDE.critic.md`, `mcp.json`, `nightly.sh`) | **Ilan** | les trois agents, la garde, la porte métrique, les worktrees `../tenfold-critic` et `../tenfold-blind`, le nightly |
+| `lesson/tutor.py` | **Ilan** | W&B Inference dans un thread, cache, repli sur `tally.py` |
+| `weave.init`, MCP W&B (scope user, `--mcp-config`), `WANDB_API_KEY_HELDOUT`, `tenfold/doctor.py`, `Makefile`, `.env.example`, stand W&B pour MCP et Sandboxes | **Ilan** | connexion aux outils sponsors |
+| `SPEC.md`, `CLAUDE.md`, `TODOS.md` | **les deux** | une ligne dans le canal, puis le fichier |
 
-Frontière : le coéquipier livre `rules.py` et le loop, Axel consomme `rules.py` dans l'app. Intégration continue sur `main` dès 14h, pas de branche isolée, commits toutes les 30 minutes des deux côtés.
+Interfaces entre les deux, dans cet ordre :
+1. Ilan livre `classifier/features.py` en premier : `capture.py` l'importe.
+2. Axel livre `app/landmarks.py` et `app/normalize.py` figés, puis `data/samples.jsonl` ; Ilan les consomme sans les modifier.
+3. Ilan livre `classifier/rules.py` V0 avec `classify(window) -> GestureState` ; Axel l'appelle depuis `app/main.py` via `data/BEST_VERSION`, jamais HEAD.
+4. Axel livre `lesson/engine.py` avec ses événements ; Ilan branche `tutor.py` dessus.
+5. Ilan livre `data/metrics.json` (instantané) ; Axel le lit dans le dashboard.
+
+Ordre de construction : contrat à deux (30 min), puis deux voies parallèles sans dossier partagé. Voie Ilan : `rules.py` V0 → `eval/` → `loop/` (`--mock-claude` de bout en bout avant 16h) → `tutor.py` → `doctor`. Voie Axel : `landmarks`/`normalize` → capture → `engine` + `ui` → `replay` → dashboard → démo. Tripwire commun à 18h : aucune itération autonome commitée, les deux passent sur `loop/`.
 
 ## 13. Planning
 
