@@ -30,12 +30,16 @@ make loop N=1            # the same, then train eval, metric gate, commit, held-
 What happens inside `loop/critic.py`:
 
 1. A stripped worktree (`../tenfold-critic`) is reset: `rules.py`, the frozen contract, the smoke test, the
-   guard's self-check, the prompts, `eval/last_train_report.json`, and a critic-only `CLAUDE.md`. No spec,
-   no data, no eval code, no `.env`, no git tools.
+   guard's self-check, the prompts, `eval/last_train_report.json`, a copy of the train set with
+   `loop/train_eval.py`, and a critic-only `CLAUDE.md`. No spec, no held-out data, no eval pipeline, no `.env`,
+   no git tools.
 2. Diagnostic agent: reads the train report (per-class accuracy, ten worst samples as fingertip distances),
    writes one diagnosis and one hypothesis.
-3. Patch agent: edits `rules.py` only, may run `python loop/guard.py --check` and `python loop/smoke.py`.
-4. Guard agent: sees only the diagnosis and the diff, no tools; approves or rejects.
+3. Patch agent: edits `rules.py` only, may run `python loop/train_eval.py` (train metrics and failing samples,
+   before and after its edit), `python loop/guard.py --check` and `python loop/smoke.py`. It may fix the named
+   failures with a different mechanism than the diagnosis guessed, and states its own hypothesis.
+4. Guard agent: sees only the diagnosis and the diff, no tools. It rejects patches that do not act on the named
+   failures or that game the metric (refusing more often, best-case confidence, memorised values).
 5. `loop/guard.py` (pinned copy, outside the worktree): only `rules.py` changed, importable, diff under 80
    lines, file under 400 lines, AST import whitelist, no `open`/`exec`/`getattr`/`sys`/`os`/`inspect`, six
    synthetic windows pass, transcript audit (no path outside the worktree, no mention of the held-out set).
@@ -61,13 +65,21 @@ What happens inside `loop/critic.py`:
 ## The ablation
 
 `loop/nightly.sh` runs two arms overnight: the informed critic on `main`, and a blind critic in
-`../tenfold-blind` whose diagnostic step gets no failure data ("improve the classifier"). Both are scored on
-the same held-out set. The headline chart is informed versus blind: if the failure data did not matter, the
+`../tenfold-blind` whose diagnostic step gets no failure data ("improve the classifier"), with no train copy,
+no report and no evaluation tool. The blind arm keeps its rules in `loop/blind-rules.py` and never commits.
+Both are scored on the same held-out set, and each arm stops at `TENFOLD_MAX_COST_USD` (default 40 USD). The headline chart is informed versus blind: if the failure data did not matter, the
 two curves would overlap.
 
 ## Rehearse without touching the real projects
 
 ```
-TENFOLD_PROJECT_SUFFIX=-smoke make loop N=2      # publishes to tenfold-smoke / tenfold-heldout-smoke
-python loop/critic.py --iterations 2 --mock-claude tests/fake_claude.py --local   # no API at all
+make rehearse            # real agents on hard synthetic data in a throwaway clone, Weave projects *-smoke
+make rehearse-mock       # same with a fake claude, no API, no W&B
+python loop/rehearse.py --nightly --mock --iterations 2   # both arms in parallel through nightly.sh
 ```
+
+## Where the real loop runs
+
+The canonical runner is a separate clone, `../tenfold-run`, with its own `.env`. The critic commits there
+and those commits are pushed to `main` after each run, so no human working copy ever shares a worktree
+with the loop.
