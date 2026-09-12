@@ -3,6 +3,7 @@
     python loop/rehearse.py --iterations 2          # real claude; publishes to tenfold-smoke / tenfold-heldout-smoke
     python loop/rehearse.py --iterations 2 --mock   # fake claude, no API, no W&B
     python loop/rehearse.py --blind                 # rehearse the ablation arm
+    python loop/rehearse.py --nightly --mock        # loop/nightly.sh, both arms in parallel, no API
 
 Uses the committed state of this repo (git clone), a hard synthetic train set standing in for Axel's capture,
 and a separate hard synthetic held-out set standing in for other people's hands. Ends with data/snapshot.json.
@@ -29,6 +30,7 @@ def main() -> int:
     ap.add_argument("--mock", action="store_true")
     ap.add_argument("--blind", action="store_true")
     ap.add_argument("--dir")
+    ap.add_argument("--nightly", action="store_true", help="run loop/nightly.sh: both arms in parallel under caffeinate")
     a = ap.parse_args()
     d = Path(a.dir or tempfile.mkdtemp(prefix="tenfold-rehearsal-"))
     d.mkdir(parents=True, exist_ok=True)
@@ -41,15 +43,24 @@ def main() -> int:
     synth.write_jsonl(synth.synthetic_dataset(seed=29, hard=True, session="other", split="test", holds_per_class=4), heldout)
     if (REPO / ".env").exists() and not a.mock:
         shutil.copy(REPO / ".env", clone / ".env")
-    env = {**os.environ, "TENFOLD_PROJECT_SUFFIX": "-smoke", "TENFOLD_HELDOUT": str(heldout), "PYTHONPATH": str(clone)}
+    env = {**os.environ, "TENFOLD_PROJECT_SUFFIX": "-smoke", "TENFOLD_HELDOUT": str(heldout), "PYTHONPATH": str(clone),
+           "PY": sys.executable}
     cmd = [sys.executable, "-u", str(clone / "loop" / "critic.py"), "--repo", str(clone), "--iterations", str(a.iterations),
            "--timeout", "900"]
     if a.mock:
         cmd += ["--mock-claude", str(clone / "tests" / "fake_claude.py"), "--local"]
     if a.blind:
         cmd.append("--blind")
+    if a.nightly:
+        extra = ["--timeout", "900"] + (["--mock-claude", str(clone / "tests" / "fake_claude.py"), "--local"] if a.mock else [])
+        env["TENFOLD_CRITIC_ARGS"] = " ".join(extra)
+        cmd = ["bash", str(clone / "loop" / "nightly.sh"), str(a.iterations)]
     print(f"rehearsal in {d}", flush=True)
     rc = subprocess.run(cmd, cwd=clone, env=env).returncode
+    if a.nightly:
+        for name in ("nightly.log", "nightly-blind.log"):
+            p = clone / "loop" / name
+            print(f"--- {name} ---\n" + (p.read_text()[-2500:] if p.exists() else "(missing)"))
     subprocess.run([sys.executable, str(clone / "loop" / "snapshot.py"), "--repo", str(clone)], env=env)
     return rc
 

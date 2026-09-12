@@ -283,3 +283,14 @@ def test_snapshot_has_versions_diffs_and_commits(tmp_path):
     assert snap["informed"][1]["heldout"]["exact_match"] is not None
     assert len(snap["critic_commits"]) == 1 and snap["blind"] == [] and snap["knn_heldout"] is None
     assert set(snap["informed"][1]["train"]) >= {"exact_match", "exact_match_ci95", "per_class"}
+
+
+def test_budget_cap_stops_the_arm(tmp_path):
+    repo = make_repo(tmp_path)
+    # each fake call reports 0.5 USD: iteration 1 spends 1.5 (diagnosis, patch, guard agent), above a 1.0 limit
+    p = run_critic(repo, "--skip-heldout", "--max-cost", "1.0", iterations=3)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "STOP: budget reached ($1.50 spent, limit $1.00)" in p.stdout
+    assert len(commits_by_critic(repo)) == 1
+    m = json.loads((repo / "data" / "metrics.json").read_text())
+    assert m["versions"][-1]["spent_usd"] == 1.5

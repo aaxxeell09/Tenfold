@@ -19,3 +19,4 @@ data/BEST_VERSION
 .claude-critic/
 .claude-critic/
 loop/blind-rules.py
+loop/*.out

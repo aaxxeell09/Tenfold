@@ -25,7 +25,7 @@ def emit(text: str, tool_input: dict | None = None) -> None:
         content.append({"type": "tool_use", "name": "Edit", "input": tool_input})
     content.append({"type": "text", "text": text})
     print(json.dumps({"type": "assistant", "message": {"content": content}}))
-    print(json.dumps({"type": "result", "result": text}))
+    print(json.dumps({"type": "result", "result": text, "total_cost_usd": float(os.environ.get("FAKE_CLAUDE_COST", "0.5"))}))
 
 
 rules = Path("classifier/rules.py")

@@ -101,6 +101,7 @@ class Critic:
         self.report_src = (self.tmp / "blind-report.json") if a.blind else self.repo / REPORT_REL
         self.train_path = Path(a.train_samples).resolve() if a.train_samples else self.repo / "data" / "samples.jsonl"
         self.logfile = None if a.dry_run else self.repo / "loop" / ("nightly-blind.log" if a.blind else "nightly.log")
+        self.spent = 0.0  # USD reported by the agents' result events
         self.env = {k: v for k, v in os.environ.items() if not k.endswith("_HELDOUT")}
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         if self.env.get("ANTHROPIC_API_KEY") or self.env.get("ANTHROPIC_AUTH_TOKEN"):
@@ -187,6 +188,10 @@ class Critic:
             except json.JSONDecodeError:
                 continue
             if ev.get("type") == "result":
+                try:
+                    self.spent += float(ev.get("total_cost_usd") or 0.0)
+                except (TypeError, ValueError):
+                    pass
                 if ev.get("is_error") and ev.get("api_error_status") in (401, 403):
                     return str(ev.get("result") or "authentication failed"), 401
                 if ev.get("result"):
@@ -315,7 +320,7 @@ class Critic:
 
     @maybe_weave_op("critic.heartbeat")
     def heartbeat(self, iteration: int, status: str) -> dict:
-        return {"iteration": iteration, "status": status, "ts": now(), "blind": self.a.blind}
+        return {"iteration": iteration, "status": status, "ts": now(), "blind": self.a.blind, "spent_usd": round(self.spent, 3)}
 
     @maybe_weave_op("critic.rejected_patch")
     def record_rejection(self, iteration: int, reason: str, diff: str) -> dict:
@@ -347,6 +352,9 @@ class Critic:
         self.tag_prev = last["tag"]
         no_improve = 0
         for it in range(1, a.iterations + 1):
+            if a.max_cost and self.spent >= a.max_cost:
+                log(f"STOP: budget reached (${self.spent:.2f} spent, limit ${a.max_cost:.2f})", self.logfile)
+                break
             log(f"iteration {it}/{a.iterations} start (next version v{version}{self.suffix})", self.logfile)
             self.heartbeat(it, "start")
             self.reset_worktree()
@@ -406,7 +414,7 @@ class Critic:
                     shutil.copy(cand_report, self.report_src)
                 entry = {"tag": f"v{version}{self.suffix}", "version": version, "sha": sha, "train": cand["metrics"],
                          "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": diagnosis[:300],
-                         "patch": patch_summary, "expected": expected, "gate": why}
+                         "patch": patch_summary, "expected": expected, "gate": why, "spent_usd": round(self.spent, 3)}
                 if not a.skip_heldout:
                     h = self.run_eval("heldout", self.rules_src, f"v{version}{self.suffix}")
                     entry["heldout"] = h["metrics"] if h else None
@@ -421,6 +429,7 @@ class Critic:
                 outcome = "accepted"
                 break
             self.heartbeat(it, outcome)
+            log(f"iteration {it} {outcome}, spent ${self.spent:.2f} so far", self.logfile)
             if not a.no_early_stop and no_improve >= 3:
                 log("stop: 3 iterations without improvement", self.logfile)
                 break
@@ -446,10 +455,14 @@ def main() -> int:
     ap.add_argument("--heldout-samples")
     ap.add_argument("--max-turns", type=int, default=30)
     ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--max-cost", type=float, default=None,
+                    help="stop this arm once the agents have spent this many USD (default TENFOLD_MAX_COST_USD or 40)")
     a = ap.parse_args()
     repo = Path(a.repo).resolve()
     load_env(repo / ".env")
     a.model = a.model or os.environ.get("TENFOLD_CRITIC_MODEL", "claude-sonnet-5")
+    if a.max_cost is None:
+        a.max_cost = float(os.environ.get("TENFOLD_MAX_COST_USD", "40"))
     if a.blind:
         a.no_commit = True
     a.worktree = a.worktree or str(repo.parent / ("tenfold-blind" if a.blind else "tenfold-critic"))

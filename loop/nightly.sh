@@ -1,16 +1,23 @@
 #!/usr/bin/env bash
 # The overnight run: informed critic on main + blind critic in its own worktree, both under caffeinate.
 #   loop/nightly.sh 20
-# Check loop/nightly.log and the heartbeat op in Weave at 23:30. Never commit to main while this runs.
+# Budget: each arm stops at TENFOLD_MAX_COST_USD (default 40 USD). Extra critic flags: TENFOLD_CRITIC_ARGS.
+# Check loop/nightly.log, loop/nightly-blind.log and the heartbeat op in Weave at 23:30.
+# Never commit to main while this runs. .env is loaded by loop/critic.py itself (do not source it: a header
+# value contains a space).
 cd "$(dirname "$0")/.."
 N=${1:-20}
 PY=${PY:-.venv/bin/python}
-# .env is loaded by loop/critic.py itself (a header value contains a space, so it must not be sourced)
+EXTRA=${TENFOLD_CRITIC_ARGS:-}
 mkdir -p loop
 echo "$(date -u +%FT%TZ) nightly start N=$N" >> loop/nightly.log
-caffeinate -i "$PY" loop/critic.py --iterations "$N" --no-early-stop >> loop/nightly.log 2>&1 &
+# shellcheck disable=SC2086
+caffeinate -i "$PY" -u loop/critic.py --iterations "$N" --no-early-stop $EXTRA > loop/nightly.out 2>&1 &
 P1=$!
-caffeinate -i "$PY" loop/critic.py --iterations "$N" --no-early-stop --blind >> loop/nightly-blind.log 2>&1 &
+# shellcheck disable=SC2086
+caffeinate -i "$PY" -u loop/critic.py --iterations "$N" --no-early-stop --blind $EXTRA > loop/nightly-blind.out 2>&1 &
 P2=$!
-wait $P1; wait $P2
-echo "$(date -u +%FT%TZ) nightly done" >> loop/nightly.log
+wait $P1; R1=$?
+wait $P2; R2=$?
+echo "$(date -u +%FT%TZ) nightly done informed=$R1 blind=$R2" >> loop/nightly.log
+exit $(( R1 != 0 || R2 != 0 ))
