@@ -144,16 +144,19 @@ class Tutor:
 
     def _traced_call(self, event: str, ctx: dict[str, Any]) -> str:
         if self.trace and not _WEAVE["tried"]:
-            _WEAVE["tried"] = True
+            _WEAVE["tried"] = True  # weave.init once per process
             try:
                 import weave
                 ent = os.environ.get("WANDB_ENTITY")
                 weave.init(f"{ent}/tenfold" if ent else "tenfold")
-                _WEAVE["op"] = weave.op(name="tutor.call")(lambda event, context, model: self._call(event, context))
+                _WEAVE["op"] = weave.op
             except Exception:
                 _WEAVE["op"] = None
-        if self.trace and _WEAVE["op"] is not None:
-            return _WEAVE["op"](event, {k: v for k, v in ctx.items() if k != "hint"} | {"hint": _hint_fields(ctx)}, self.model)
+        if self.trace and _WEAVE["op"] is not None and getattr(self, "_op", None) is None:
+            # one op per instance, so a second Tutor never runs with the first one's key or model
+            self._op = _WEAVE["op"](name="tutor.call")(lambda event, context, model: self._call(event, context))
+        if self.trace and getattr(self, "_op", None) is not None:
+            return self._op(event, {k: v for k, v in ctx.items() if k != "hint"} | {"hint": _hint_fields(ctx)}, self.model)
         return self._call(event, ctx)
 
     # ---------- drop-in for tally.phrase ----------
