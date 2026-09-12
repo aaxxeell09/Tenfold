@@ -35,6 +35,8 @@ CRITIC_FILES = ["classifier/__init__.py", "classifier/schema.py", "classifier/fe
                 "loop/prompts/patch.md", "loop/prompts/guard.md"]
 PATCH_TOOLS = "Read,Edit,Bash(python loop/guard.py --check),Bash(python loop/smoke.py),Bash(python loop/smoke.py *),mcp__wandb__*"
 DIAG_TOOLS = "Read,mcp__wandb__*"
+# never useful to the critic; disallowing them stops the agent from burning turns on denied attempts
+DISALLOWED = "Write,Task,WebSearch,WebFetch,ToolSearch,NotebookEdit,Skill,EnterPlanMode,Agent,Workflow"
 
 
 def now() -> str:
@@ -137,7 +139,8 @@ class Critic:
             cmd = [sys.executable, str(Path(self.a.mock_claude).resolve()), "-p", prompt, "--allowedTools", tools]
         else:
             cmd = [self.a.claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose",
-                   "--allowedTools", tools, "--max-turns", str(max_turns),
+                   "--allowedTools", tools, "--disallowedTools", DISALLOWED, "--max-turns", str(max_turns),
+                   "--model", self.a.model,
                    "--mcp-config", str(self.repo / "loop" / "mcp.json"), "--strict-mcp-config"]
         try:
             proc = subprocess.run(cmd, cwd=self.worktree, env=self.env, stdin=subprocess.DEVNULL,
@@ -174,8 +177,10 @@ class Critic:
     def diagnose(self, iteration: int) -> str:
         if self.a.blind:
             return "DIAGNOSIS: no failure data available (blind arm).\nHYPOTHESIS: improve the classifier however you see fit."
-        text, rc = self.run_claude(self.prompt("diagnostic", train_eval_name=f"tenfold-train-{self.tag_prev}"),
-                                   DIAG_TOOLS, self.tmp / f"diag-{iteration}.jsonl", 15)
+        report_path = self.worktree / "eval" / "last_train_report.json"
+        report = report_path.read_text()[:20000] if report_path.exists() else "{}"
+        text, rc = self.run_claude(self.prompt("diagnostic", train_eval_name=f"tenfold-train-{self.tag_prev}", report=report),
+                                   DIAG_TOOLS, self.tmp / f"diag-{iteration}.jsonl", 8)
         if rc == 401:
             raise CriticAuthError(text)
         return text if rc == 0 and text else f"DIAGNOSIS: unavailable (claude rc={rc}).\nHYPOTHESIS: none."
@@ -387,6 +392,8 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--mock-claude", help="script that stands in for `claude` (tests)")
     ap.add_argument("--claude-bin", default="claude")
+    ap.add_argument("--model", default=os.environ.get("TENFOLD_CRITIC_MODEL", "claude-sonnet-5"),
+                    help="model for the three agents (default claude-sonnet-5; opus costs ~5x per iteration)")
     ap.add_argument("--blind", action="store_true", help="ablation: no failure data for the diagnosis")
     ap.add_argument("--no-commit", action="store_true", help="never commit to the repo (blind arm)")
     ap.add_argument("--no-early-stop", action="store_true")
