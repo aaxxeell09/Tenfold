@@ -11,6 +11,10 @@ numbers, and measures for 60 seconds:
 Verdict: GO if both hands on at least 90 percent of frames and swaps under
 5 percent of two-hand frames, else NO GO. Press q to stop early.
 
+The camera is opened through app/camera.py: AVFoundation on macOS, and with no
+--camera the indexes are probed so a black virtual camera on index 0 does not
+pass for the real one.
+
 Cross-hand distances come from classifier/features.py, which rebuilds the shared
 image frame from wrist_xy and scale and divides by the mean hand scale, so 0.25
 means a quarter of a hand. The same helpers feed classifier/rules.py, so the
@@ -21,6 +25,7 @@ Exit code 0 on GO, 1 on NO GO.
 
 from __future__ import annotations
 
+import argparse
 import math
 import sys
 import time
@@ -34,6 +39,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from app.camera import CameraError, open_camera  # noqa: E402
 from app.landmarks import HandDetector  # noqa: E402
 from app.normalize import Normalizer  # noqa: E402
 from classifier import features  # noqa: E402
@@ -137,10 +143,16 @@ def draw_readout(canvas: Any, pair: tuple[int, int, float] | None, remaining: fl
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT, 1, cv2.LINE_AA)
 
 
-def main() -> int:
-    camera = cv2.VideoCapture(0)
-    if not camera.isOpened():
-        raise SystemExit("gonogo: no webcam on index 0")
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Tenfold MediaPipe go/no-go")
+    parser.add_argument("--camera", type=int, default=None,
+                        help="camera index, probed over 0 to 3 when not given")
+    args = parser.parse_args(argv)
+
+    try:
+        camera, _ = open_camera(args.camera)
+    except CameraError as error:
+        raise SystemExit(f"gonogo: {error}")
 
     detector = HandDetector(num_hands=2)
     normalizer = Normalizer()

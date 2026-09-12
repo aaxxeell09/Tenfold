@@ -25,6 +25,10 @@ are recorded by 3 to 5 other people and written to ../tenfold-heldout/test.jsonl
 outside this repo, mode 700. The side angle stays a stress metric reported on
 its own, never a split.
 
+The camera is opened through app/camera.py: AVFoundation on macOS, and with no
+--camera the indexes are probed so a black virtual camera on index 0 does not
+pass for the real one.
+
 Usage:
     python data/capture.py --session axel_1 --person axel
     python data/capture.py --session axel_1 --person axel --resume
@@ -47,6 +51,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from app.camera import CameraError, open_camera  # noqa: E402
 from app.normalize import Normalizer  # noqa: E402
 from classifier.schema import WINDOW_SIZE, Window, window_to_json  # noqa: E402
 
@@ -281,15 +286,16 @@ def run_dry(schedule: list[Item], fps: float = 30.0) -> None:
 
 
 def run_capture(session: str, person: str, schedule: list[Item], writer: SampleWriter,
-                resume: bool, camera_index: int = 0) -> int:
+                resume: bool, camera_index: int | None = None) -> int:
     """The real capture loop. Returns a process exit code."""
     import cv2
 
     from app.landmarks import HandDetector
 
-    camera = cv2.VideoCapture(camera_index)
-    if not camera.isOpened():
-        print(f"capture: no camera on index {camera_index}", file=sys.stderr)
+    try:
+        camera, _ = open_camera(camera_index)
+    except CameraError as error:
+        print(f"capture: {error}", file=sys.stderr)
         return 1
 
     detector = HandDetector(num_hands=2)
@@ -433,7 +439,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="skip holds already recorded for this session")
     parser.add_argument("--dry-run", action="store_true",
                         help="rehearse the prompts and the timing without a camera")
-    parser.add_argument("--camera", type=int, default=0, help="camera index")
+    parser.add_argument("--camera", type=int, default=None,
+                        help="camera index, probed over 0 to 3 when not given")
     args = parser.parse_args(argv)
 
     schedule = build_schedule()
