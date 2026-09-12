@@ -1,16 +1,19 @@
-"""Smoke test for a candidate rules.py: six synthetic windows, domain-validated output, no exceptions.
+"""Smoke test for a candidate rules.py: six synthetic windows, domain-validated output, no exceptions, and a
+latency ceiling so a patch cannot buy accuracy with work the live camera loop cannot afford.
 
     python loop/smoke.py                      # classifier/rules.py in the current directory
     python loop/smoke.py --rules path/to/rules.py
 
-Exit 0 = every case returned a valid GestureState. Exit 1 = at least one case failed; each failure is printed
-as one line the patch agent can act on. The guard runs this in a subprocess with a timeout.
+Exit 0 = every case returned a valid GestureState fast enough. Exit 1 = at least one case failed; each failure is
+printed as one line the patch agent can act on. The guard runs this in a subprocess with a timeout.
 """
 from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import sys
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -18,6 +21,9 @@ sys.path.insert(0, str(HERE.parent))
 
 from classifier.schema import validate_state  # noqa: E402
 from loop.synth import smoke_cases  # noqa: E402
+
+# The live loop has 100 ms per frame (SPEC section 4.1) and MediaPipe takes most of it; the classifier gets 5 ms.
+LATENCY_P95_MS = float(os.environ.get("TENFOLD_CLASSIFY_P95_MS", "5"))
 
 
 def load(path: Path):
@@ -29,6 +35,22 @@ def load(path: Path):
     return mod
 
 
+def p95_ms(classify, window, runs: int = 200, max_seconds: float = 3.0) -> float:
+    """95th percentile of classify(window) wall time after a short warm-up; stops early on a slow classifier."""
+    for _ in range(5):
+        classify(window)
+    times: list[float] = []
+    start = time.perf_counter()
+    for _ in range(runs):
+        t0 = time.perf_counter()
+        classify(window)
+        times.append((time.perf_counter() - t0) * 1000.0)
+        if time.perf_counter() - start > max_seconds:
+            break
+    times.sort()
+    return times[min(len(times) - 1, int(0.95 * len(times)))]
+
+
 def run(path: Path) -> list[str]:
     failures: list[str] = []
     try:
@@ -38,7 +60,8 @@ def run(path: Path) -> list[str]:
     classify = getattr(mod, "classify", None)
     if classify is None:
         return ["import: no classify(window) function | cause: it was renamed or removed | fix: keep classify(window)"]
-    for name, window in smoke_cases().items():
+    cases = smoke_cases()
+    for name, window in cases.items():
         try:
             state = classify(window)
         except Exception as e:
@@ -50,6 +73,12 @@ def run(path: Path) -> list[str]:
             failures.append(f"smoke {name}: expected method 'unknown', got {state.method!r} | cause: unusable geometry was classified | fix: return GestureState.unknown() when both hands are not present or the geometry is degenerate")
         if name == "five_valid_contact" and getattr(state, "method", None) == "unknown":
             failures.append("smoke five_valid_contact: expected a 6-10 state, got unknown | cause: a valid two-hand contact was refused | fix: do not refuse clean input")
+    if not failures:
+        ms = p95_ms(classify, cases["five_valid_contact"])
+        if ms > LATENCY_P95_MS:
+            failures.append(f"latency: classify() p95 is {ms:.2f} ms on a 5-frame window, limit {LATENCY_P95_MS:g} ms | "
+                            "cause: too much work per call for a live 30 fps camera | "
+                            "fix: compute each feature once per frame, no nested loops over samples or frames beyond the window")
     return failures
 
 

@@ -36,15 +36,19 @@ What happens inside `loop/critic.py`:
 2. Diagnostic agent: reads the train report (per-class accuracy, ten worst samples as fingertip distances),
    writes one diagnosis and one hypothesis.
 3. Patch agent: edits `rules.py` only, may run `python loop/train_eval.py` (train metrics and failing samples,
-   before and after its edit), `python loop/guard.py --check` and `python loop/smoke.py`. It may fix the named
-   failures with a different mechanism than the diagnosis guessed, and states its own hypothesis. Its prompt
-   announces its turn budget (45 by default); if it runs out anyway, the edit it left still goes through the
-   guard and the gate instead of being thrown away.
-4. Guard agent: sees only the diagnosis and the diff, no tools. It rejects patches that do not act on the named
-   failures or that game the metric (refusing more often, best-case confidence, memorised values).
+   before and after its edit; `--sweep NAME=v1,v2,...` scores several values of a constant in one call),
+   `python loop/guard.py --check` and `python loop/smoke.py`. The diagnosis is a guess made without running
+   anything, so the patch agent may fix the named failures with another mechanism, or, when measurement
+   refutes the diagnosis, fix the failure it measured instead; either way it states its hypothesis with the
+   train numbers. Its prompt announces its turn budget (45 by default); if it runs out of turns or money, the
+   edit it left still goes through the guard and the gate instead of being thrown away.
+4. Guard agent: sees the diagnosis, the patch agent's closing account (HYPOTHESIS, PATCH, EXPECTED) and the
+   diff, no tools. It rejects a diff that acts on neither the diagnosis nor the measured failure the account
+   names, or that games the metric (refusing more often, best-case confidence, memorised values).
 5. `loop/guard.py` (pinned copy, outside the worktree): only `rules.py` changed, importable, diff under 80
    lines, file under 400 lines, AST import whitelist, no `open`/`exec`/`getattr`/`sys`/`os`/`inspect`, six
-   synthetic windows pass, transcript audit (no path outside the worktree, no mention of the held-out set).
+   synthetic windows pass, `classify()` p95 under 5 ms (the live frame budget is 100 ms and MediaPipe takes
+   most of it), transcript audit (no path outside the worktree, no mention of the held-out set).
    Each failure is one `GUARD_REJECT rule: what | cause: why | fix: change` line fed back to the patch agent.
    Two rejections and the iteration is dropped.
 6. Train evaluation on the candidate, then the metric gate: `exact_match` must strictly improve, no class may
@@ -69,8 +73,13 @@ What happens inside `loop/critic.py`:
 `loop/nightly.sh` runs two arms overnight: the informed critic on `main`, and a blind critic in
 `../tenfold-blind` whose diagnostic step gets no failure data ("improve the classifier"), with no train copy,
 no report and no evaluation tool. The blind arm keeps its rules in `loop/blind-rules.py` and never commits.
-Both are scored on the same held-out set, and each arm stops at `TENFOLD_MAX_COST_USD` (default 40 USD). The headline chart is informed versus blind: if the failure data did not matter, the
-two curves would overlap.
+Both are scored on the same held-out set. The headline chart is informed versus blind: if the failure data
+did not matter, the two curves would overlap.
+
+Money is capped per arm by `TENFOLD_MAX_COST_USD` (default 40 USD) or `--max-cost`. An iteration only starts
+with at least 2 USD left. Every claude call runs with `--max-budget-usd` set to what is left, and the patch
+agent's cap keeps 0.50 USD back so the guard agent can still judge the edit it leaves. The CLI checks its cap
+between model turns, so one call can overshoot by at most one turn.
 
 ## Rehearse without touching the real projects
 

@@ -10,8 +10,10 @@ frames where the tracker lost a hand, which no rule can recover). The other scor
 targets. Do not "improve" accuracy by refusing to answer: an unknown on a positive sample is a failure. Treat
 confidence consistently: do not pick the most favourable frame's confidence to slip past the unknown threshold.
 
-The diagnosis's HYPOTHESIS is a guess. Measure first. If the train set shows a different cause for the same
-failing classes, fix that cause and say so in your HYPOTHESIS line below.
+The diagnosis was written without running anything: its HYPOTHESIS is a guess. Measure first. If measurement
+shows a different cause, or refutes the diagnosis and points at a bigger failure elsewhere, fix what you measured
+and say so in your HYPOTHESIS line with the train numbers. The guard reads your closing lines next to the diff:
+a change to something neither the diagnosis nor your HYPOTHESIS names is rejected.
 
 {tools_note}
 

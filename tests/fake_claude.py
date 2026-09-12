@@ -6,6 +6,10 @@
   huge     adds 100 lines (rejected by the diff size rule)
   hang     sleeps forever (the critic's timeout must fire)
   noop     changes nothing (rejected: no_change)
+  maxturns / maxturns_noedit   stops with error_max_turns after (or without) an edit
+Costs: FAKE_CLAUDE_COST per call (default 0.5), FAKE_CLAUDE_PATCH_COST for the patch agent (default the same).
+A call whose cost exceeds --max-budget-usd stops with error_max_budget_usd, like the real CLI, after its edits.
+FAKE_CLAUDE_GUARD=need_account makes the guard agent approve only when it was shown the patch agent's account.
 Prints stream-json like the real CLI so the transcript audit and text extraction are exercised.
 """
 import json
@@ -17,15 +21,22 @@ from pathlib import Path
 
 mode = os.environ.get("FAKE_CLAUDE_PATCH", "good")
 prompt = sys.argv[sys.argv.index("-p") + 1] if "-p" in sys.argv else ""
+budget = float(sys.argv[sys.argv.index("--max-budget-usd") + 1]) if "--max-budget-usd" in sys.argv else None
+base_cost = float(os.environ.get("FAKE_CLAUDE_COST", "0.5"))
 
 
-def emit(text: str, tool_input: dict | None = None) -> None:
+def emit(text: str, tool_input: dict | None = None, cost: float = base_cost) -> None:
     content = []
     if tool_input is not None:
         content.append({"type": "tool_use", "name": "Edit", "input": tool_input})
+    if budget is not None and cost > budget:
+        content.append({"type": "text", "text": "Checking one more class before I explain."})
+        print(json.dumps({"type": "assistant", "message": {"content": content}}))
+        print(json.dumps({"type": "result", "subtype": "error_max_budget_usd", "is_error": True, "total_cost_usd": budget}))
+        sys.exit(1)
     content.append({"type": "text", "text": text})
     print(json.dumps({"type": "assistant", "message": {"content": content}}))
-    print(json.dumps({"type": "result", "result": text, "total_cost_usd": float(os.environ.get("FAKE_CLAUDE_COST", "0.5"))}))
+    print(json.dumps({"type": "result", "result": text, "total_cost_usd": cost}))
 
 
 rules = Path("classifier/rules.py")
@@ -33,8 +44,13 @@ if prompt.startswith("You are the diagnostic agent"):
     emit("DIAGNOSIS: near_contact windows are classified as contact (near:7x8 at 0.50).\n"
          "HYPOTHESIS: CONTACT_THRESHOLD is too permissive.\nEVIDENCE: synth00030 closest pair dist 0.42")
 elif prompt.startswith("You are the guard agent"):
-    emit("VERDICT: APPROVE | the patch only tightens the contact threshold named in the diagnosis")
+    account = prompt.split("PATCH AGENT'S ACCOUNT:", 1)[-1].split("DIFF:", 1)[0]
+    if os.environ.get("FAKE_CLAUDE_GUARD") == "need_account" and "HYPOTHESIS:" not in account:
+        emit("VERDICT: REJECT | Rule 1 | no account of the edit | fix: explain the measured cause")
+    else:
+        emit("VERDICT: APPROVE | the patch only tightens the contact threshold named in the diagnosis")
 else:
+    patch_cost = float(os.environ.get("FAKE_CLAUDE_PATCH_COST", str(base_cost)))
     if mode == "hang":
         time.sleep(3600)
     if mode in ("maxturns", "maxturns_noedit"):
@@ -63,4 +79,4 @@ else:
     if mode != "noop":
         rules.write_text(src)
     emit("HYPOTHESIS: near-contact gaps sit just under 0.35 on train\nPATCH: tightened CONTACT_THRESHOLD from 0.35 to 0.30\nEXPECTED: near_contact accuracy up, positives unchanged",
-         tool_input={"file_path": "classifier/rules.py", "old_string": "0.35", "new_string": "0.30"})
+         tool_input={"file_path": "classifier/rules.py", "old_string": "0.35", "new_string": "0.30"}, cost=patch_cost)

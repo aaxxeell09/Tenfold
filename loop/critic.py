@@ -45,11 +45,19 @@ DIAG_TOOLS = "Read,mcp__wandb__*"
 # never useful to the critic; disallowing them stops the agent from burning turns on denied attempts
 DISALLOWED = "Write,Task,WebSearch,WebFetch,NotebookEdit,Skill,EnterPlanMode,Agent,Workflow"
 TOOLS_NOTE = ("To test your hypothesis before and after the edit, run `python loop/train_eval.py` (train set only: "
-              "metrics, worst classes, failing samples with per-frame nearest pairs; `--class 7x8` to focus). Do not "
-              "create scratch files or run any other command: they are denied and waste your turns.")
+              "metrics, worst classes, failing samples with per-frame nearest pairs; `--class 7x8` to focus). To try "
+              "several values of a constant, sweep them in one call instead of editing and re-running per value: "
+              "`python loop/train_eval.py --sweep CONTACT_THRESHOLD=0.25,0.3,0.35` (`--set NAME=VALUE` overrides one "
+              "value for a full report); neither touches rules.py. Do not create scratch files or run any other "
+              "command: they are denied and waste your turns.")
 TOOLS_NOTE_BLIND = ("You have no data and no evaluation tool here: reason from the code. Do not create scratch files "
                     "or run any other command: they are denied and waste your turns.")
 TRACE = {"on": False}
+# Money (USD). Every claude call gets --max-budget-usd; these floors decide whether a call is worth starting.
+GUARD_RESERVE_USD = 0.5  # held back from the patch agent so the edit it leaves can still be judged
+MIN_PATCH_USD = 1.0  # below this a patch session cannot measure and edit
+DIAG_MIN_USD = 0.5
+ITERATION_MIN_USD = DIAG_MIN_USD + MIN_PATCH_USD + GUARD_RESERVE_USD
 
 
 def now() -> str:
@@ -86,6 +94,10 @@ def maybe_weave_op(name: str):
 
 class CriticAuthError(RuntimeError):
     """claude -p cannot authenticate: nothing to gain by iterating."""
+
+
+class BudgetExhausted(RuntimeError):
+    """What is left under --max-cost cannot pay for the next agent call: the arm stops cleanly."""
 
 
 class Critic:
@@ -165,14 +177,21 @@ class Critic:
         self.commit_base("iteration base")
 
     # ---------- agents ----------
-    def run_claude(self, prompt: str, tools: str, transcript: Path, max_turns: int) -> tuple[str, int]:
-        """Run claude -p (or the mock) in the worktree. Returns (final answer text, returncode); 401 = auth failure."""
+    def remaining(self) -> float | None:
+        """USD left under --max-cost, None when uncapped."""
+        return None if not self.a.max_cost else self.a.max_cost - self.spent
+
+    def run_claude(self, prompt: str, tools: str, transcript: Path, max_turns: int,
+                   budget: float | None = None) -> tuple[str, int]:
+        """Run claude -p (or the mock) in the worktree. Returns (final answer text, returncode):
+        401 auth failure, 124 timeout, 125 out of turns, 126 stopped at its own --max-budget-usd cap."""
+        cap = [] if budget is None else ["--max-budget-usd", f"{max(budget, 0.01):.2f}"]
         if self.a.mock_claude:
-            cmd = [sys.executable, str(Path(self.a.mock_claude).resolve()), "-p", prompt, "--allowedTools", tools]
+            cmd = [sys.executable, str(Path(self.a.mock_claude).resolve()), "-p", prompt, "--allowedTools", tools, *cap]
         else:
             cmd = [self.a.claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose",
                    "--allowedTools", tools, "--disallowedTools", DISALLOWED, "--max-turns", str(max_turns),
-                   "--model", self.a.model, "--mcp-config", str(self.repo / "loop" / "mcp.json"), "--strict-mcp-config"]
+                   "--model", self.a.model, "--mcp-config", str(self.repo / "loop" / "mcp.json"), "--strict-mcp-config", *cap]
         try:
             proc = subprocess.run(cmd, cwd=self.worktree, env=self.env, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=self.a.timeout)
@@ -182,7 +201,7 @@ class Critic:
         transcript.write_text(proc.stdout)
         texts: list[str] = []
         final: str | None = None
-        out_of_turns = False
+        stopped = 0
         for line in proc.stdout.splitlines():
             try:
                 ev = json.loads(line)
@@ -195,8 +214,7 @@ class Critic:
                     pass
                 if ev.get("is_error") and ev.get("api_error_status") in (401, 403):
                     return str(ev.get("result") or "authentication failed"), 401
-                if ev.get("subtype") == "error_max_turns":
-                    out_of_turns = True
+                stopped = {"error_max_turns": 125, "error_max_budget_usd": 126}.get(ev.get("subtype"), stopped)
                 if ev.get("result"):
                     final = str(ev["result"])
             elif ev.get("type") == "assistant":
@@ -206,8 +224,8 @@ class Critic:
         if final is None and not texts and proc.stdout.strip() and not proc.stdout.lstrip().startswith("{"):
             texts.append(proc.stdout)
         text = (final if final is not None else "\n".join(texts)).strip()
-        if out_of_turns:
-            return "\n".join(texts[-3:]).strip(), 125  # ran out of turns: keep its last words, not the error string
+        if stopped:
+            return "\n".join(texts[-3:]).strip(), stopped  # out of turns or budget: keep its last words, not the error string
         return text, proc.returncode
 
     def prompt(self, name: str, **fields: str) -> str:
@@ -220,33 +238,43 @@ class Critic:
     def diagnose(self, iteration: int) -> str:
         if self.a.blind:
             return "DIAGNOSIS: no failure data available (blind arm).\nHYPOTHESIS: improve the classifier however you see fit."
+        rem = self.remaining()
+        budget = None if rem is None else rem - MIN_PATCH_USD - GUARD_RESERVE_USD  # never eat the patch agent's share
+        if budget is not None and budget < DIAG_MIN_USD:
+            raise BudgetExhausted("before the diagnostic agent")
         report_path = self.worktree / REPORT_REL
         report = report_path.read_text()[:20000] if report_path.exists() else "{}"
         text, rc = self.run_claude(self.prompt("diagnostic", train_eval_name=f"tenfold-train-{self.tag_prev}", report=report),
-                                   DIAG_TOOLS, self.tmp / f"diag-{iteration}{self.suffix}.jsonl", 8)
+                                   DIAG_TOOLS, self.tmp / f"diag-{iteration}{self.suffix}.jsonl", 8, budget)
         if rc == 401:
             raise CriticAuthError(text)
+        if rc == 126:
+            raise BudgetExhausted("inside the diagnostic agent")
         return text if rc == 0 and text else f"DIAGNOSIS: unavailable (claude rc={rc}).\nHYPOTHESIS: none."
 
     @maybe_weave_op("critic.patch")
     def patch(self, iteration: int, attempt: int, diagnosis: str, feedback: str, next_version: int) -> tuple[str, int, Path]:
+        rem = self.remaining()
+        budget = None if rem is None else rem - GUARD_RESERVE_USD  # keep enough to judge whatever it leaves
+        if budget is not None and budget < MIN_PATCH_USD:
+            raise BudgetExhausted(f"before patch attempt {attempt}")
         transcript = self.tmp / f"patch-{iteration}-{attempt}{self.suffix}.jsonl"
         text, rc = self.run_claude(
             self.prompt("patch", diagnosis=diagnosis, feedback=feedback, next_version=str(next_version),
                         tools_note=TOOLS_NOTE_BLIND if self.a.blind else TOOLS_NOTE,
                         max_turns=str(self.a.max_turns), finalize_by=str(max(5, self.a.max_turns - 10))),
-            PATCH_TOOLS_BLIND if self.a.blind else PATCH_TOOLS, transcript, self.a.max_turns)
+            PATCH_TOOLS_BLIND if self.a.blind else PATCH_TOOLS, transcript, self.a.max_turns, budget)
         return text, rc, transcript
 
     @maybe_weave_op("critic.guard_agent")
-    def guard_agent(self, iteration: int, diagnosis: str, diff: str) -> str:
+    def guard_agent(self, iteration: int, diagnosis: str, diff: str, account: str) -> str:
         if self.a.blind:
             return "VERDICT: APPROVE | blind arm has no diagnosis to check against"
-        text, rc = self.run_claude(self.prompt("guard", diagnosis=diagnosis, diff=diff[:12000]), "",
-                                   self.tmp / f"guard-{iteration}{self.suffix}.jsonl", 2)
+        text, rc = self.run_claude(self.prompt("guard", diagnosis=diagnosis, account=account, diff=diff[:12000]), "",
+                                   self.tmp / f"guard-{iteration}{self.suffix}.jsonl", 2, self.remaining())
         if rc == 401:
             raise CriticAuthError(text)
-        return text if rc == 0 and text else "VERDICT: REJECT | guard agent unavailable | fix: retry"
+        return text if rc == 0 and text else f"VERDICT: REJECT | guard agent unavailable (rc={rc}) | fix: retry"
 
     @maybe_weave_op("critic.guard_code")
     def guard_code(self, transcript: Path) -> list[str]:
@@ -337,6 +365,13 @@ class Critic:
 
     # ---------- main loop ----------
     def run(self) -> int:
+        try:
+            return self.loop()
+        except BudgetExhausted as e:
+            log(f"STOP: budget reached {e} (${self.spent:.2f} spent of ${self.a.max_cost:.2f})", self.logfile)
+            return 0
+
+    def loop(self) -> int:
         a = self.a
         self.setup_worktree()
         metrics = self.load_metrics()
@@ -361,8 +396,10 @@ class Critic:
         self.tag_prev = last["tag"]
         no_improve = 0
         for it in range(1, a.iterations + 1):
-            if a.max_cost and self.spent >= a.max_cost:
-                log(f"STOP: budget reached (${self.spent:.2f} spent, limit ${a.max_cost:.2f})", self.logfile)
+            rem = self.remaining()
+            if rem is not None and rem < ITERATION_MIN_USD:
+                log(f"STOP: ${self.spent:.2f} spent of ${a.max_cost:.2f}, not enough left for another iteration "
+                    f"(one needs ${ITERATION_MIN_USD:.2f})", self.logfile)
                 break
             log(f"iteration {it}/{a.iterations} start (next version v{version}{self.suffix})", self.logfile)
             self.heartbeat(it, "start")
@@ -380,23 +417,28 @@ class Critic:
                     feedback = ""
                     self.reset_worktree()
                     continue
-                unfinished = False
-                if rc == 125:
+                unfinished = ""
+                if rc in (125, 126):
+                    why = "ran out of turns" if rc == 125 else "stopped at its budget"
                     if not self.git_wt("diff", "--", str(RULES_REL)).strip():
-                        log(f"patch attempt {attempt}: agent ran out of turns with no edit", self.logfile)
-                        feedback = ("Your previous session ran out of turns before editing rules.py. Measure once, "
-                                    "make one focused edit early, then verify.")
+                        log(f"patch attempt {attempt}: agent {why} with no edit", self.logfile)
+                        feedback = (f"Your previous session {why} before editing rules.py. Measure once (sweep "
+                                    "constants in one call), make one focused edit early, then verify.")
                         self.reset_worktree()
                         continue
-                    log(f"patch attempt {attempt}: agent ran out of turns; the edit it left goes through guard and gate", self.logfile)
-                    unfinished, rc = True, 0
+                    log(f"patch attempt {attempt}: agent {why}; the edit it left goes through guard and gate", self.logfile)
+                    unfinished, rc = why, 0
                 if rc != 0:
                     log(f"patch attempt {attempt}: claude exited {rc}: {text[-200:]}", self.logfile)
                     break
                 diff = self.git_wt("diff", "--", str(RULES_REL))
+                closing = {k: next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith(k + ":")), "")
+                           for k in ("HYPOTHESIS", "PATCH", "EXPECTED")}
+                account = ("\n".join(f"{k}: {v}" for k, v in closing.items() if v) if any(closing.values())
+                           else f"none: the session {unfinished or 'ended'} without explaining its edit")
                 rejects = self.guard_code(transcript)
                 if not rejects:
-                    verdict = self.guard_agent(it, diagnosis, diff)
+                    verdict = self.guard_agent(it, diagnosis, diff, account)
                     if "APPROVE" not in verdict.upper():
                         rejects = [f"GUARD_REJECT agent: {verdict.strip()[:300]}"]
                 if rejects:
@@ -406,10 +448,9 @@ class Critic:
                     self.record_rejection(it, "guard: " + rejects[0][:200], diff)
                     self.reset_worktree()
                     continue
-                patch_summary = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("PATCH:")),
-                                     "edit left by a session that ran out of turns" if unfinished else text[-200:])
-                patch_hypothesis = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("HYPOTHESIS:")), "")
-                expected = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("EXPECTED:")), "")
+                patch_summary = closing["PATCH"] or (f"edit left by a session that {unfinished}" if unfinished else text[-200:])
+                patch_hypothesis = closing["HYPOTHESIS"]
+                expected = closing["EXPECTED"]
                 if a.dry_run:
                     print("\n----- DRY RUN: guard passed, diff below, nothing committed -----\n" + diff)
                     print(f"PATCH: {patch_summary}\nEXPECTED: {expected}")

@@ -289,15 +289,32 @@ def test_snapshot_has_versions_diffs_and_commits(tmp_path):
     assert set(snap["informed"][1]["train"]) >= {"exact_match", "exact_match_ci95", "per_class"}
 
 
-def test_budget_cap_stops_the_arm(tmp_path):
+def test_budget_cap_stops_before_an_iteration_it_cannot_afford(tmp_path):
     repo = make_repo(tmp_path)
-    # each fake call reports 0.5 USD: iteration 1 spends 1.5 (diagnosis, patch, guard agent), above a 1.0 limit
-    p = run_critic(repo, "--skip-heldout", "--max-cost", "1.0", iterations=3)
+    # each fake call costs 0.5: two iterations spend 3.0, and 0.5 left cannot pay for a diagnosis plus a patch
+    p = run_critic(repo, "--skip-heldout", "--max-cost", "3.5", iterations=3)
     assert p.returncode == 0, p.stdout + p.stderr
-    assert "STOP: budget reached ($1.50 spent, limit $1.00)" in p.stdout
-    assert len(commits_by_critic(repo)) == 1
+    assert "STOP: $3.00 spent of $3.50, not enough left for another iteration" in p.stdout
+    assert len(commits_by_critic(repo)) == 2
     m = json.loads((repo / "data" / "metrics.json").read_text())
-    assert m["versions"][-1]["spent_usd"] == 1.5
+    assert m["versions"][-1]["spent_usd"] == 3.0
+
+
+def test_patch_agent_is_capped_mid_call_and_its_edit_is_still_judged(tmp_path):
+    repo = make_repo(tmp_path)
+    # the patch agent would spend 5.0; with 3.0 in total it gets 3.0 - 0.1 (diagnosis) - 0.5 (guard reserve) = 2.4
+    env_cost = {"FAKE_CLAUDE_COST": "0.1", "FAKE_CLAUDE_PATCH_COST": "5.0"}
+    os.environ.update(env_cost)
+    try:
+        p = run_critic(repo, "--skip-heldout", "--max-cost", "3.0")
+    finally:
+        for k in env_cost:
+            os.environ.pop(k, None)
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "stopped at its budget; the edit it left goes through guard and gate" in p.stdout
+    assert "ACCEPTED v1" in p.stdout and len(commits_by_critic(repo)) == 1
+    m = json.loads((repo / "data" / "metrics.json").read_text())
+    assert m["versions"][1]["spent_usd"] == pytest.approx(2.6) and m["versions"][1]["spent_usd"] <= 3.0
 
 
 def _metrics(em, fu, per_class=None):
@@ -360,3 +377,65 @@ def test_loop_out_of_turns_without_edit_fails_cleanly(tmp_path):
 def test_patch_prompt_announces_the_turn_budget():
     text = (REPO / "loop" / "prompts" / "patch.md").read_text()
     assert "{max_turns}" in text and "{finalize_by}" in text
+
+
+# ---------- the guard agent reads the patch agent's account ----------
+
+def test_guard_prompt_orders_diagnosis_account_diff():
+    text = (REPO / "loop" / "prompts" / "guard.md").read_text()
+    assert text.index("{diagnosis}") < text.index("{account}") < text.index("{diff}")
+
+
+def test_guard_agent_is_shown_the_patch_agents_account(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("FAKE_CLAUDE_GUARD", "need_account")
+    p = run_critic(repo, "--skip-heldout")
+    assert p.returncode == 0 and "ACCEPTED v1" in p.stdout, p.stdout + p.stderr
+
+
+def test_an_unexplained_salvaged_edit_reaches_the_guard_without_an_account(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("FAKE_CLAUDE_GUARD", "need_account")
+    p = run_critic(repo, "--skip-heldout", mode="maxturns")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "rejected: GUARD_REJECT agent: VERDICT: REJECT | Rule 1" in p.stdout and commits_by_critic(repo) == []
+
+
+# ---------- train_eval overrides and sweeps ----------
+
+def _train_eval(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    shutil.copy(repo / "data" / "samples.jsonl", repo / "data" / "train.jsonl")
+    return subprocess.run([PY, "loop/train_eval.py", *args], cwd=repo, capture_output=True, text=True,
+                          env={**os.environ, "PYTHONPATH": str(repo)})
+
+
+def test_train_eval_sweep_scores_each_value_without_touching_rules(tmp_path):
+    repo = make_repo(tmp_path)
+    before = (repo / "classifier" / "rules.py").read_text()
+    p = _train_eval(repo, "--sweep", "CONTACT_THRESHOLD=0.30,0.35")
+    assert p.returncode == 0, p.stdout + p.stderr
+    rows = [l.strip() for l in p.stdout.splitlines() if l.strip().startswith("CONTACT_THRESHOLD=")]
+    assert len(rows) == 2 and all("exact_match=" in r and "worst:" in r for r in rows)
+    em = [float(r.split("exact_match=")[1].split()[0]) for r in rows]
+    assert em[0] > em[1]  # hard synthetic data: 0.30 beats the V0 threshold
+    assert (repo / "classifier" / "rules.py").read_text() == before
+
+
+def test_train_eval_set_overrides_and_names_the_valid_constants(tmp_path):
+    repo = make_repo(tmp_path)
+    base = _train_eval(repo)
+    over = _train_eval(repo, "--set", "CONTACT_THRESHOLD=0.30")
+    assert over.returncode == 0 and "overrides: CONTACT_THRESHOLD=0.30" in over.stdout, over.stdout + over.stderr
+    assert base.stdout.split("failing samples")[0] != over.stdout.split("failing samples")[0]
+    bad = _train_eval(repo, "--set", "NOPE=1")
+    assert bad.returncode != 0 and "CONTACT_THRESHOLD=0.35" in bad.stderr
+
+
+# ---------- latency ----------
+
+def test_guard_rejects_a_slow_classifier(worktree):
+    r = worktree / "classifier" / "rules.py"
+    r.write_text(r.read_text().replace("    frame = features.last_valid_frame(window)",
+                                       "    sum(i * i for i in range(300000))\n    frame = features.last_valid_frame(window)"))
+    rc, out = guard(worktree)
+    assert rc == 1 and "GUARD_REJECT latency: classify() p95" in out, out
