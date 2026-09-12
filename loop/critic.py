@@ -36,7 +36,7 @@ from tenfold.env import load_env  # noqa: E402
 RULES_REL = Path("classifier/rules.py")
 REPORT_REL = Path("eval/last_train_report.json")
 CRITIC_FILES = ["classifier/__init__.py", "classifier/schema.py", "classifier/features.py", "eval/__init__.py",
-                "eval/scorers.py", "loop/__init__.py", "loop/smoke.py", "loop/guard.py", "loop/synth.py",
+                "eval/scorers.py", "eval/slices.py", "loop/__init__.py", "loop/smoke.py", "loop/guard.py", "loop/synth.py",
                 "loop/train_eval.py", "loop/prompts/diagnostic.md", "loop/prompts/patch.md", "loop/prompts/guard.md"]
 BLIND_EXCLUDE = {"loop/train_eval.py"}
 PATCH_TOOLS_BLIND = "Read,Edit,Bash(python loop/guard.py --check),Bash(python loop/smoke.py),Bash(python loop/smoke.py *)"
@@ -325,6 +325,13 @@ class Critic:
         if drops:
             c, a, b = drops[0]
             return False, f"class {c} fell {a:.2f} -> {b:.2f} (limit 5 points), {len(drops)} class(es) regressed"
+        ps, cs = prev.get("per_slice") or {}, cand.get("per_slice") or {}
+        falls = [(s, ps[s]["exact_match"], v["exact_match"]) for s, v in cs.items()
+                 if s in ps and ps[s].get("exact_match") is not None and v.get("exact_match") is not None
+                 and v["exact_match"] < ps[s]["exact_match"] - 0.05 - 1e-9]
+        if falls:
+            s, a, b = falls[0]
+            return False, f"condition {s} fell {a:.2f} -> {b:.2f} (limit 5 points), {len(falls)} condition(s) regressed"
         fu, pfu = cand.get("false_unknown_rate"), prev.get("false_unknown_rate")
         if fu is not None and pfu is not None and fu > pfu + 0.02 + 1e-9:
             return False, f"false_unknown_rate rose {pfu:.3f} -> {fu:.3f} (limit +0.02)"

@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 from classifier import features  # noqa: E402
 from classifier.schema import GestureState, window_from_json  # noqa: E402
 from eval import scorers  # noqa: E402
+from eval.slices import per_slice  # noqa: E402
 
 CONSTANT = re.compile(r"[A-Z][A-Z0-9_]*")
 
@@ -135,7 +136,10 @@ def main() -> int:
     for k in scorers.METRICS:
         print(f"  {k:28s} {fmt(m.get(k))}")
     print("  worst classes: " + worst(m))
-    failed = [r for r in rows if not scorers.exact_match(r["output"], r["target"])]
+    slices = per_slice(samples, rows)
+    if slices:
+        print("  by condition: " + ", ".join(f"{k}={fmt(v['exact_match'])} (n={v['n_samples']})" for k, v in slices.items()))
+    failed =[r for r in rows if not scorers.exact_match(r["output"], r["target"])]
     if a.cls:
         failed = [r for r in failed if scorers.class_of(r["target"], r["kind"]) == a.cls]
     print(f"\nfailing samples: {len(failed)} (showing {min(len(failed), a.limit)})")

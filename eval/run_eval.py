@@ -26,13 +26,10 @@ from tenfold.env import load_env  # noqa: E402
 
 load_env()
 
-from tenfold.env import load_env  # noqa: E402
-
-load_env()
-
 from classifier import features  # noqa: E402
 from classifier.schema import window_from_json  # noqa: E402
 from eval import scorers  # noqa: E402
+from eval.slices import per_slice  # noqa: E402
 
 PROJECTS = {"train": "tenfold", "heldout": "tenfold-heldout"}
 PROJECT_SUFFIX = os.environ.get("TENFOLD_PROJECT_SUFFIX", "")  # e.g. "-smoke" for rehearsals
@@ -143,6 +140,10 @@ def print_table(metrics: dict, split: str, tag: str) -> None:
         print(f"  {'exact_match 95% CI':28s} [{ci[0]:.3f}, {ci[1]:.3f}]")
     worst = sorted(metrics["per_class"].items(), key=lambda kv: (kv[1] is None, kv[1]))[:5]
     print("  worst classes: " + ", ".join(f"{c}={v:.2f}" for c, v in worst if v is not None))
+    slices = metrics.get("per_slice") or {}
+    if slices:
+        print("  by condition: " + ", ".join(f"{k}={v['exact_match']:.2f} (n={v['n_samples']})"
+                                             for k, v in slices.items() if v["exact_match"] is not None))
 
 
 def publish_weave(split: str, tag: str, rows: list[dict], metrics: dict, sha: str) -> str | None:
@@ -215,6 +216,7 @@ def main() -> int:
     samples = load_samples(spath)
     rows = build_rows(samples, predict(Path(args.rules).resolve(), spath))
     metrics = scorers.aggregate(rows)
+    metrics["per_slice"] = per_slice(samples, rows)
     sha = git_sha(REPO)
     print_table(metrics, args.split, args.tag)
 
@@ -229,7 +231,8 @@ def main() -> int:
 
     if args.split == "train":
         Path(args.report).write_text(json.dumps({
-            "tag": args.tag, "git_sha": sha, "success_metric": "exact_match must go up, false_unknown_rate must not rise",
+            "tag": args.tag, "git_sha": sha,
+            "success_metric": "exact_match must go up, false_unknown_rate must not rise, no class or capture condition may fall",
             "metrics": {k: v for k, v in metrics.items()},
             "worst_samples": worst_samples(samples, rows),
             "errors": [{"id": r["id"], "error": r["error"]} for r in rows if r.get("error")][:10],

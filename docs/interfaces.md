@@ -83,7 +83,9 @@ recover frames where MediaPipe lost a hand.
 
 `METRICS` = `exact_match`, `exact_match_ci95` ([low, high] or null), `exact_match_unordered`, `contact_accuracy`,
 `false_unknown_rate`, `negative_rejection_accuracy`, `near_contact_accuracy`, `n_samples`, `n_holds`,
-`per_class` (class name to accuracy; `7x8`, `near:7x8`, `transition`, ...). Any metric can be null.
+`per_class` (class name to accuracy; `7x8`, `near:7x8`, `transition`, ...), `per_slice` (capture condition to
+`{exact_match, false_unknown_rate, n_samples, n_holds}`; `angle=side`, `distance=far`, ...; absent on versions
+evaluated before it existed). Any metric can be null.
 
 Chart mapping (SPEC section 10): held-out `exact_match` by version for `informed` (solid green) and `blind`
 (solid grey), train dashed, `knn_heldout.exact_match` dotted, `detection_ceiling.both_hands_contact_frames`

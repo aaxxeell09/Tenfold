@@ -439,3 +439,45 @@ def test_guard_rejects_a_slow_classifier(worktree):
                                        "    sum(i * i for i in range(300000))\n    frame = features.last_valid_frame(window)"))
     rc, out = guard(worktree)
     assert rc == 1 and "GUARD_REJECT latency: classify() p95" in out, out
+
+
+# ---------- capture conditions ----------
+
+def test_per_slice_groups_tags_and_skips_constant_or_small_ones():
+    sys.path.insert(0, str(REPO))
+    from eval.slices import per_slice
+    target = {"method": "6-10", "left": 7, "right": 8, "contact": True, "folded": None}
+    samples, rows = [], []
+    for i in range(50):
+        samples.append({"id": f"s{i}", "angle": "front" if i < 30 else "side", "distance": "near",
+                        "lighting": "lamp" if i < 45 else "dark"})
+        rows.append({"id": f"s{i}", "hold_id": f"s{i}", "kind": "positive", "target": target,
+                     "output": target if i < 30 else {"method": "unknown"}})
+    s = per_slice(samples, rows)
+    assert s["angle=front"]["exact_match"] == 1.0 and s["angle=side"]["exact_match"] == 0.0
+    assert s["angle=side"]["n_samples"] == 20
+    assert not any(k.startswith("distance=") for k in s)  # a single value says nothing
+    assert "lighting=dark" not in s and "lighting=lamp" in s  # 5 samples is too few to gate on
+
+
+def test_gate_rejects_a_capture_condition_that_falls():
+    from loop.critic import Critic
+    prev = {**_metrics(0.50, 0.05), "per_slice": {"angle=front": {"exact_match": 0.60}, "angle=side": {"exact_match": 0.40}}}
+    cand = {**_metrics(0.55, 0.05), "per_slice": {"angle=front": {"exact_match": 0.80}, "angle=side": {"exact_match": 0.30}}}
+    ok, why = Critic.gate(None, prev, cand)
+    assert not ok and "condition angle=side fell 0.40 -> 0.30" in why
+    cand["per_slice"]["angle=side"]["exact_match"] = 0.37
+    assert Critic.gate(None, prev, cand)[0]
+    assert Critic.gate(None, _metrics(0.50, 0.05), cand)[0]  # a baseline evaluated before slices existed is not blocked
+
+
+def test_run_eval_and_train_report_carry_conditions(tmp_path):
+    repo = make_repo(tmp_path, hard=False)
+    p = subprocess.run([PY, "eval/run_eval.py", "--split", "train", "--local", "--tag", "t"], cwd=repo, capture_output=True,
+                       text=True, env={**os.environ, "PYTHONPATH": str(repo)})
+    assert p.returncode == 0, p.stderr
+    slices = json.loads((repo / "eval" / "results" / "train-t.json").read_text())["metrics"]["per_slice"]
+    assert any(k.startswith("angle=") for k in slices) and "by condition:" in p.stdout
+    assert json.loads((repo / "eval" / "last_train_report.json").read_text())["metrics"]["per_slice"] == slices
+    te = _train_eval(repo)
+    assert te.returncode == 0 and "by condition: angle=" in te.stdout, te.stdout + te.stderr

@@ -8,6 +8,10 @@ contract is classifier/schema.py. The train evaluation is named {train_eval_name
 TRAIN REPORT (eval/last_train_report.json):
 {report}
 
+`metrics.per_slice` is exact_match by capture condition (camera angle, distance). When one condition is far
+below the others, say so: the metric gate rejects any patch that drops a class or a condition by more than 5
+points, so the patch agent needs to know which views are fragile.
+
 Produce exactly this, nothing else:
 
 DIAGNOSIS: <one sentence: the most frequent failure and the classes it hits, with the numbers from the report>
