@@ -15,6 +15,10 @@ failing classes, fix that cause and say so in your HYPOTHESIS line below.
 
 {tools_note}
 
+Budget: you have at most {max_turns} turns, and every tool call uses one. Measure first, but by turn {finalize_by}
+at the latest make your final edit, run `python loop/guard.py --check`, and write the closing lines. If you run
+out of turns, whatever rules.py contains at that moment is evaluated as your patch, unexplained.
+
 You may only edit classifier/rules.py. The guard will reject the patch if any other file changes, if rules.py
 stops importing, if the diff exceeds 80 lines or the file exceeds 400 lines, if it imports anything outside
 math, statistics, dataclasses, typing, numpy, classifier.schema, classifier.features, if it uses open, exec,

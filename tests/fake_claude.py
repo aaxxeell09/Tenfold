@@ -37,6 +37,14 @@ elif prompt.startswith("You are the guard agent"):
 else:
     if mode == "hang":
         time.sleep(3600)
+    if mode in ("maxturns", "maxturns_noedit"):
+        if mode == "maxturns":
+            src0 = rules.read_text()
+            rules.write_text(src0.replace("CONTACT_THRESHOLD = 0.35", "CONTACT_THRESHOLD = 0.30"))
+        print(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Let me look at more failures first."}]}}))
+        print(json.dumps({"type": "result", "subtype": "error_max_turns", "is_error": True, "num_turns": 46,
+                          "total_cost_usd": 0.5}))
+        sys.exit(1)
     src = rules.read_text()
     if mode in ("good", "same"):
         m = re.search(r"CONTACT_THRESHOLD = ([0-9.]+)", src)

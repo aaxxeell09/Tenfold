@@ -37,7 +37,9 @@ What happens inside `loop/critic.py`:
    writes one diagnosis and one hypothesis.
 3. Patch agent: edits `rules.py` only, may run `python loop/train_eval.py` (train metrics and failing samples,
    before and after its edit), `python loop/guard.py --check` and `python loop/smoke.py`. It may fix the named
-   failures with a different mechanism than the diagnosis guessed, and states its own hypothesis.
+   failures with a different mechanism than the diagnosis guessed, and states its own hypothesis. Its prompt
+   announces its turn budget (45 by default); if it runs out anyway, the edit it left still goes through the
+   guard and the gate instead of being thrown away.
 4. Guard agent: sees only the diagnosis and the diff, no tools. It rejects patches that do not act on the named
    failures or that game the metric (refusing more often, best-case confidence, memorised values).
 5. `loop/guard.py` (pinned copy, outside the worktree): only `rules.py` changed, importable, diff under 80

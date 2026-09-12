@@ -45,14 +45,13 @@ def main() -> int:
         shutil.copy(REPO / ".env", clone / ".env")
     env = {**os.environ, "TENFOLD_PROJECT_SUFFIX": "-smoke", "TENFOLD_HELDOUT": str(heldout), "PYTHONPATH": str(clone),
            "PY": sys.executable}
-    cmd = [sys.executable, "-u", str(clone / "loop" / "critic.py"), "--repo", str(clone), "--iterations", str(a.iterations),
-           "--timeout", "900"]
+    cmd = [sys.executable, "-u", str(clone / "loop" / "critic.py"), "--repo", str(clone), "--iterations", str(a.iterations)]
     if a.mock:
         cmd += ["--mock-claude", str(clone / "tests" / "fake_claude.py"), "--local"]
     if a.blind:
         cmd.append("--blind")
     if a.nightly:
-        extra = ["--timeout", "900"] + (["--mock-claude", str(clone / "tests" / "fake_claude.py"), "--local"] if a.mock else [])
+        extra = ["--mock-claude", str(clone / "tests" / "fake_claude.py"), "--local"] if a.mock else []
         env["TENFOLD_CRITIC_ARGS"] = " ".join(extra)
         cmd = ["bash", str(clone / "loop" / "nightly.sh"), str(a.iterations)]
     print(f"rehearsal in {d}", flush=True)

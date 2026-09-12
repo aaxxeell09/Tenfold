@@ -338,3 +338,25 @@ def test_loop_rejects_a_patch_that_does_not_move_the_score(tmp_path):
     assert "metric gate rejected: no improvement" in p.stdout and commits_by_critic(repo) == []
     m = json.loads((repo / "data" / "metrics.json").read_text())
     assert "no improvement" in m["rejected"][0]["reason"]
+
+
+def test_loop_salvages_the_edit_when_the_agent_runs_out_of_turns(tmp_path):
+    repo = make_repo(tmp_path)
+    p = run_critic(repo, "--skip-heldout", mode="maxturns")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "ran out of turns; the edit it left goes through guard and gate" in p.stdout and "ACCEPTED v1" in p.stdout
+    assert len(commits_by_critic(repo)) == 1
+    m = json.loads((repo / "data" / "metrics.json").read_text())
+    assert m["versions"][1]["patch"] == "edit left by a session that ran out of turns"
+
+
+def test_loop_out_of_turns_without_edit_fails_cleanly(tmp_path):
+    repo = make_repo(tmp_path)
+    p = run_critic(repo, "--skip-heldout", mode="maxturns_noedit")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert p.stdout.count("agent ran out of turns with no edit") == 2 and commits_by_critic(repo) == []
+
+
+def test_patch_prompt_announces_the_turn_budget():
+    text = (REPO / "loop" / "prompts" / "patch.md").read_text()
+    assert "{max_turns}" in text and "{finalize_by}" in text

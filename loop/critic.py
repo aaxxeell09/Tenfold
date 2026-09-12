@@ -182,6 +182,7 @@ class Critic:
         transcript.write_text(proc.stdout)
         texts: list[str] = []
         final: str | None = None
+        out_of_turns = False
         for line in proc.stdout.splitlines():
             try:
                 ev = json.loads(line)
@@ -194,6 +195,8 @@ class Critic:
                     pass
                 if ev.get("is_error") and ev.get("api_error_status") in (401, 403):
                     return str(ev.get("result") or "authentication failed"), 401
+                if ev.get("subtype") == "error_max_turns":
+                    out_of_turns = True
                 if ev.get("result"):
                     final = str(ev["result"])
             elif ev.get("type") == "assistant":
@@ -202,7 +205,10 @@ class Critic:
                         texts.append(b["text"])
         if final is None and not texts and proc.stdout.strip() and not proc.stdout.lstrip().startswith("{"):
             texts.append(proc.stdout)
-        return (final if final is not None else "\n".join(texts)).strip(), proc.returncode
+        text = (final if final is not None else "\n".join(texts)).strip()
+        if out_of_turns:
+            return "\n".join(texts[-3:]).strip(), 125  # ran out of turns: keep its last words, not the error string
+        return text, proc.returncode
 
     def prompt(self, name: str, **fields: str) -> str:
         text = (self.repo / "loop" / "prompts" / f"{name}.md").read_text()
@@ -227,7 +233,8 @@ class Critic:
         transcript = self.tmp / f"patch-{iteration}-{attempt}{self.suffix}.jsonl"
         text, rc = self.run_claude(
             self.prompt("patch", diagnosis=diagnosis, feedback=feedback, next_version=str(next_version),
-                        tools_note=TOOLS_NOTE_BLIND if self.a.blind else TOOLS_NOTE),
+                        tools_note=TOOLS_NOTE_BLIND if self.a.blind else TOOLS_NOTE,
+                        max_turns=str(self.a.max_turns), finalize_by=str(max(5, self.a.max_turns - 10))),
             PATCH_TOOLS_BLIND if self.a.blind else PATCH_TOOLS, transcript, self.a.max_turns)
         return text, rc, transcript
 
@@ -373,6 +380,16 @@ class Critic:
                     feedback = ""
                     self.reset_worktree()
                     continue
+                unfinished = False
+                if rc == 125:
+                    if not self.git_wt("diff", "--", str(RULES_REL)).strip():
+                        log(f"patch attempt {attempt}: agent ran out of turns with no edit", self.logfile)
+                        feedback = ("Your previous session ran out of turns before editing rules.py. Measure once, "
+                                    "make one focused edit early, then verify.")
+                        self.reset_worktree()
+                        continue
+                    log(f"patch attempt {attempt}: agent ran out of turns; the edit it left goes through guard and gate", self.logfile)
+                    unfinished, rc = True, 0
                 if rc != 0:
                     log(f"patch attempt {attempt}: claude exited {rc}: {text[-200:]}", self.logfile)
                     break
@@ -389,7 +406,8 @@ class Critic:
                     self.record_rejection(it, "guard: " + rejects[0][:200], diff)
                     self.reset_worktree()
                     continue
-                patch_summary = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("PATCH:")), text[-200:])
+                patch_summary = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("PATCH:")),
+                                     "edit left by a session that ran out of turns" if unfinished else text[-200:])
                 patch_hypothesis = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("HYPOTHESIS:")), "")
                 expected = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("EXPECTED:")), "")
                 if a.dry_run:
@@ -456,8 +474,8 @@ def main() -> int:
     ap.add_argument("--local", action="store_true", help="no W&B anywhere")
     ap.add_argument("--train-samples")
     ap.add_argument("--heldout-samples")
-    ap.add_argument("--max-turns", type=int, default=30)
-    ap.add_argument("--timeout", type=int, default=600)
+    ap.add_argument("--max-turns", type=int, default=45)
+    ap.add_argument("--timeout", type=int, default=1500)
     ap.add_argument("--max-cost", type=float, default=None,
                     help="stop this arm once the agents have spent this many USD (default TENFOLD_MAX_COST_USD or 40)")
     a = ap.parse_args()

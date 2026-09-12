@@ -89,8 +89,13 @@ def main() -> int:
                 env.setdefault("CLAUDE_CONFIG_DIR", str(REPO / ".claude-critic"))
             p = subprocess.run([cl, "-p", "Reply with the single word OK.", "--output-format", "json", "--max-turns", "1"],
                                capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL, env=env)
-            authed = p.returncode == 0 and '"is_error":false' in p.stdout.replace(" ", "")
-            why = "" if authed else (p.stdout[-160:].strip() or p.stderr[-160:].strip())
+            try:
+                import json as _json
+                res = _json.loads(p.stdout)
+                authed = p.returncode == 0 and not res.get("is_error")
+                why = "" if authed else str(res.get("result") or res.get("subtype") or "unknown error")
+            except ValueError:
+                authed, why = False, (p.stderr.strip() or p.stdout.strip() or "no output")[-160:]
         except Exception as e:
             authed, why = False, str(e)
         backend = os.environ.get("ANTHROPIC_BASE_URL", "api.anthropic.com").split("//")[-1].split("/")[0]
