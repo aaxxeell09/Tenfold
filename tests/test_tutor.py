@@ -72,7 +72,11 @@ def test_phrase_matches_tally_when_disabled():
 def test_phrase_fallback_first_then_model_on_next_update(monkeypatch):
     calls = []
     t = tmod.Tutor(fallback=tally.phrase, api_key="k", timeout=1.0)
-    monkeypatch.setattr(t, "_call", lambda event, ctx: calls.append(event) or "Almost! Slide your right finger from 9 to 8.")
+    def slow_enough(event, ctx):
+        calls.append(event)
+        time.sleep(0.1)  # still in flight when the second update arrives
+        return "Almost! Slide your right finger from 9 to 8."
+    monkeypatch.setattr(t, "_call", slow_enough)
     ctx = {"hint": {"move_from": 9, "move_to": 8}, "answer": None, "exercise": "7 x 8"}
     first = t.phrase("wrong_right_finger", ctx)
     assert first == tally.phrase("wrong_right_finger", ctx)
@@ -106,15 +110,43 @@ def test_phrase_late_line_waits_for_next_episode(monkeypatch):
     assert t.phrase("correct_pose", ctx) == "late but lovely"                    # ...and comes back: cached line shows
 
 
-def test_phrase_model_error_keeps_fallback(monkeypatch):
+def test_phrase_model_error_backs_off_instead_of_hammering(monkeypatch):
+    calls = []
     t = tmod.Tutor(fallback=tally.phrase, api_key="k", timeout=0.5)
 
     def boom(event, ctx):
+        calls.append(ctx["exercise"])
         raise RuntimeError("503")
     monkeypatch.setattr(t, "_call", boom)
     ctx = {"hint": None, "answer": None, "exercise": "6 x 9"}
     fb = t.phrase("no_contact", ctx); _wait_idle(t)
-    assert t.phrase("no_contact", ctx) == fb and t.stats["errors"] == 1
+    for _ in range(20):  # the server rebuilds its message on every update
+        assert t.phrase("no_contact", ctx) == fb
+    _wait_idle(t)
+    assert calls == ["6 x 9"] and t.stats["errors"] == 1
+    # two more failing moments make three in a row: every model call pauses, even for a fresh moment
+    for ex in ("7 x 7", "8 x 9"):
+        t.phrase("no_contact", {**ctx, "exercise": ex}); _wait_idle(t)
+    t.phrase("no_contact", {**ctx, "exercise": "10 x 10"}); _wait_idle(t)
+    assert calls == ["6 x 9", "7 x 7", "8 x 9"] and t._paused_until > time.monotonic()
+
+
+def test_phrase_recovers_after_retry_window(monkeypatch):
+    t = tmod.Tutor(fallback=tally.phrase, api_key="k", timeout=0.5)
+    state = {"fail": True}
+
+    def flaky(event, ctx):
+        if state["fail"]:
+            raise RuntimeError("503")
+        return "Back online, lovely."
+    monkeypatch.setattr(t, "_call", flaky)
+    monkeypatch.setattr(tmod, "RETRY_S", 0.05)
+    ctx = {"hint": None, "answer": None, "exercise": "6 x 9"}
+    t.phrase("no_contact", ctx); _wait_idle(t)
+    state["fail"] = False
+    time.sleep(0.08)
+    t.phrase("no_contact", ctx); _wait_idle(t)
+    assert t.phrase("no_contact", ctx) == "Back online, lovely." and t._consecutive_errors == 0
 
 
 def test_injected_key_never_traces():

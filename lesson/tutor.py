@@ -53,6 +53,9 @@ SYSTEM = ("You are Tally, a warm math tutor for a 7 year old learning finger mul
           "types it.")
 
 _WEAVE = {"tried": False, "op": None}
+RETRY_S = 15.0      # after a failed model call, the same moment is not retried for this long
+PAUSE_AFTER = 3     # consecutive failures before all model calls pause
+PAUSE_S = 30.0      # length of that pause; Tally's phrases keep the experience going meanwhile
 
 
 def default_fallback(event: str, ctx: dict[str, Any]) -> str:
@@ -94,6 +97,26 @@ class Tutor:
         self._inflight: set[tuple] = set()
         self._episode_key: Optional[tuple] = None
         self._blocked: set[tuple] = set()
+        self._retry_after: dict[tuple, float] = {}
+        self._consecutive_errors = 0
+        self._paused_until = 0.0
+
+    def _backing_off(self, key: tuple) -> bool:
+        now = time.monotonic()
+        return now < self._paused_until or now < self._retry_after.get(key, 0.0)
+
+    def _record(self, key: tuple, ok: bool) -> None:
+        """Call with self._lock held."""
+        if ok:
+            self._consecutive_errors = 0
+            self._retry_after.pop(key, None)
+            return
+        self.stats["errors"] += 1
+        self._consecutive_errors += 1
+        now = time.monotonic()
+        self._retry_after[key] = now + RETRY_S
+        if self._consecutive_errors >= PAUSE_AFTER:
+            self._paused_until = now + PAUSE_S
 
     # ---------- model call ----------
     def _call(self, event: str, ctx: dict[str, Any]) -> str:
@@ -154,7 +177,7 @@ class Tutor:
             if cached is not None and key not in self._blocked:
                 self.stats["hits"] += 1
                 return cached
-            if cached is not None or key in self._inflight:
+            if cached is not None or key in self._inflight or self._backing_off(key):
                 return fb
             self._inflight.add(key)
 
@@ -164,10 +187,10 @@ class Tutor:
             try:
                 text = self._traced_call(event, ctx)
             except Exception:
-                self.stats["errors"] += 1
                 text = ""
             with self._lock:
                 self._inflight.discard(key)
+                self._record(key, bool(text))
                 if not text:
                     return
                 self.cache[key] = text
@@ -194,8 +217,9 @@ class Tutor:
             self.stats["hits"] += 1
             on_phrase(cached, state_id, "model")
             return cached
-        if not self.enabled:
-            return fb
+        with self._lock:
+            if not self.enabled or self._backing_off(key):
+                return fb
 
         def worker() -> None:
             t0 = time.monotonic()
@@ -203,11 +227,11 @@ class Tutor:
             try:
                 text = self._traced_call(event, ctx)
             except Exception:
-                self.stats["errors"] += 1
-                return
-            if not text:
-                return
+                text = ""
             with self._lock:
+                self._record(key, bool(text))
+                if not text:
+                    return
                 self.cache[key] = text
             if time.monotonic() - t0 <= self.timeout:
                 on_phrase(text, state_id, "model")
