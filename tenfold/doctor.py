@@ -21,14 +21,7 @@ def line(status: str, name: str, detail: str, fix: str = "") -> bool:
     return status != "FAIL"
 
 
-def load_env() -> None:
-    p = REPO / ".env"
-    if p.exists():
-        for l in p.read_text().splitlines():
-            l = l.split("#", 1)[0].strip()
-            if "=" in l:
-                k, v = l.split("=", 1)
-                os.environ.setdefault(k.strip(), v.strip())
+from tenfold.env import load_env  # noqa: E402
 
 
 def check_import(mod: str, required: bool) -> bool:
@@ -91,14 +84,19 @@ def main() -> int:
                "npm install -g @anthropic-ai/claude-code && claude login")
     if cl:
         try:
+            env = dict(os.environ)
+            if env.get("ANTHROPIC_API_KEY") or env.get("ANTHROPIC_AUTH_TOKEN"):
+                env.setdefault("CLAUDE_CONFIG_DIR", str(REPO / ".claude-critic"))
             p = subprocess.run([cl, "-p", "Reply with the single word OK.", "--output-format", "json", "--max-turns", "1"],
-                               capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+                               capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL, env=env)
             authed = p.returncode == 0 and '"is_error":false' in p.stdout.replace(" ", "")
             why = "" if authed else (p.stdout[-160:].strip() or p.stderr[-160:].strip())
         except Exception as e:
             authed, why = False, str(e)
-        ok &= line("PASS" if authed else "FAIL", "claude auth", "claude -p answers" if authed else f"claude -p failed: {why[-100:]}",
-                   "run `claude login` (or set ANTHROPIC_API_KEY); the critic loop cannot run without it")
+        backend = os.environ.get("ANTHROPIC_BASE_URL", "api.anthropic.com").split("//")[-1].split("/")[0]
+        model = os.environ.get("ANTHROPIC_MODEL", "default")
+        ok &= line("PASS" if authed else "FAIL", "claude auth", f"claude -p answers via {backend} ({model})" if authed else f"claude -p failed: {why[-100:]}",
+                   "run `claude login`, or set ANTHROPIC_API_KEY/ANTHROPIC_AUTH_TOKEN (+ ANTHROPIC_BASE_URL for a compatible provider) in .env")
         try:
             out = subprocess.run([cl, "mcp", "list"], capture_output=True, text=True, timeout=20).stdout
             has = "wandb" in out

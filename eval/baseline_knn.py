@@ -17,6 +17,14 @@ import numpy as np
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from tenfold.env import load_env  # noqa: E402
+
+load_env()
+
+from tenfold.env import load_env  # noqa: E402
+
+load_env()
+
 from classifier import features  # noqa: E402
 from classifier.schema import window_from_json  # noqa: E402
 from eval import scorers  # noqa: E402

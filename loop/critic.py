@@ -25,6 +25,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from tenfold.env import load_env  # noqa: E402
+
+from tenfold.env import load_env  # noqa: E402
+
 RULES_REL = Path("classifier/rules.py")
 CRITIC_FILES = ["classifier/__init__.py", "classifier/schema.py", "classifier/features.py", "loop/__init__.py",
                 "loop/smoke.py", "loop/guard.py", "loop/synth.py", "loop/prompts/diagnostic.md",
@@ -71,6 +75,16 @@ class Critic:
         self.logfile = self.repo / "loop" / ("nightly-blind.log" if a.blind else "nightly.log") if not a.dry_run else None
         self.env = {k: v for k, v in os.environ.items() if not k.endswith("_HELDOUT")}
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if self.env.get("ANTHROPIC_API_KEY") or self.env.get("ANTHROPIC_AUTH_TOKEN"):
+            # key-based backend: run the CLI with its own config dir so the developer's claude.ai login,
+            # user-scope MCP servers and skills never reach the critic
+            self.env.setdefault("CLAUDE_CONFIG_DIR", str(self.repo / ".claude-critic"))
+            Path(self.env["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
+        if self.env.get("ANTHROPIC_API_KEY") or self.env.get("ANTHROPIC_AUTH_TOKEN"):
+            # key-based backend (Anthropic API key, or DeepSeek's Anthropic-compatible endpoint): run the CLI with
+            # its own config dir so the developer's claude.ai login, user-scope MCP servers and skills never leak in
+            self.env.setdefault("CLAUDE_CONFIG_DIR", str(self.repo / ".claude-critic"))
+            Path(self.env["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
         self.weave_ready = False
         if os.environ.get("WANDB_API_KEY") and not a.local:
             try:
@@ -383,6 +397,7 @@ def main() -> int:
     ap.add_argument("--max-turns", type=int, default=30)
     ap.add_argument("--timeout", type=int, default=600)
     a = ap.parse_args()
+    load_env(Path(a.repo).resolve() / ".env")
     if a.blind:
         a.no_commit = True
         if a.metrics == "data/metrics.json":

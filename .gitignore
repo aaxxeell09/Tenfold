@@ -16,3 +16,5 @@ eval/results/
 eval/last_train_report.json
 data/metrics*.json
 data/BEST_VERSION
+.claude-critic/
+.claude-critic/
