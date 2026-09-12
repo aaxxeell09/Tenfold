@@ -69,7 +69,7 @@ class Critic:
         self.worktree = Path(a.worktree).resolve()
         self.metrics_path = self.repo / a.metrics
         self.logfile = self.repo / "loop" / ("nightly-blind.log" if a.blind else "nightly.log") if not a.dry_run else None
-        self.env = {k: v for k, v in os.environ.items() if k != "WANDB_API_KEY_HELDOUT"}
+        self.env = {k: v for k, v in os.environ.items() if not k.endswith("_HELDOUT")}
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         self.weave_ready = False
         if os.environ.get("WANDB_API_KEY") and not a.local:

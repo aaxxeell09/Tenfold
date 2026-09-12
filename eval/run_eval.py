@@ -194,6 +194,8 @@ def main() -> int:
 
     if args.split == "heldout" and os.environ.get("WANDB_API_KEY_HELDOUT"):
         os.environ["WANDB_API_KEY"] = os.environ["WANDB_API_KEY_HELDOUT"]
+        if os.environ.get("WANDB_ENTITY_HELDOUT"):
+            os.environ["WANDB_ENTITY"] = os.environ["WANDB_ENTITY_HELDOUT"]  # the second account owns tenfold-heldout
     if args.local:
         os.environ.pop("WANDB_API_KEY", None)
 
