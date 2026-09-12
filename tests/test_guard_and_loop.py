@@ -268,3 +268,18 @@ def test_guard_transcript_ignores_code_payloads_and_denied_calls(worktree, tmp_p
     t.write_text("\n".join(json.dumps(e) for e in events))
     rc, out = guard(worktree, t)
     assert rc == 1 and "GUARD_REJECT path: Bash used ~/.ssh/id_rsa" in out
+
+
+def test_snapshot_has_versions_diffs_and_commits(tmp_path):
+    repo = make_repo(tmp_path)
+    assert run_critic(repo, iterations=1).returncode == 0
+    p = subprocess.run([PY, "loop/snapshot.py", "--repo", str(repo)], cwd=repo, capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": str(repo)})
+    assert p.returncode == 0, p.stderr
+    snap = json.loads((repo / "data" / "snapshot.json").read_text())
+    assert [v["tag"] for v in snap["informed"]] == ["v0", "v1"]
+    assert "CONTACT_THRESHOLD = 0.30" in snap["informed"][1]["diff"]
+    assert snap["best_version"] == snap["informed"][1]["sha"]
+    assert snap["informed"][1]["heldout"]["exact_match"] is not None
+    assert len(snap["critic_commits"]) == 1 and snap["blind"] == [] and snap["knn_heldout"] is None
+    assert set(snap["informed"][1]["train"]) >= {"exact_match", "exact_match_ci95", "per_class"}

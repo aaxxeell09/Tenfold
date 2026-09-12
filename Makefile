@@ -1,7 +1,7 @@
 PY ?= .venv/bin/python
 N ?= 1
 
-.PHONY: install doctor test run demo eval eval-local eval-heldout knn loop dry-run nightly dashboard
+.PHONY: install doctor test run demo eval eval-local eval-heldout knn loop dry-run nightly dashboard snapshot rehearse rehearse-mock
 
 install:
 	uv venv -p 3.11 .venv && uv pip install -p .venv/bin/python -r requirements.txt
@@ -41,3 +41,12 @@ nightly:
 
 dashboard:
 	$(PY) -m marimo run dashboard/loop_dashboard.py
+
+snapshot:       ## rebuild data/snapshot.json for the dashboard, then commit it
+	$(PY) loop/snapshot.py
+
+rehearse:       ## full loop on hard synthetic data in a throwaway clone, real claude, smoke Weave projects
+	$(PY) loop/rehearse.py --iterations $${N:-2}
+
+rehearse-mock:
+	$(PY) loop/rehearse.py --iterations $${N:-2} --mock
