@@ -1,0 +1,11 @@
+.env
+.mcp.json
+*.log
+loop/transcripts/
+loop/nightly.log
+data/raw/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
