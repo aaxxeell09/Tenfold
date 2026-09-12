@@ -11,137 +11,45 @@ numbers, and measures for 60 seconds:
 Verdict: GO if both hands on at least 90 percent of frames and swaps under
 5 percent of two-hand frames, else NO GO. Press q to stop early.
 
-Cross-hand distances use the shared image frame rebuilt from wrist_xy and
-scale (SPEC.md section 5.2): image_xy = wrist_xy + normalized_xy * scale.
-The distance is then divided by the mean scale of the two hands, so 0.25
-means a quarter of a hand.
+Cross-hand distances come from classifier/features.py, which rebuilds the shared
+image frame from wrist_xy and scale and divides by the mean hand scale, so 0.25
+means a quarter of a hand. The same helpers feed classifier/rules.py, so the
+go/no-go measures the numbers the classifier will actually see.
 
 Exit code 0 on GO, 1 on NO GO.
 """
 
 from __future__ import annotations
 
-import importlib
 import math
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import cv2
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.landmarks import HandDetector  # noqa: E402
+from app.normalize import Normalizer  # noqa: E402
+from classifier import features  # noqa: E402
+from classifier.features import TIP_INDEX  # noqa: E402
+from classifier.schema import FINGER_NUMBERS, HandFrame  # noqa: E402
 
 DURATION_S = 60.0
 NEAR_CONTACT = 0.25
 TWO_HANDS_PASS = 0.90
 SWAP_RATE_FAIL = 0.05
 
-# MediaPipe fingertip indices mapped to the 6-10 numbering (SPEC.md section 5.1).
-TIP_TO_FINGER = {4: 6, 8: 7, 12: 8, 16: 9, 20: 10}
-TIP_INDICES = tuple(TIP_TO_FINGER)
-
 WINDOW_NAME = "tenfold go/no-go"
 COLOR_LEFT = (255, 200, 80)
 COLOR_RIGHT = (140, 120, 255)
 COLOR_TEXT = (255, 255, 255)
 COLOR_CLOSE = (110, 220, 120)
-
-
-# --- perception layer from app/ -------------------------------------------
-#
-# app/landmarks.py and app/normalize.py are frozen and owned by the app side;
-# this script only reads them. They are not in the repo yet, so the entry point
-# is resolved by name rather than pinned to one guessed signature. Once the two
-# modules land, replace _load_perception with the two direct imports.
-
-_DETECT_FUNCS = ("detect", "detect_hands", "find_hands", "process", "run")
-_DETECT_CLASSES = ("HandLandmarker", "HandLandmarks", "HandDetector", "Detector", "Landmarker")
-_NORM_FUNCS = ("normalize", "normalize_hands", "to_window", "build_window", "update")
-_NORM_CLASSES = ("Normalizer", "WindowBuilder", "SlidingWindow")
-
-
-def _resolve(module: Any, funcs: tuple[str, ...], classes: tuple[str, ...]) -> Any:
-    """Return a callable taking one argument, from a module function or class."""
-    for name in funcs:
-        attr = getattr(module, name, None)
-        if callable(attr):
-            return attr
-    for name in classes:
-        attr = getattr(module, name, None)
-        if isinstance(attr, type):
-            instance = attr()
-            for method in funcs + ("__call__",):
-                bound = getattr(instance, method, None)
-                if callable(bound):
-                    return bound
-    raise SystemExit(
-        f"gonogo: no entry point found in {module.__name__}. "
-        f"Looked for functions {funcs} or classes {classes}. "
-        "Edit _load_perception in scripts/gonogo.py to match the real interface."
-    )
-
-
-def _load_perception() -> tuple[Any, Any]:
-    landmarks = importlib.import_module("app.landmarks")
-    normalize = importlib.import_module("app.normalize")
-    return (
-        _resolve(landmarks, _DETECT_FUNCS, _DETECT_CLASSES),
-        _resolve(normalize, _NORM_FUNCS, _NORM_CLASSES),
-    )
-
-
-def as_hand_pair(result: Any) -> tuple[Any | None, Any | None]:
-    """Reduce whatever normalize returns to the latest (left, right) HandFrame."""
-    if result is None:
-        return None, None
-    if isinstance(result, dict):
-        left, right = result.get("left"), result.get("right")
-    elif isinstance(result, (tuple, list)) and len(result) == 2:
-        left, right = result
-    else:
-        left, right = getattr(result, "left", None), getattr(result, "right", None)
-    return _latest(left), _latest(right)
-
-
-def _latest(side: Any) -> Any | None:
-    """A Window holds a list of frames per side; take the most recent one."""
-    if isinstance(side, (list, tuple)):
-        side = side[-1] if side else None
-    if side is None or getattr(side, "points", None) is None:
-        return None
-    if getattr(side, "wrist_xy", None) is None or not getattr(side, "scale", None):
-        return None
-    return side
-
-
-# --- geometry in the shared image frame ------------------------------------
-
-
-def point_image_xy(hand: Any, index: int) -> tuple[float, float]:
-    """Undo the wrist recentering and the scaling to get back to image coords."""
-    px, py = hand.points[index][0], hand.points[index][1]
-    wx, wy = hand.wrist_xy
-    return wx + px * hand.scale, wy + py * hand.scale
-
-
-def closest_pair(left: Any, right: Any) -> tuple[int, int, float] | None:
-    """Closest fingertip pair across hands, as (left finger, right finger, distance).
-
-    Distance is normalized by the mean hand scale, so it is expressed in hands.
-    """
-    if left is None or right is None:
-        return None
-    mean_scale = (left.scale + right.scale) / 2.0
-    if mean_scale <= 0.0:
-        return None
-    best: tuple[int, int, float] | None = None
-    for li in TIP_INDICES:
-        lx, ly = point_image_xy(left, li)
-        for ri in TIP_INDICES:
-            rx, ry = point_image_xy(right, ri)
-            distance = math.hypot(lx - rx, ly - ry) / mean_scale
-            if best is None or distance < best[2]:
-                best = (TIP_TO_FINGER[li], TIP_TO_FINGER[ri], distance)
-    return best
 
 
 def swapped(prev: tuple[tuple[float, float], tuple[float, float]],
@@ -151,9 +59,6 @@ def swapped(prev: tuple[tuple[float, float], tuple[float, float]],
     keep = math.dist(cl, pl) + math.dist(cr, pr)
     flip = math.dist(cl, pr) + math.dist(cr, pl)
     return flip < keep
-
-
-# --- counters --------------------------------------------------------------
 
 
 @dataclass
@@ -202,21 +107,17 @@ def summary(counters: Counters, elapsed: float, complete: bool) -> str:
     return "\n".join(lines)
 
 
-# --- drawing ---------------------------------------------------------------
-
-
-def draw_hand(canvas: Any, hand: Any, color: tuple[int, int, int], label: str) -> None:
+def draw_hand(canvas: Any, hand: HandFrame, color: tuple[int, int, int], label: str) -> None:
     height, width = canvas.shape[:2]
-    for index in range(len(hand.points)):
-        x, y = point_image_xy(hand, index)
+    points = features.image_points(hand)
+    for x, y in points:
         cv2.circle(canvas, (int(x * width), int(y * height)), 3, color, -1)
-    for index in TIP_INDICES:
-        x, y = point_image_xy(hand, index)
-        cv2.putText(canvas, str(TIP_TO_FINGER[index]),
-                    (int(x * width) + 6, int(y * height) - 6),
+    for finger in FINGER_NUMBERS:
+        x, y = points[TIP_INDEX[finger]]
+        position = (int(x * width) + 6, int(y * height) - 6)
+        cv2.putText(canvas, str(finger), position,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, COLOR_TEXT, 3, cv2.LINE_AA)
-        cv2.putText(canvas, str(TIP_TO_FINGER[index]),
-                    (int(x * width) + 6, int(y * height) - 6),
+        cv2.putText(canvas, str(finger), position,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 1, cv2.LINE_AA)
     wx, wy = hand.wrist_xy
     cv2.putText(canvas, label, (int(wx * width) - 20, int(wy * height) + 28),
@@ -236,16 +137,13 @@ def draw_readout(canvas: Any, pair: tuple[int, int, float] | None, remaining: fl
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR_TEXT, 1, cv2.LINE_AA)
 
 
-# --- main loop -------------------------------------------------------------
-
-
 def main() -> int:
-    detect, normalize = _load_perception()
-
     camera = cv2.VideoCapture(0)
     if not camera.isOpened():
         raise SystemExit("gonogo: no webcam on index 0")
 
+    detector = HandDetector(num_hands=2)
+    normalizer = Normalizer()
     counters = Counters()
     previous_wrists: tuple[tuple[float, float], tuple[float, float]] | None = None
     previous_close = False
@@ -266,14 +164,19 @@ def main() -> int:
             # Mirror first: left/right is decided on wrist x in the mirrored image
             # (SPEC.md section 5.2), so the whole pipeline sees the mirrored frame.
             frame = cv2.flip(frame, 1)
-            left, right = as_hand_pair(normalize(detect(frame)))
+            window = normalizer.update(detector.detect(frame))
+            left = window.left[-1] if window.left and window.left[-1].present else None
+            right = window.right[-1] if window.right and window.right[-1].present else None
 
             counters.frames += 1
-            pair = closest_pair(left, right)
+            # last_valid_frame also rejects non finite geometry, so a NaN hand
+            # never turns into a distance.
+            valid = features.last_valid_frame(window)
+            pair = features.nearest_pair(*valid) if valid is not None else None
 
             if left is not None and right is not None:
                 counters.two_hands += 1
-                wrists = (tuple(left.wrist_xy), tuple(right.wrist_xy))
+                wrists = (left.wrist_xy, right.wrist_xy)
                 if previous_wrists is not None and swapped(previous_wrists, wrists):
                     counters.swaps += 1
                 previous_wrists = wrists
@@ -294,6 +197,7 @@ def main() -> int:
             if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
     finally:
+        detector.close()
         camera.release()
         cv2.destroyAllWindows()
 
