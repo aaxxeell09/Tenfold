@@ -59,3 +59,34 @@ def test_rules_v0_unknown_cases_never_raise():
 
 def test_short_window_still_classifies():
     assert rules.classify(synth.short_window()).contact is True
+
+
+def _fixed_reference(window):
+    """A better classifier than V0, to prove the hard set is learnable: vote across confident frames,
+    median contact distance, tighter threshold. Lives only in this test, never in rules.py."""
+    from collections import Counter
+    from statistics import median
+
+    frames = [(l, r) for l, r in features.both_present_frames(window) if l.detection_conf >= 0.5 and r.detection_conf >= 0.5]
+    if not frames:
+        return GestureState.unknown()
+    pairs = [features.nearest_pair(l, r) for l, r in frames]
+    (lf, rf), _ = Counter((p[0], p[1]) for p in pairs).most_common(1)[0]
+    dist = median(p[2] for p in pairs if (p[0], p[1]) == (lf, rf))
+    return GestureState("6-10", lf, rf, bool(dist < 0.2), None, 0.9)
+
+
+def _score(classify, rows):
+    from eval import scorers
+
+    scored = [{"id": s["id"], "hold_id": s["hold_id"], "kind": s["kind"], "target": s["label"],
+               "output": classify(window_from_json(s["window"])).to_dict()} for s in rows]
+    return scorers.aggregate(scored, bootstrap=0)
+
+
+def test_hard_synthetic_set_breaks_v0_and_is_learnable():
+    rows = synth.synthetic_dataset(seed=3, hard=True)
+    v0 = _score(rules.classify, rows)["exact_match"]
+    better = _score(_fixed_reference, rows)["exact_match"]
+    assert v0 < 0.85, v0
+    assert better > 0.9 and better - v0 > 0.15, (v0, better)

@@ -5,6 +5,7 @@ Points follow the MediaPipe index layout so classifier/features.py works on them
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import random
@@ -95,6 +96,23 @@ def degenerate_window() -> Window:
     return Window(left=[same] * 5, right=[same] * 5)
 
 
+def _adjacent(finger: int) -> int:
+    return finger + 1 if finger < 10 else finger - 1
+
+
+def jitter_newest(window: Window, left_finger: int) -> Window:
+    """Real-camera failure: in the newest frame the tracker snaps the neighbouring left fingertip onto the contact
+    point. A classifier that reads only the newest frame names the wrong finger; one that votes across frames
+    does not."""
+    bad = make_hand(LEFT_WRIST, SCALE, "left", {_adjacent(left_finger): MEET})
+    return Window(left=window.left[:-1] + [bad], right=window.right)
+
+
+def low_conf_newest(window: Window) -> Window:
+    """Real-camera failure: the newest frame has low detection confidence (motion blur, occlusion)."""
+    return Window(left=window.left[:-1] + [dataclasses.replace(window.left[-1], detection_conf=0.35)], right=window.right)
+
+
 SMOKE_CASES: dict[str, Window] = {}
 
 
@@ -110,8 +128,12 @@ def smoke_cases() -> dict[str, Window]:
 
 
 def synthetic_dataset(seed: int = 0, holds_per_class: int = 3, windows_per_hold: int = 4, split: str = "train",
-                      session: str = "synth") -> list[dict]:
-    """A small labelled dataset in the samples.jsonl format, for tests and the mock loop."""
+                      session: str = "synth", hard: bool = False) -> list[dict]:
+    """A small labelled dataset in the samples.jsonl format, for tests and the mock loop.
+
+    hard=True injects the failure modes V0 gets wrong on a real camera, so a rehearsal of the critic loop has
+    something to fix: a jittered newest frame (35% of positives), a low-confidence newest frame (20%), and
+    near-contact gaps just above the contact distance (0.30 to 0.60 hand-scales, V0's threshold is 0.35)."""
     rng = random.Random(seed)
     rows: list[dict] = []
     classes = [(7, 8), (8, 7), (6, 9), (9, 10), (10, 6), (8, 8)]
@@ -128,12 +150,20 @@ def synthetic_dataset(seed: int = 0, holds_per_class: int = 3, windows_per_hold:
         for h in range(holds_per_class):
             hold = f"{session}:{lf}x{rf}:{h}"
             for w in range(windows_per_hold):
-                add("positive", {"method": "6-10", "left": lf, "right": rf, "contact": True},
-                    contact_window(lf, rf, gap=rng.uniform(0.0, 0.15), noise=0.03, seed=rng.randrange(10**6)), hold)
+                gap = rng.uniform(0.0, 0.10) if hard else rng.uniform(0.0, 0.15)
+                win = contact_window(lf, rf, gap=gap, noise=0.03, seed=rng.randrange(10**6))
+                if hard:
+                    roll = rng.random()
+                    if roll < 0.35:
+                        win = jitter_newest(win, lf)
+                    elif roll < 0.55:
+                        win = low_conf_newest(win)
+                add("positive", {"method": "6-10", "left": lf, "right": rf, "contact": True}, win, hold)
         hold = f"{session}:near:{lf}x{rf}"
         for w in range(windows_per_hold):
+            gap = rng.uniform(0.30, 0.60) if hard else rng.uniform(0.6, 1.0)
             add("near_contact", {"method": "6-10", "left": lf, "right": rf, "contact": False},
-                contact_window(lf, rf, gap=rng.uniform(0.6, 1.0), noise=0.03, seed=rng.randrange(10**6)), hold)
+                contact_window(lf, rf, gap=gap, noise=0.03, seed=rng.randrange(10**6)), hold)
     for h in range(holds_per_class):
         for w in range(windows_per_hold):
             add("partial_hand", {"method": "unknown"}, one_hand_window(), f"{session}:partial:{h}")
@@ -145,3 +175,19 @@ def write_jsonl(rows: list[dict], path) -> None:
     with open(path, "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
+
+
+if __name__ == "__main__":
+    import argparse
+
+    ap = argparse.ArgumentParser(description="write a synthetic samples.jsonl (rehearsals only, never data/samples.jsonl)")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--split", default="train")
+    ap.add_argument("--session", default="synth")
+    ap.add_argument("--holds", type=int, default=3)
+    ap.add_argument("--hard", action="store_true")
+    a = ap.parse_args()
+    rows = synthetic_dataset(seed=a.seed, holds_per_class=a.holds, split=a.split, session=a.session, hard=a.hard)
+    write_jsonl(rows, a.out)
+    print(f"wrote {len(rows)} samples to {a.out}")
