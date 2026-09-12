@@ -13,16 +13,18 @@ FAKE = REPO / "tests" / "fake_claude.py"
 PY = sys.executable
 
 
-def make_repo(tmp_path: Path) -> Path:
-    """A throwaway copy of the repo with synthetic train/heldout data and one baseline commit."""
+def make_repo(tmp_path: Path, hard: bool = True) -> Path:
+    """A throwaway copy of the repo with synthetic train/heldout data and one baseline commit.
+    hard=True (default) uses the real-camera failure modes, where tightening the contact threshold is a strict
+    improvement, so the strict metric gate has something to accept."""
     from loop import synth
     dst = tmp_path / "tenfold"
     for rel in ["classifier", "eval", "loop", "lesson", "tests", "tenfold"]:
         shutil.copytree(REPO / rel, dst / rel, ignore=shutil.ignore_patterns("__pycache__", "results", "transcripts"))
     (dst / "data").mkdir()
-    synth.write_jsonl(synth.synthetic_dataset(seed=1, session="train"), dst / "data" / "samples.jsonl")
+    synth.write_jsonl(synth.synthetic_dataset(seed=1, session="train", hard=hard), dst / "data" / "samples.jsonl")
     (tmp_path / "tenfold-heldout").mkdir()
-    synth.write_jsonl(synth.synthetic_dataset(seed=7, session="other", split="test"), tmp_path / "tenfold-heldout" / "test.jsonl")
+    synth.write_jsonl(synth.synthetic_dataset(seed=7, session="other", split="test", hard=hard), tmp_path / "tenfold-heldout" / "test.jsonl")
     subprocess.run(["git", "init", "-q"], cwd=dst, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "root"], cwd=dst, check=True)
     subprocess.run(["git", "add", "-A"], cwd=dst, check=True)
@@ -137,7 +139,7 @@ def test_guard_check_mode_from_inside_worktree(worktree):
 # ---------- eval ----------
 
 def test_run_eval_local_and_report(tmp_path):
-    repo = make_repo(tmp_path)
+    repo = make_repo(tmp_path, hard=False)
     p = subprocess.run([PY, "eval/run_eval.py", "--split", "train", "--local", "--tag", "t"], cwd=repo, capture_output=True, text=True,
                        env={**os.environ, "PYTHONPATH": str(repo)})
     assert p.returncode == 0, p.stderr
@@ -158,7 +160,7 @@ def test_run_eval_refuses_empty_file(tmp_path):
 
 
 def test_knn_baseline(tmp_path):
-    repo = make_repo(tmp_path)
+    repo = make_repo(tmp_path, hard=False)
     p = subprocess.run([PY, "eval/baseline_knn.py", "--split", "heldout"], cwd=repo, capture_output=True, text=True,
                        env={**os.environ, "PYTHONPATH": str(repo), "TENFOLD_HELDOUT": str(tmp_path / "tenfold-heldout" / "test.jsonl")})
     assert p.returncode == 0, p.stderr
@@ -176,8 +178,10 @@ def test_loop_accepts_good_patch_twice_and_evaluates_heldout(tmp_path):
     assert [v["tag"] for v in m["versions"]] == ["v0", "v1", "v2"]
     assert all(v["heldout"] is not None for v in m["versions"])
     assert (repo / "data" / "BEST_VERSION").read_text().strip() == subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
-    assert "CONTACT_THRESHOLD = 0.30" in (repo / "classifier" / "rules.py").read_text()
+    assert "CONTACT_THRESHOLD = 0.25" in (repo / "classifier" / "rules.py").read_text()
     assert "ACCEPTED v1" in p.stdout and "ACCEPTED v2" in p.stdout
+    em = [v["train"]["exact_match"] for v in m["versions"]]
+    assert em[0] < em[1] < em[2]
 
 
 def test_loop_rejects_regression_and_keeps_rules(tmp_path):
@@ -319,3 +323,18 @@ def test_accepted_version_records_patch_hypothesis(tmp_path):
     assert run_critic(repo, "--skip-heldout").returncode == 0
     m = json.loads((repo / "data" / "metrics.json").read_text())
     assert m["versions"][1]["patch_hypothesis"].startswith("near-contact gaps")
+
+
+def test_gate_requires_strict_improvement(tmp_path):
+    from loop.critic import Critic
+    ok, why = Critic.gate(None, _metrics(0.60, 0.05), _metrics(0.60, 0.05))
+    assert not ok and "no improvement" in why
+
+
+def test_loop_rejects_a_patch_that_does_not_move_the_score(tmp_path):
+    repo = make_repo(tmp_path)
+    p = run_critic(repo, "--skip-heldout", mode="same")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "metric gate rejected: no improvement" in p.stdout and commits_by_critic(repo) == []
+    m = json.loads((repo / "data" / "metrics.json").read_text())
+    assert "no improvement" in m["rejected"][0]["reason"]

@@ -41,8 +41,9 @@ What happens inside `loop/critic.py`:
    synthetic windows pass, transcript audit (no path outside the worktree, no mention of the held-out set).
    Each failure is one `GUARD_REJECT rule: what | cause: why | fix: change` line fed back to the patch agent.
    Two rejections and the iteration is dropped.
-6. Train evaluation on the candidate, then the metric gate: `exact_match` must not drop, no class may lose
-   more than 5 points, `false_unknown_rate` must stay under 5 %. A regression is reverted and logged.
+6. Train evaluation on the candidate, then the metric gate: `exact_match` must strictly improve, no class may
+   lose more than 5 points, `false_unknown_rate` may not rise by more than 2 points. Anything else is reverted
+   and logged, so every critic commit in the history is a measured improvement.
 7. Commit as `critic-agent`, update `data/BEST_VERSION`, then the held-out evaluation in a subprocess.
 
 ## Why the held-out score is honest

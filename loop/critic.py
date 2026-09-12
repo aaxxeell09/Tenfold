@@ -283,6 +283,8 @@ class Critic:
             return False, "exact_match unavailable"
         if ce < pe - 1e-9:
             return False, f"exact_match fell {pe:.3f} -> {ce:.3f}"
+        if ce <= pe + 1e-9:
+            return False, f"no improvement: exact_match stayed {pe:.3f} (strict improvement required)"
         drops = [(c, prev["per_class"].get(c), v) for c, v in cand["per_class"].items()
                  if prev["per_class"].get(c) is not None and v is not None and v < prev["per_class"][c] - 0.05 - 1e-9]
         if drops:
@@ -422,8 +424,7 @@ class Critic:
                     entry["heldout"] = h["metrics"] if h else None
                 metrics["versions"].append(entry)
                 self.save_metrics(metrics)
-                improved = "->" in why and float(why.split("->")[1]) > float(why.split("->")[0].split()[-1])
-                no_improve = 0 if improved else no_improve + 1
+                no_improve = 0  # the gate only accepts strict improvements
                 log(f"ACCEPTED v{version}{self.suffix} ({why}) sha={sha[:8]}", self.logfile)
                 last = entry
                 self.tag_prev = entry["tag"]

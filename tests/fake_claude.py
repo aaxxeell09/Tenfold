@@ -38,10 +38,12 @@ else:
     if mode == "hang":
         time.sleep(3600)
     src = rules.read_text()
-    if mode == "good":
-        src = src.replace("CONTACT_THRESHOLD = 0.35", "CONTACT_THRESHOLD = 0.30")
-        src = src.replace("- v0: nearest fingertip", "- v0: nearest fingertip", 1)
-        src = re.sub(r"(Hypothesis log[^\n]*\n)", r"\1- vN: tighten the contact threshold to 0.30 for near-contact holds\n", src, count=1)
+    if mode in ("good", "same"):
+        m = re.search(r"CONTACT_THRESHOLD = ([0-9.]+)", src)
+        cur = float(m.group(1))
+        new = cur if mode == "same" else max(0.15, round(cur - 0.05, 2))
+        src = src.replace(m.group(0), f"CONTACT_THRESHOLD = {new:.2f}")
+        src = re.sub(r"(Hypothesis log[^\n]*\n)", rf"\1- vN: contact threshold {cur:.2f} -> {new:.2f} for near-contact holds\n", src, count=1)
     elif mode == "bad":
         src = src.replace("    frame = features.last_valid_frame(window)", "    return GestureState.unknown()\n    frame = features.last_valid_frame(window)")
     elif mode == "cheat":
