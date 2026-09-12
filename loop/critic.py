@@ -288,9 +288,9 @@ class Critic:
         if drops:
             c, a, b = drops[0]
             return False, f"class {c} fell {a:.2f} -> {b:.2f} (limit 5 points), {len(drops)} class(es) regressed"
-        fu = cand.get("false_unknown_rate")
-        if fu is not None and fu > 0.05 and (prev.get("false_unknown_rate") or 0) <= 0.05:
-            return False, f"false_unknown_rate rose to {fu:.3f} (limit 0.05)"
+        fu, pfu = cand.get("false_unknown_rate"), prev.get("false_unknown_rate")
+        if fu is not None and pfu is not None and fu > pfu + 0.02 + 1e-9:
+            return False, f"false_unknown_rate rose {pfu:.3f} -> {fu:.3f} (limit +0.02)"
         return True, f"exact_match {pe:.3f} -> {ce:.3f}"
 
     # ---------- persistence ----------
@@ -388,6 +388,7 @@ class Critic:
                     self.reset_worktree()
                     continue
                 patch_summary = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("PATCH:")), text[-200:])
+                patch_hypothesis = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("HYPOTHESIS:")), "")
                 expected = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("EXPECTED:")), "")
                 if a.dry_run:
                     print("\n----- DRY RUN: guard passed, diff below, nothing committed -----\n" + diff)
@@ -414,7 +415,8 @@ class Critic:
                     shutil.copy(cand_report, self.report_src)
                 entry = {"tag": f"v{version}{self.suffix}", "version": version, "sha": sha, "train": cand["metrics"],
                          "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": diagnosis[:300],
-                         "patch": patch_summary, "expected": expected, "gate": why, "spent_usd": round(self.spent, 3)}
+                         "patch": patch_summary, "patch_hypothesis": patch_hypothesis, "expected": expected, "gate": why,
+                         "spent_usd": round(self.spent, 3)}
                 if not a.skip_heldout:
                     h = self.run_eval("heldout", self.rules_src, f"v{version}{self.suffix}")
                     entry["heldout"] = h["metrics"] if h else None

@@ -52,5 +52,5 @@ else:
         Path("classifier/features.py").write_text(Path("classifier/features.py").read_text() + "\n# tampered\n")
     if mode != "noop":
         rules.write_text(src)
-    emit("PATCH: tightened CONTACT_THRESHOLD from 0.35 to 0.30\nEXPECTED: near_contact accuracy up, positives unchanged",
+    emit("HYPOTHESIS: near-contact gaps sit just under 0.35 on train\nPATCH: tightened CONTACT_THRESHOLD from 0.35 to 0.30\nEXPECTED: near_contact accuracy up, positives unchanged",
          tool_input={"file_path": "classifier/rules.py", "old_string": "0.35", "new_string": "0.30"})

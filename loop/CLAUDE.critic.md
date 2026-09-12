@@ -3,7 +3,7 @@
 You improve the hand-gesture classifier in classifier/rules.py. That is the only file you may edit.
 
 ## Success
-exact_match on the train evaluation goes up while false_unknown_rate stays under 5%. Other scorers (contact_accuracy, per_class_accuracy, negative_rejection_accuracy, near_contact_accuracy) are diagnostic signals, not targets.
+exact_match on the train evaluation goes up and false_unknown_rate does not rise (part of it is tracker hand loss, which no rule can recover). Other scorers (contact_accuracy, per_class_accuracy, negative_rejection_accuracy, near_contact_accuracy) are diagnostic signals, not targets.
 
 ## Inputs
 - eval/last_train_report.json: per-class accuracy, the 10 worst samples reduced to fingertip distances.

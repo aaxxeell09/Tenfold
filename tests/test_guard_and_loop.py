@@ -294,3 +294,28 @@ def test_budget_cap_stops_the_arm(tmp_path):
     assert len(commits_by_critic(repo)) == 1
     m = json.loads((repo / "data" / "metrics.json").read_text())
     assert m["versions"][-1]["spent_usd"] == 1.5
+
+
+def _metrics(em, fu, per_class=None):
+    return {"exact_match": em, "false_unknown_rate": fu, "per_class": per_class or {"7x8": em}}
+
+
+def test_gate_rules():
+    sys.path.insert(0, str(REPO))
+    from loop.critic import Critic
+    gate = Critic.gate
+    assert gate(None, _metrics(0.46, 0.053), _metrics(0.60, 0.053))[0]
+    assert gate(None, _metrics(0.46, 0.053), _metrics(0.60, 0.070))[0]            # +1.7 points: tolerated
+    ok, why = gate(None, _metrics(0.46, 0.053), _metrics(0.60, 0.080))             # +2.7 points: rejected
+    assert not ok and "false_unknown_rate rose 0.053 -> 0.080" in why
+    ok, why = gate(None, _metrics(0.60, 0.05), _metrics(0.59, 0.05))
+    assert not ok and "exact_match fell" in why
+    ok, why = gate(None, _metrics(0.60, 0.05, {"7x8": 0.9, "8x8": 0.8}), _metrics(0.62, 0.05, {"7x8": 1.0, "8x8": 0.7}))
+    assert not ok and "class 8x8 fell" in why
+
+
+def test_accepted_version_records_patch_hypothesis(tmp_path):
+    repo = make_repo(tmp_path)
+    assert run_critic(repo, "--skip-heldout").returncode == 0
+    m = json.loads((repo / "data" / "metrics.json").read_text())
+    assert m["versions"][1]["patch_hypothesis"].startswith("near-contact gaps")

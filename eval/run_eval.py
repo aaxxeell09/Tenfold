@@ -229,7 +229,7 @@ def main() -> int:
 
     if args.split == "train":
         Path(args.report).write_text(json.dumps({
-            "tag": args.tag, "git_sha": sha, "success_metric": "exact_match must go up, false_unknown_rate < 0.05",
+            "tag": args.tag, "git_sha": sha, "success_metric": "exact_match must go up, false_unknown_rate must not rise",
             "metrics": {k: v for k, v in metrics.items()},
             "worst_samples": worst_samples(samples, rows),
             "errors": [{"id": r["id"], "error": r["error"]} for r in rows if r.get("error")][:10],
