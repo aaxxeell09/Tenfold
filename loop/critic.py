@@ -58,6 +58,10 @@ def maybe_weave_op(name: str):
     return deco
 
 
+class CriticAuthError(RuntimeError):
+    """claude -p cannot authenticate: nothing to gain by iterating."""
+
+
 class Critic:
     def __init__(self, a: argparse.Namespace):
         self.a = a
@@ -134,6 +138,8 @@ class Critic:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if ev.get("type") == "result" and ev.get("is_error") and ev.get("api_error_status") in (401, 403):
+                return str(ev.get("result", "authentication failed")), 401
             if ev.get("type") == "assistant":
                 for b in (ev.get("message") or {}).get("content") or []:
                     if b.get("type") == "text":
@@ -156,6 +162,8 @@ class Critic:
             return "DIAGNOSIS: no failure data available (blind arm).\nHYPOTHESIS: improve the classifier however you see fit."
         text, rc = self.run_claude(self.prompt("diagnostic", train_eval_name=f"tenfold-train-{self.tag_prev}"),
                                    DIAG_TOOLS, self.tmp / f"diag-{iteration}.jsonl", 15)
+        if rc == 401:
+            raise CriticAuthError(text)
         return text if rc == 0 and text else f"DIAGNOSIS: unavailable (claude rc={rc}).\nHYPOTHESIS: none."
 
     @maybe_weave_op("critic.patch")
@@ -296,6 +304,8 @@ class Critic:
                     feedback = ""
                     self.reset_worktree()
                     continue
+                if rc == 401:
+                    raise CriticAuthError(text)
                 if rc != 0:
                     log(f"patch attempt {attempt}: claude exited {rc}", self.logfile)
                     break
@@ -379,7 +389,12 @@ def main() -> int:
             a.metrics = "data/metrics-blind.json"
     if a.local:
         os.environ.pop("WANDB_API_KEY", None)
-    return Critic(a).run()
+    try:
+        return Critic(a).run()
+    except CriticAuthError as e:
+        log(f"STOP: the critic cannot authenticate to Claude ({e}). Fix: run `claude login` (or set ANTHROPIC_API_KEY "
+            f"with credit) on this machine, then `python loop/critic.py --dry-run`.", None)
+        return 3
 
 
 if __name__ == "__main__":

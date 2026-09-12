@@ -91,6 +91,15 @@ def main() -> int:
                "npm install -g @anthropic-ai/claude-code && claude login")
     if cl:
         try:
+            p = subprocess.run([cl, "-p", "Reply with the single word OK.", "--output-format", "json", "--max-turns", "1"],
+                               capture_output=True, text=True, timeout=60, stdin=subprocess.DEVNULL)
+            authed = p.returncode == 0 and '"is_error":false' in p.stdout.replace(" ", "")
+            why = "" if authed else (p.stdout[-160:].strip() or p.stderr[-160:].strip())
+        except Exception as e:
+            authed, why = False, str(e)
+        ok &= line("PASS" if authed else "FAIL", "claude auth", "claude -p answers" if authed else f"claude -p failed: {why[-100:]}",
+                   "run `claude login` (or set ANTHROPIC_API_KEY); the critic loop cannot run without it")
+        try:
             out = subprocess.run([cl, "mcp", "list"], capture_output=True, text=True, timeout=20).stdout
             has = "wandb" in out
         except Exception:
