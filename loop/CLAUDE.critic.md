@@ -7,7 +7,12 @@ exact_match on the train evaluation goes up while false_unknown_rate stays under
 
 ## Inputs
 - eval/last_train_report.json: per-class accuracy, the 10 worst samples reduced to fingertip distances.
+- If data/train.jsonl exists here: `python loop/train_eval.py` evaluates your current rules.py on the train set
+  (metrics, worst classes, failing samples with per-frame nearest pairs; `--class 7x8` to focus). Run it before
+  and after your edit. Do not create scratch files or run other commands: they are denied.
 - The W&B MCP server (read only) if you need more detail on the train evaluation.
+
+The held-out set is not in this worktree and never will be.
 
 ## One iteration = one hypothesis, one coherent patch, one justification, one expected effect
 State the most frequent failure and your hypothesis about its cause before editing.

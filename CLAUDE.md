@@ -18,7 +18,7 @@ app/landmarks.py, app/normalize.py, classifier/schema.py, classifier/features.py
 
 ## The critic
 Only loop/critic.py may modify classifier/rules.py after V0, through the guarded loop in SPEC.md section 7.
-The critic runs in a stripped worktree (../tenfold-critic) with loop/CLAUDE.critic.md; it never sees this file, SPEC.md, eval/, data/ or .env.
+The critic runs in a stripped worktree (../tenfold-critic) with loop/CLAUDE.critic.md; it never sees this file, SPEC.md, the eval code, the held-out data or .env; it gets a train copy and loop/train_eval.py (the blind arm gets neither and never touches classifier/rules.py).
 Never read samples with split == "test" outside eval/run_eval.py. Held-out data lives in ../tenfold-heldout/, never in this repo.
 Never pass test metrics to the critic. Held-out evaluation runs in a subprocess with WANDB_API_KEY_HELDOUT.
 

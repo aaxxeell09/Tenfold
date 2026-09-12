@@ -9,6 +9,8 @@ Success means: exact_match on the train evaluation goes up while false_unknown_r
 scorers are diagnostic signals, not targets. Do not "improve" accuracy by refusing to answer: an unknown on a
 positive sample is a failure.
 
+{tools_note}
+
 You may only edit classifier/rules.py. The guard will reject the patch if any other file changes, if rules.py
 stops importing, if the diff exceeds 80 lines or the file exceeds 400 lines, if it imports anything outside
 math, statistics, dataclasses, typing, numpy, classifier.schema, classifier.features, if it uses open, exec,

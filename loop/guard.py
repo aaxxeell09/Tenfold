@@ -8,8 +8,8 @@ Every failed rule prints one line:
 Exit 0 = accepted, 1 = rejected, 2 = the guard itself could not run.
 
 Rules (SPEC.md section 7): only classifier/rules.py changed; importable; diff under 80 lines; file under 400
-lines; AST import whitelist and forbidden names; smoke test in a subprocess; transcript audit on assistant text
-and tool inputs (never tool results): no path outside the worktree, no mention of the held-out data.
+lines; AST import whitelist and forbidden names; smoke test in a subprocess; transcript audit: no tool input
+referencing the held-out data, no executed tool call reaching outside the worktree.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -27,7 +28,8 @@ ALLOWED_IMPORTS = {"math", "statistics", "dataclasses", "typing", "numpy", "clas
 FORBIDDEN_NAMES = {"open", "exec", "eval", "__import__", "getattr", "setattr", "globals", "locals", "vars",
                    "compile", "breakpoint", "input", "sys", "os", "inspect", "importlib", "subprocess", "socket",
                    "urllib", "pickle", "shutil", "pathlib"}
-FORBIDDEN_TEXT = ("heldout", "held-out", "test.jsonl", "-test-", "tenfold-heldout")
+FORBIDDEN_TEXT = ("heldout", "held-out", "held_out", "test.jsonl", "tenfold-heldout")
+PATH_FIELDS = ("file_path", "path", "notebook_path")
 MAX_DIFF_LINES = 80
 MAX_FILE_LINES = 400
 RULES = Path("classifier/rules.py")
@@ -128,37 +130,67 @@ def _strings(obj) -> list[str]:
     return []
 
 
-PATH_RE = re.compile(r"(?:^|[\s'\"=(])((?:/|~/|\.\./)[^\s'\")]*)")
+def _command_paths(cmd: str) -> list[str]:
+    try:
+        tokens = shlex.split(cmd)
+    except ValueError:
+        tokens = cmd.split()
+    parts = [p for t in tokens for p in t.split("=")]
+    return [p for p in parts if len(p) > 1 and (p.startswith("/") or p.startswith("~") or p.startswith("../"))]
+
+
+def _outside(p: str, worktree: str) -> bool:
+    p = p.strip().rstrip(".,;:")
+    if p.startswith("~"):
+        return True
+    full = os.path.realpath(p if p.startswith("/") else os.path.join(worktree, p))
+    return not (full == worktree or full.startswith(worktree + os.sep))
 
 
 def check_transcript(path: Path, worktree: Path) -> list[str]:
-    """Audit assistant text and tool_use inputs from a claude stream-json transcript. Tool results are skipped."""
-    out: list[str] = []
+    """Audit a claude stream-json transcript.
+    - Any tool input (executed or denied) that references the held-out data is rejected: that is intent.
+    - Executed tool calls whose path fields or command arguments leave the worktree are rejected.
+    Denied calls never ran and code inside Edit/Write payloads is not a path, so neither is flagged.
+    Assistant prose and tool results are not audited."""
     if not path.exists():
         return []
-    wt = str(worktree.resolve())
+    wt = os.path.realpath(worktree)
+    events = []
     for line in path.read_text().splitlines():
         try:
-            ev = json.loads(line)
+            events.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    errored: dict[str, bool] = {}
+    for ev in events:
+        content = (ev.get("message") or {}).get("content") if ev.get("type") == "user" else None
+        for block in content if isinstance(content, list) else []:
+            if block.get("type") == "tool_result":
+                errored[block.get("tool_use_id")] = bool(block.get("is_error"))
+    out: list[str] = []
+    for ev in events:
         if ev.get("type") != "assistant":
             continue
         for block in (ev.get("message") or {}).get("content") or []:
-            texts = [block.get("text", "")] if block.get("type") == "text" else _strings(block.get("input")) if block.get("type") == "tool_use" else []
-            for t in texts:
-                low = t.lower()
-                for bad in FORBIDDEN_TEXT:
-                    if bad in low:
-                        out.append(reject("held_out", f"the critic referenced {bad!r}", "the held-out set is off limits",
-                                          "work only from eval/last_train_report.json and the train evaluation"))
-                        break
-                for m in PATH_RE.findall(t):
-                    p = m.rstrip(".,;:")
-                    if p.startswith("../") or p.startswith("~/") or (p.startswith("/") and not p.startswith(wt) and not p.startswith("/tmp")):
-                        out.append(reject("path", f"tool input references {p}", "paths outside the worktree are off limits",
-                                          "use paths relative to the worktree only"))
-    # dedupe, keep order
+            if block.get("type") != "tool_use":
+                continue
+            inp = block.get("input") or {}
+            blob = " ".join(_strings(inp)).lower()
+            for bad in FORBIDDEN_TEXT:
+                if bad in blob:
+                    out.append(reject("held_out", f"a {block.get('name')} call referenced {bad!r}", "the held-out set is off limits",
+                                      "work only from eval/last_train_report.json and python loop/train_eval.py"))
+                    break
+            if errored.get(block.get("id"), False):
+                continue
+            paths = [inp[k] for k in PATH_FIELDS if isinstance(inp.get(k), str)]
+            if isinstance(inp.get("command"), str):
+                paths += _command_paths(inp["command"])
+            for p in paths:
+                if _outside(p, wt):
+                    out.append(reject("path", f"{block.get('name')} used {p}", "paths outside the worktree are off limits",
+                                      "use paths relative to the worktree only"))
     seen: set[str] = set()
     return [o for o in out if not (o in seen or seen.add(o))]
 

@@ -213,8 +213,58 @@ def test_dry_run_prints_diff_and_commits_nothing(tmp_path):
     assert "DRY RUN" in p.stdout and "-CONTACT_THRESHOLD = 0.35" in p.stdout and commits_by_critic(repo) == []
 
 
-def test_blind_arm_never_commits_to_repo(tmp_path):
+def test_blind_arm_never_touches_repo_state(tmp_path):
     repo = make_repo(tmp_path)
-    p = run_critic(repo, "--blind", "--skip-heldout", "--worktree", str(tmp_path / "blind-wt"))
+    before = (repo / "classifier" / "rules.py").read_text()
+    wt = tmp_path / "blind-wt"
+    p = run_critic(repo, "--blind", "--skip-heldout", "--worktree", str(wt))
     assert p.returncode == 0, p.stdout + p.stderr
-    assert commits_by_critic(repo) == [] and (repo / "data" / "metrics-blind.json").exists()
+    assert commits_by_critic(repo) == []
+    assert (repo / "classifier" / "rules.py").read_text() == before
+    assert "CONTACT_THRESHOLD = 0.30" in (repo / "loop" / "blind-rules.py").read_text()
+    assert (repo / "data" / "metrics-blind.json").exists() and not (repo / "data" / "metrics.json").exists()
+    assert not (repo / "eval" / "last_train_report.json").exists()
+    assert not (wt / "data" / "train.jsonl").exists()
+    assert not (wt / "eval" / "last_train_report.json").exists()
+    assert not (wt / "loop" / "train_eval.py").exists()
+    m = json.loads((repo / "data" / "metrics-blind.json").read_text())
+    assert [v["tag"] for v in m["versions"]] == ["v0-blind", "v1-blind"]
+
+
+def test_informed_worktree_gets_train_tools_and_critic_commits_only_rules(tmp_path):
+    repo = make_repo(tmp_path)
+    (repo / "notes.txt").write_text("human work in progress")
+    subprocess.run(["git", "add", "notes.txt"], cwd=repo, check=True)
+    p = run_critic(repo, "--skip-heldout")
+    assert p.returncode == 0, p.stdout + p.stderr
+    files = subprocess.run(["git", "log", "--author=critic-agent", "--name-only", "--format="], cwd=repo,
+                           capture_output=True, text=True).stdout.split()
+    assert files == ["classifier/rules.py"]
+    wt = repo.parent / "critic-wt"
+    assert (wt / "data" / "train.jsonl").exists() and (wt / "loop" / "train_eval.py").exists()
+    te = subprocess.run([PY, "loop/train_eval.py"], cwd=wt, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(wt)})
+    assert te.returncode == 0 and "exact_match" in te.stdout, te.stdout + te.stderr
+    assert json.loads((repo / "eval" / "last_train_report.json").read_text())["tag"] == "v1-candidate"
+
+
+def test_guard_transcript_ignores_code_payloads_and_denied_calls(worktree, tmp_path):
+    r = worktree / "classifier" / "rules.py"
+    r.write_text(r.read_text().replace("0.35", "0.30"))
+    t = tmp_path / "t.jsonl"
+    events = [
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "a", "name": "Edit", "input": {
+            "file_path": str(worktree / "classifier" / "rules.py"), "old_string": "x / y", "new_string": "a / b  # ratio /2"}}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "b", "name": "Write", "input": {
+            "file_path": "/tmp/eval_local.py", "content": "print(1)"}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "b", "is_error": True, "content": "denied"}]}},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "c", "name": "Bash", "input": {
+            "command": "python loop/smoke.py --rules classifier/rules.py"}}]}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "this should also generalise to held-out hands in /Users/x"}]}},
+    ]
+    t.write_text("\n".join(json.dumps(e) for e in events))
+    rc, out = guard(worktree, t)
+    assert rc == 0, out
+    events.append({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "d", "name": "Bash", "input": {"command": "cat ~/.ssh/id_rsa"}}]}})
+    t.write_text("\n".join(json.dumps(e) for e in events))
+    rc, out = guard(worktree, t)
+    assert rc == 1 and "GUARD_REJECT path: Bash used ~/.ssh/id_rsa" in out

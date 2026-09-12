@@ -4,15 +4,21 @@
     python loop/critic.py --iterations 1                    # one full guarded, gated iteration
     python loop/critic.py --iterations 20 --no-early-stop   # the nightly
     python loop/critic.py --iterations 2 --mock-claude tests/fake_claude.py --local   # no API at all
-    python loop/critic.py --blind --worktree ../tenfold-blind --metrics data/metrics-blind.json --no-commit
+    python loop/critic.py --blind                           # ablation arm, worktree ../tenfold-blind
 
 One iteration (SPEC.md section 7): reset worktree -> diagnostic -> patch -> guard agent -> guard.py ->
 train eval -> metric gate -> commit (author critic-agent) + data/BEST_VERSION -> held-out eval subprocess.
 Every step is a weave op when WANDB_API_KEY is set. The critic's environment never contains the held-out key.
+
+The informed worktree gets a train copy (data/train.jsonl), the train report and loop/train_eval.py so the patch
+agent can test its hypothesis. The blind arm gets none of them and never touches the repo's rules.py, report,
+metrics or git history: it keeps its accepted rules in loop/blind-rules.py and its metrics in
+data/metrics-blind.json, with every tag suffixed -blind.
 """
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import shutil
@@ -27,16 +33,23 @@ sys.path.insert(0, str(REPO))
 
 from tenfold.env import load_env  # noqa: E402
 
-from tenfold.env import load_env  # noqa: E402
-
 RULES_REL = Path("classifier/rules.py")
-CRITIC_FILES = ["classifier/__init__.py", "classifier/schema.py", "classifier/features.py", "loop/__init__.py",
-                "loop/smoke.py", "loop/guard.py", "loop/synth.py", "loop/prompts/diagnostic.md",
-                "loop/prompts/patch.md", "loop/prompts/guard.md"]
-PATCH_TOOLS = "Read,Edit,Bash(python loop/guard.py --check),Bash(python loop/smoke.py),Bash(python loop/smoke.py *),mcp__wandb__*"
+REPORT_REL = Path("eval/last_train_report.json")
+CRITIC_FILES = ["classifier/__init__.py", "classifier/schema.py", "classifier/features.py", "eval/__init__.py",
+                "eval/scorers.py", "loop/__init__.py", "loop/smoke.py", "loop/guard.py", "loop/synth.py",
+                "loop/train_eval.py", "loop/prompts/diagnostic.md", "loop/prompts/patch.md", "loop/prompts/guard.md"]
+BLIND_EXCLUDE = {"loop/train_eval.py"}
+PATCH_TOOLS_BLIND = "Read,Edit,Bash(python loop/guard.py --check),Bash(python loop/smoke.py),Bash(python loop/smoke.py *)"
+PATCH_TOOLS = PATCH_TOOLS_BLIND + ",Bash(python loop/train_eval.py),Bash(python loop/train_eval.py *),mcp__wandb__*"
 DIAG_TOOLS = "Read,mcp__wandb__*"
 # never useful to the critic; disallowing them stops the agent from burning turns on denied attempts
-DISALLOWED = "Write,Task,WebSearch,WebFetch,ToolSearch,NotebookEdit,Skill,EnterPlanMode,Agent,Workflow"
+DISALLOWED = "Write,Task,WebSearch,WebFetch,NotebookEdit,Skill,EnterPlanMode,Agent,Workflow"
+TOOLS_NOTE = ("To test your hypothesis before and after the edit, run `python loop/train_eval.py` (train set only: "
+              "metrics, worst classes, failing samples with per-frame nearest pairs; `--class 7x8` to focus). Do not "
+              "create scratch files or run any other command: they are denied and waste your turns.")
+TOOLS_NOTE_BLIND = ("You have no data and no evaluation tool here: reason from the code. Do not create scratch files "
+                    "or run any other command: they are denied and waste your turns.")
+TRACE = {"on": False}
 
 
 def now() -> str:
@@ -52,15 +65,22 @@ def log(msg: str, logfile: Path | None) -> None:
 
 
 def maybe_weave_op(name: str):
-    """weave.op when tracing is on, identity otherwise."""
+    """A weave op when tracing was switched on at runtime (after weave.init), a plain call otherwise."""
     def deco(fn):
-        if os.environ.get("WANDB_API_KEY") and not os.environ.get("TENFOLD_NO_WEAVE"):
-            try:
+        cache: dict = {}
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not TRACE["on"]:
+                return fn(*args, **kwargs)
+            if "op" not in cache:
                 import weave
-                return weave.op(name=name)(fn)
-            except Exception:
-                return fn
-        return fn
+                try:
+                    cache["op"] = weave.op(name=name, postprocess_inputs=lambda i: {k: v for k, v in i.items() if k != "self"})(fn)
+                except TypeError:
+                    cache["op"] = weave.op(name=name)(fn)
+            return cache["op"](*args, **kwargs)
+        return wrapper
     return deco
 
 
@@ -74,7 +94,13 @@ class Critic:
         self.repo = Path(a.repo).resolve()
         self.worktree = Path(a.worktree).resolve()
         self.metrics_path = self.repo / a.metrics
-        self.logfile = self.repo / "loop" / ("nightly-blind.log" if a.blind else "nightly.log") if not a.dry_run else None
+        self.suffix = "-blind" if a.blind else ""
+        self.tmp = self.repo / "loop" / "transcripts"
+        self.tmp.mkdir(parents=True, exist_ok=True)
+        self.rules_src = self.repo / ("loop/blind-rules.py" if a.blind else RULES_REL)
+        self.report_src = (self.tmp / "blind-report.json") if a.blind else self.repo / REPORT_REL
+        self.train_path = Path(a.train_samples).resolve() if a.train_samples else self.repo / "data" / "samples.jsonl"
+        self.logfile = None if a.dry_run else self.repo / "loop" / ("nightly-blind.log" if a.blind else "nightly.log")
         self.env = {k: v for k, v in os.environ.items() if not k.endswith("_HELDOUT")}
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         if self.env.get("ANTHROPIC_API_KEY") or self.env.get("ANTHROPIC_AUTH_TOKEN"):
@@ -82,66 +108,70 @@ class Critic:
             # user-scope MCP servers and skills never reach the critic
             self.env.setdefault("CLAUDE_CONFIG_DIR", str(self.repo / ".claude-critic"))
             Path(self.env["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
-        if self.env.get("ANTHROPIC_API_KEY") or self.env.get("ANTHROPIC_AUTH_TOKEN"):
-            # key-based backend (Anthropic API key, or DeepSeek's Anthropic-compatible endpoint): run the CLI with
-            # its own config dir so the developer's claude.ai login, user-scope MCP servers and skills never leak in
-            self.env.setdefault("CLAUDE_CONFIG_DIR", str(self.repo / ".claude-critic"))
-            Path(self.env["CLAUDE_CONFIG_DIR"]).mkdir(parents=True, exist_ok=True)
-        self.weave_ready = False
         if os.environ.get("WANDB_API_KEY") and not a.local:
             try:
                 import weave
                 ent = os.environ.get("WANDB_ENTITY")
-                weave.init(f"{ent}/tenfold" if ent else "tenfold")
-                self.weave_ready = True
+                project = "tenfold" + os.environ.get("TENFOLD_PROJECT_SUFFIX", "")
+                weave.init(f"{ent}/{project}" if ent else project)
+                TRACE["on"] = True
             except Exception as e:
                 log(f"weave init failed, continuing untraced: {e}", None)
+        if a.blind and not self.rules_src.exists():
+            shutil.copy(self.repo / RULES_REL, self.rules_src)
 
     # ---------- worktree ----------
-    def setup_worktree(self) -> None:
-        wt = self.worktree
-        wt.mkdir(parents=True, exist_ok=True)
-        for rel in CRITIC_FILES:
-            dst = wt / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(self.repo / rel, dst)
-        shutil.copy(self.repo / "loop" / "CLAUDE.critic.md", wt / "CLAUDE.md")
-        shutil.copy(self.repo / RULES_REL, wt / RULES_REL)
-        report = self.repo / "eval" / "last_train_report.json"
-        (wt / "eval").mkdir(exist_ok=True)
-        if report.exists():
-            shutil.copy(report, wt / "eval" / "last_train_report.json")
-        if not (wt / ".git").exists():
-            self.git_wt("init", "-q")
-            self.git_wt("config", "user.name", "critic-base")
-            self.git_wt("config", "user.email", "critic@tenfold.local")
-        self.git_wt("add", "-A")
-        self.git_wt("-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", f"base {now()}")
+    def files(self) -> list[str]:
+        return [f for f in CRITIC_FILES if not (self.a.blind and f in BLIND_EXCLUDE)]
 
     def git_wt(self, *args: str) -> str:
         return subprocess.run(["git", *args], cwd=self.worktree, capture_output=True, text=True, check=False).stdout
 
+    def commit_base(self, label: str) -> None:
+        self.git_wt("add", "-A")
+        self.git_wt("-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", f"{label} {now()}")
+
+    def sync_inputs(self) -> None:
+        wt = self.worktree
+        shutil.copy(self.rules_src, wt / RULES_REL)
+        (wt / "eval").mkdir(parents=True, exist_ok=True)
+        (wt / "data").mkdir(parents=True, exist_ok=True)
+        if not self.a.blind:
+            if self.report_src.exists():
+                shutil.copy(self.report_src, wt / REPORT_REL)
+            if self.train_path.exists():
+                shutil.copy(self.train_path, wt / "data" / "train.jsonl")
+
+    def setup_worktree(self) -> None:
+        wt = self.worktree
+        wt.mkdir(parents=True, exist_ok=True)
+        for rel in self.files():
+            dst = wt / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(self.repo / rel, dst)
+        shutil.copy(self.repo / "loop" / "CLAUDE.critic.md", wt / "CLAUDE.md")
+        self.sync_inputs()
+        if not (wt / ".git").exists():
+            self.git_wt("init", "-q")
+            self.git_wt("config", "user.name", "critic-base")
+            self.git_wt("config", "user.email", "critic@tenfold.local")
+        self.commit_base("base")
+
     def reset_worktree(self) -> None:
         self.git_wt("checkout", "--", ".")
         self.git_wt("clean", "-fdq")
-        shutil.copy(self.repo / RULES_REL, self.worktree / RULES_REL)
-        report = self.repo / "eval" / "last_train_report.json"
-        (self.worktree / "eval").mkdir(exist_ok=True)
-        if report.exists():
-            shutil.copy(report, self.worktree / "eval" / "last_train_report.json")
-        self.git_wt("add", "-A")
-        self.git_wt("-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", f"iteration base {now()}")
+        self.sync_inputs()
+        self.commit_base("iteration base")
 
     # ---------- agents ----------
     def run_claude(self, prompt: str, tools: str, transcript: Path, max_turns: int) -> tuple[str, int]:
-        """Run claude -p (or the mock) in the worktree; returns (assistant text, returncode). Transcript = stream-json."""
+        """Run claude -p (or the mock) in the worktree. Returns (final answer text, returncode); 401 = auth failure."""
         if self.a.mock_claude:
             cmd = [sys.executable, str(Path(self.a.mock_claude).resolve()), "-p", prompt, "--allowedTools", tools]
         else:
             cmd = [self.a.claude_bin, "-p", prompt, "--output-format", "stream-json", "--verbose",
                    "--allowedTools", tools, "--disallowedTools", DISALLOWED, "--max-turns", str(max_turns),
-                   "--model", self.a.model,
-                   "--mcp-config", str(self.repo / "loop" / "mcp.json"), "--strict-mcp-config"]
+                   "--model", self.a.model, "--mcp-config", str(self.repo / "loop" / "mcp.json"), "--strict-mcp-config"]
         try:
             proc = subprocess.run(cmd, cwd=self.worktree, env=self.env, stdin=subprocess.DEVNULL,
                                   capture_output=True, text=True, timeout=self.a.timeout)
@@ -150,22 +180,24 @@ class Critic:
             return "", 124
         transcript.write_text(proc.stdout)
         texts: list[str] = []
+        final: str | None = None
         for line in proc.stdout.splitlines():
             try:
                 ev = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if ev.get("type") == "result" and ev.get("is_error") and ev.get("api_error_status") in (401, 403):
-                return str(ev.get("result", "authentication failed")), 401
-            if ev.get("type") == "assistant":
+            if ev.get("type") == "result":
+                if ev.get("is_error") and ev.get("api_error_status") in (401, 403):
+                    return str(ev.get("result") or "authentication failed"), 401
+                if ev.get("result"):
+                    final = str(ev["result"])
+            elif ev.get("type") == "assistant":
                 for b in (ev.get("message") or {}).get("content") or []:
                     if b.get("type") == "text":
                         texts.append(b["text"])
-            elif ev.get("type") == "result" and ev.get("result"):
-                texts.append(str(ev["result"]))
-        if not texts and proc.stdout.strip() and not proc.stdout.lstrip().startswith("{"):
+        if final is None and not texts and proc.stdout.strip() and not proc.stdout.lstrip().startswith("{"):
             texts.append(proc.stdout)
-        return "\n".join(texts).strip(), proc.returncode
+        return (final if final is not None else "\n".join(texts)).strip(), proc.returncode
 
     def prompt(self, name: str, **fields: str) -> str:
         text = (self.repo / "loop" / "prompts" / f"{name}.md").read_text()
@@ -177,20 +209,21 @@ class Critic:
     def diagnose(self, iteration: int) -> str:
         if self.a.blind:
             return "DIAGNOSIS: no failure data available (blind arm).\nHYPOTHESIS: improve the classifier however you see fit."
-        report_path = self.worktree / "eval" / "last_train_report.json"
+        report_path = self.worktree / REPORT_REL
         report = report_path.read_text()[:20000] if report_path.exists() else "{}"
         text, rc = self.run_claude(self.prompt("diagnostic", train_eval_name=f"tenfold-train-{self.tag_prev}", report=report),
-                                   DIAG_TOOLS, self.tmp / f"diag-{iteration}.jsonl", 8)
+                                   DIAG_TOOLS, self.tmp / f"diag-{iteration}{self.suffix}.jsonl", 8)
         if rc == 401:
             raise CriticAuthError(text)
         return text if rc == 0 and text else f"DIAGNOSIS: unavailable (claude rc={rc}).\nHYPOTHESIS: none."
 
     @maybe_weave_op("critic.patch")
-    def patch(self, iteration: int, diagnosis: str, feedback: str, next_version: int) -> tuple[str, int, Path]:
-        transcript = self.tmp / f"patch-{iteration}.jsonl"
+    def patch(self, iteration: int, attempt: int, diagnosis: str, feedback: str, next_version: int) -> tuple[str, int, Path]:
+        transcript = self.tmp / f"patch-{iteration}-{attempt}{self.suffix}.jsonl"
         text, rc = self.run_claude(
-            self.prompt("patch", diagnosis=diagnosis, feedback=feedback, next_version=str(next_version)),
-            PATCH_TOOLS, transcript, self.a.max_turns)
+            self.prompt("patch", diagnosis=diagnosis, feedback=feedback, next_version=str(next_version),
+                        tools_note=TOOLS_NOTE_BLIND if self.a.blind else TOOLS_NOTE),
+            PATCH_TOOLS_BLIND if self.a.blind else PATCH_TOOLS, transcript, self.a.max_turns)
         return text, rc, transcript
 
     @maybe_weave_op("critic.guard_agent")
@@ -198,7 +231,9 @@ class Critic:
         if self.a.blind:
             return "VERDICT: APPROVE | blind arm has no diagnosis to check against"
         text, rc = self.run_claude(self.prompt("guard", diagnosis=diagnosis, diff=diff[:12000]), "",
-                                   self.tmp / f"guard-{iteration}.jsonl", 1)
+                                   self.tmp / f"guard-{iteration}{self.suffix}.jsonl", 2)
+        if rc == 401:
+            raise CriticAuthError(text)
         return text if rc == 0 and text else "VERDICT: REJECT | guard agent unavailable | fix: retry"
 
     @maybe_weave_op("critic.guard_code")
@@ -208,10 +243,12 @@ class Critic:
         return [l for l in p.stdout.splitlines() if l.startswith("GUARD_REJECT ") or l.startswith("GUARD_ERROR")]
 
     # ---------- evaluation and gate ----------
-    def run_eval(self, split: str, rules: Path, tag: str) -> dict | None:
+    def run_eval(self, split: str, rules: Path, tag: str, report: Path | None = None) -> dict | None:
         out = self.tmp / f"{split}-{tag}.json"
         cmd = [sys.executable, str(self.repo / "eval" / "run_eval.py"), "--split", split, "--rules", str(rules),
                "--tag", tag, "--out", str(out)]
+        if split == "train":
+            cmd += ["--report", str(report or self.tmp / f"report-{tag}.json")]
         if self.a.local:
             cmd.append("--local")
         env = dict(self.env)
@@ -262,14 +299,15 @@ class Critic:
         self.metrics_path.write_text(json.dumps(m, indent=2))
 
     def commit(self, version: int, diagnosis: str, patch_summary: str, expected: str) -> str:
-        shutil.copy(self.worktree / RULES_REL, self.repo / RULES_REL)
+        shutil.copy(self.worktree / RULES_REL, self.rules_src)
         if self.a.no_commit:
             return "no-commit"
         diag = diagnosis.split("\n")[0].replace("DIAGNOSIS:", "").strip()[:120]
         msg = f"critic v{version}: {diag} | patch: {patch_summary[:120]} | expected: {expected[:120]}"
         subprocess.run(["git", "add", str(RULES_REL)], cwd=self.repo, check=True)
+        # pathspec commit: files a human staged in the main repo never ride along under critic-agent
         subprocess.run(["git", "-c", "user.name=critic-agent", "-c", "user.email=critic-agent@tenfold.local",
-                        "commit", "-q", "-m", msg], cwd=self.repo, check=True)
+                        "commit", "-q", "-m", msg, "--", str(RULES_REL)], cwd=self.repo, check=True)
         sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True).stdout.strip()
         (self.repo / "data").mkdir(exist_ok=True)
         (self.repo / "data" / "BEST_VERSION").write_text(sha + "\n")
@@ -281,52 +319,52 @@ class Critic:
 
     @maybe_weave_op("critic.rejected_patch")
     def record_rejection(self, iteration: int, reason: str, diff: str) -> dict:
-        return {"iteration": iteration, "reason": reason, "diff": diff[:4000]}
+        return {"iteration": iteration, "reason": reason, "diff": diff[:4000], "blind": self.a.blind}
 
     # ---------- main loop ----------
     def run(self) -> int:
         a = self.a
-        self.tmp = self.repo / "loop" / "transcripts"
-        self.tmp.mkdir(parents=True, exist_ok=True)
         self.setup_worktree()
         metrics = self.load_metrics()
         accepted = [v for v in metrics["versions"] if v.get("accepted")]
         if not accepted:
             log("no baseline: evaluating V0 on train", self.logfile)
-            base = self.run_eval("train", self.repo / RULES_REL, "v0")
+            base = self.run_eval("train", self.rules_src, f"v0{self.suffix}", report=self.report_src)
             if base is None:
                 log("FATAL: V0 evaluation failed", self.logfile)
                 return 2
-            entry = {"tag": "v0", "sha": base["git_sha"], "train": base["metrics"], "heldout": None,
-                     "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": "baseline"}
+            entry = {"tag": f"v0{self.suffix}", "version": 0, "sha": base["git_sha"], "train": base["metrics"],
+                     "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": "baseline"}
             if not a.dry_run and not a.skip_heldout:
-                h = self.run_eval("heldout", self.repo / RULES_REL, "v0")
+                h = self.run_eval("heldout", self.rules_src, f"v0{self.suffix}")
                 entry["heldout"] = h["metrics"] if h else None
-            metrics["versions"].append(entry)
-            self.save_metrics(metrics)
+            if not a.dry_run:
+                metrics["versions"].append(entry)
+                self.save_metrics(metrics)
             accepted = [entry]
-        version = int(accepted[-1]["tag"].lstrip("v")) + 1
-        self.tag_prev = accepted[-1]["tag"]
+        last = accepted[-1]
+        version = int(last.get("version", str(last["tag"]).lstrip("v").split("-")[0])) + 1
+        self.tag_prev = last["tag"]
         no_improve = 0
         for it in range(1, a.iterations + 1):
-            log(f"iteration {it}/{a.iterations} start (next version v{version})", self.logfile)
+            log(f"iteration {it}/{a.iterations} start (next version v{version}{self.suffix})", self.logfile)
             self.heartbeat(it, "start")
             self.reset_worktree()
             diagnosis = self.diagnose(it)
-            log("diagnosis: " + diagnosis.split("\n")[0][:160], self.logfile)
+            log("diagnosis: " + diagnosis.split("\n")[0][:200], self.logfile)
             feedback = ""
             outcome = "failed"
             for attempt in range(1, 3):
-                text, rc, transcript = self.patch(it, diagnosis, feedback, version)
+                text, rc, transcript = self.patch(it, attempt, diagnosis, feedback, version)
+                if rc == 401:
+                    raise CriticAuthError(text)
                 if rc == 124:
                     log(f"patch attempt {attempt}: claude timed out after {a.timeout}s", self.logfile)
                     feedback = ""
                     self.reset_worktree()
                     continue
-                if rc == 401:
-                    raise CriticAuthError(text)
                 if rc != 0:
-                    log(f"patch attempt {attempt}: claude exited {rc}", self.logfile)
+                    log(f"patch attempt {attempt}: claude exited {rc}: {text[-200:]}", self.logfile)
                     break
                 diff = self.git_wt("diff", "--", str(RULES_REL))
                 rejects = self.guard_code(transcript)
@@ -336,8 +374,8 @@ class Critic:
                         rejects = [f"GUARD_REJECT agent: {verdict.strip()[:300]}"]
                 if rejects:
                     log(f"patch attempt {attempt} rejected: " + " || ".join(r[:160] for r in rejects), self.logfile)
-                    feedback = "The previous attempt was rejected by the guard:\n" + "\n".join(rejects) + \
-                               "\nStart again from the original file (it has been restored) and address every line."
+                    feedback = ("The previous attempt was rejected by the guard:\n" + "\n".join(rejects) +
+                                "\nStart again from the original file (it has been restored) and address every line.")
                     self.record_rejection(it, "guard: " + rejects[0][:200], diff)
                     self.reset_worktree()
                     continue
@@ -345,12 +383,15 @@ class Critic:
                 expected = next((l.split(":", 1)[1].strip() for l in text.splitlines() if l.startswith("EXPECTED:")), "")
                 if a.dry_run:
                     print("\n----- DRY RUN: guard passed, diff below, nothing committed -----\n" + diff)
+                    print(f"PATCH: {patch_summary}\nEXPECTED: {expected}")
                     return 0
-                cand = self.run_eval("train", self.worktree / RULES_REL, f"v{version}-candidate")
+                cand_tag = f"v{version}{self.suffix}-candidate"
+                cand_report = self.tmp / f"report-{cand_tag}.json"
+                cand = self.run_eval("train", self.worktree / RULES_REL, cand_tag, report=cand_report)
                 if cand is None:
                     log("train eval failed; iteration abandoned", self.logfile)
                     break
-                ok, why = self.gate(accepted[-1]["train"], cand["metrics"])
+                ok, why = self.gate(last["train"], cand["metrics"])
                 if not ok:
                     log(f"metric gate rejected: {why}", self.logfile)
                     metrics["rejected"].append({"iteration": it, "ts": now(), "reason": why, "train": cand["metrics"],
@@ -361,19 +402,22 @@ class Critic:
                     outcome = "rejected"
                     break
                 sha = self.commit(version, diagnosis, patch_summary, expected)
-                entry = {"tag": f"v{version}", "sha": sha, "train": cand["metrics"], "heldout": None, "accepted": True,
-                         "blind": a.blind, "ts": now(), "diagnosis": diagnosis[:300], "patch": patch_summary,
-                         "expected": expected, "gate": why}
+                if cand_report.exists():
+                    shutil.copy(cand_report, self.report_src)
+                entry = {"tag": f"v{version}{self.suffix}", "version": version, "sha": sha, "train": cand["metrics"],
+                         "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": diagnosis[:300],
+                         "patch": patch_summary, "expected": expected, "gate": why}
                 if not a.skip_heldout:
-                    h = self.run_eval("heldout", self.repo / RULES_REL, f"v{version}")
+                    h = self.run_eval("heldout", self.rules_src, f"v{version}{self.suffix}")
                     entry["heldout"] = h["metrics"] if h else None
                 metrics["versions"].append(entry)
                 self.save_metrics(metrics)
-                accepted.append(entry)
-                log(f"ACCEPTED v{version} ({why}) sha={sha[:8]}", self.logfile)
-                self.tag_prev = f"v{version}"
+                improved = "->" in why and float(why.split("->")[1]) > float(why.split("->")[0].split()[-1])
+                no_improve = 0 if improved else no_improve + 1
+                log(f"ACCEPTED v{version}{self.suffix} ({why}) sha={sha[:8]}", self.logfile)
+                last = entry
+                self.tag_prev = entry["tag"]
                 version += 1
-                no_improve = 0 if "->" in why and float(why.split("->")[1]) > float(why.split("->")[0].split()[-1]) else no_improve + 1
                 outcome = "accepted"
                 break
             self.heartbeat(it, outcome)
@@ -387,15 +431,14 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--iterations", type=int, default=1)
     ap.add_argument("--repo", default=str(REPO))
-    ap.add_argument("--worktree", default=str(REPO.parent / "tenfold-critic"))
-    ap.add_argument("--metrics", default="data/metrics.json")
+    ap.add_argument("--worktree")
+    ap.add_argument("--metrics")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--mock-claude", help="script that stands in for `claude` (tests)")
     ap.add_argument("--claude-bin", default="claude")
-    ap.add_argument("--model", default=os.environ.get("TENFOLD_CRITIC_MODEL", "claude-sonnet-5"),
-                    help="model for the three agents (default claude-sonnet-5; opus costs ~5x per iteration)")
-    ap.add_argument("--blind", action="store_true", help="ablation: no failure data for the diagnosis")
-    ap.add_argument("--no-commit", action="store_true", help="never commit to the repo (blind arm)")
+    ap.add_argument("--model", default=None, help="model for the three agents (default claude-sonnet-5, or TENFOLD_CRITIC_MODEL)")
+    ap.add_argument("--blind", action="store_true", help="ablation: no failure data, no train copy, never touches the repo")
+    ap.add_argument("--no-commit", action="store_true", help="never commit to the repo")
     ap.add_argument("--no-early-stop", action="store_true")
     ap.add_argument("--skip-heldout", action="store_true")
     ap.add_argument("--local", action="store_true", help="no W&B anywhere")
@@ -404,18 +447,20 @@ def main() -> int:
     ap.add_argument("--max-turns", type=int, default=30)
     ap.add_argument("--timeout", type=int, default=600)
     a = ap.parse_args()
-    load_env(Path(a.repo).resolve() / ".env")
+    repo = Path(a.repo).resolve()
+    load_env(repo / ".env")
+    a.model = a.model or os.environ.get("TENFOLD_CRITIC_MODEL", "claude-sonnet-5")
     if a.blind:
         a.no_commit = True
-        if a.metrics == "data/metrics.json":
-            a.metrics = "data/metrics-blind.json"
+    a.worktree = a.worktree or str(repo.parent / ("tenfold-blind" if a.blind else "tenfold-critic"))
+    a.metrics = a.metrics or ("data/metrics-blind.json" if a.blind else "data/metrics.json")
     if a.local:
         os.environ.pop("WANDB_API_KEY", None)
     try:
         return Critic(a).run()
     except CriticAuthError as e:
-        log(f"STOP: the critic cannot authenticate to Claude ({e}). Fix: run `claude login` (or set ANTHROPIC_API_KEY "
-            f"with credit) on this machine, then `python loop/critic.py --dry-run`.", None)
+        log(f"STOP: the critic cannot authenticate to Claude ({e}). Fix: `claude login`, or ANTHROPIC_API_KEY in .env "
+            f"(org-level keys also need ANTHROPIC_CUSTOM_HEADERS), then `python loop/critic.py --dry-run`.", None)
         return 3
 
 
