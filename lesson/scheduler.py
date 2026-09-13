@@ -27,26 +27,40 @@ Spacing by math mastery: 0 later in this session, 1 the next session, 2 one day,
 rather than clock counted, which is why a record carries both due_session and
 due_at: a child who practises twice in one evening should not be shown a mastery
 1 fact again that evening, and a child who skips three days is not punished.
+Since the draw became uniform the spacing is written and read rather than obeyed:
+schedule_next still records when a fact is owed and is_due still answers it, for
+the record, the summary and whoever reads the learner state, but a due fact waits
+its turn in the draw like every other one. Nothing can be both uniform and due
+first.
 
-Variety, because every lesson used to repeat the same facts. A course node is
-the theme of its lesson and is served first, then the session widens to the
-whole range of tables to fill its length:
+The draw, because every lesson used to repeat the same facts. Every question of
+a lesson is drawn uniformly at random from the fifteen facts of six to ten, in
+both orientations. A course node names the lesson on the screen and fixes how
+many questions it runs, and that is all it does: it does not shape what is
+served. The rules the draw still obeys:
 
-  never the same question twice in one session, unless the child got it wrong,
-  in which case the retry queue brings it back and it is the only repeat;
+  never the same fact twice in one session, unless the child got it wrong, in
+  which case the retry queue brings it back and it is the only repeat;
   never the same table twice in a row;
   the two orientations alternate, and 6 on the left with 7 on the right is a
   different question from 7 on the left with 6 on the right.
 
-New material stays inside the node: the widened part of a lesson is practice of
-facts the child has already met, never the place where a fact is taught. The
-widening can still reach a fact the child has never met, which is practice and
-not new material, so every Pick carries seen: the phrase layer needs it to stop
-announcing a first meeting as a review, and the mastery gate ignores it.
+New material is whatever the draw hands the child for the first time. The
+mastery gate no longer holds facts back, because holding a fact back would bend
+the draw; it holds the announcement back, so a lesson opens at most two facts as
+new material while the last two were not passed first try, and any further unmet
+fact is served as plain practice. Every Pick carries seen, which says whether
+the child has met the fact before, and the phrase layer reads it so that a first
+meeting is never announced as a review.
+
+The draw is the one thing here that is not a pure function of the state passed
+in, so the random source is passed in too: a test or a replay hands the
+Scheduler a seeded Random and gets the same week of sessions on every run.
 """
 
 from __future__ import annotations
 
+import random
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
@@ -362,13 +376,12 @@ class LearnerState:
 class Pick:
     """One exercise, and why Tally chose it.
 
-    is_new is new material: a fact the node is teaching now, which is what the
-    mastery gate counts. seen is a plainer thing, and the two are not the same
-    question: a widened fact is never new material, yet the child may never have
-    met it, and announcing it as a review would be a small lie. seen says the
-    child has attempted this fact before, so the phrase layer can tell the two
-    apart. It defaults to True, which is what every caller that builds a Pick by
-    hand means, the scripted demo included: their wording stays as it was.
+    is_new is new material: a fact the child has never met, announced as one
+    while the mastery gate is open. seen is the plainer thing underneath, and
+    the two stay separate fields because a hand built Pick sets them apart: a
+    scripted step written as practice stays practice whatever the record says.
+    seen defaults to True, which is what every caller that builds a Pick by hand
+    means, the scripted demo included: their wording stays as it was.
     """
 
     fact: str
@@ -534,12 +547,20 @@ def onboarding_steps() -> list[dict[str, Any]]:
 
 
 class Scheduler:
-    """Picks the next exercise and remembers what happened. Deterministic."""
+    """Picks the next exercise and remembers what happened.
+
+    Deterministic given its random source: hand it a seeded Random and the same
+    state replays the same lesson, question for question.
+    """
 
     def __init__(self, state: LearnerState | None = None,
-                 now: datetime | None = None) -> None:
+                 now: datetime | None = None,
+                 rng: random.Random | None = None) -> None:
         moment = now or now_utc()
         self.state = state or LearnerState.new(moment)
+        # The draw. Injected so a test or a replay is exact, system entropy in
+        # the app, where two children in a row must not get the same lesson.
+        self.rng = rng or random.Random()
         self.session = self.state.sessions
         self.started_at = moment
         self.onboarding = False
@@ -558,17 +579,12 @@ class Scheduler:
         self.errors_since_confidence = 0
         self.ending_on_success = False
         self.previous_session_failures: set[str] = set()
-        # A course node themes the session: its pairs are served first, only
-        # its pairs may open as new material, and it fixes the length. Once the
-        # theme has been served the session draws from every table, which is how
-        # a two pair node fills five questions without repeating itself.
+        # A course node is a label on the screen and a length. Its facts are
+        # kept because the start payload names them and app/server.py reads them
+        # for the fact its own early stop ends on, but they never touch the
+        # draw: every question comes from the whole of six to ten.
         self.allowed: set[str] | None = None
-        self.orientations: dict[str, list[tuple[int, int]]] = {}
         self.target: int | None = None
-        # Kept as a count of what the lesson drew from outside its node, for the
-        # trace. It is no longer a budget: widening is the ordinary way a lesson
-        # is filled.
-        self.outside_reviews = 0
 
     # -- session lifecycle --
 
@@ -587,8 +603,7 @@ class Scheduler:
         another_day = last is not None and last.date() < moment.date()
         if self.session >= 2 and another_day:
             self.plan = list(NEXT_DAY_PLAN)
-            self.opening_fact = self._most_fragile(self.session - 1,
-                                                   in_scope_only=True)
+            self.opening_fact = self._most_fragile(self.session - 1)
         else:
             self.plan = []
             self.opening_fact = None
@@ -604,24 +619,16 @@ class Scheduler:
 
     def set_scope(self, pairs: Sequence[Sequence[int]] | None,
                   length: int | None) -> None:
-        """Restrict the session to one course node, or clear the restriction."""
-        self.target = length
-        if not pairs:
-            self.allowed = None
-            self.orientations = {}
-            return
-        self.allowed = set()
-        self.orientations = {}
-        for pair in pairs:
-            left, right = int(pair[0]), int(pair[1])
-            key = fact_key(left, right)
-            self.allowed.add(key)
-            self.orientations.setdefault(key, [])
-            if (left, right) not in self.orientations[key]:
-                self.orientations[key].append((left, right))
+        """Record the node's facts and its length. Neither one steers the draw.
 
-    def _in_scope(self, key: str) -> bool:
-        return self.allowed is None or key in self.allowed
+        The facts are the label: the start payload names them and app/server.py
+        reads them when it chooses the fact its own early stop ends on. The
+        length is the one thing a node still decides, because the page scores
+        the child out of it.
+        """
+        self.target = length
+        self.allowed = {fact_key(int(pair[0]), int(pair[1]))
+                        for pair in pairs} if pairs else None
 
     def _failures_in(self, session: int) -> set[str]:
         return {
@@ -629,17 +636,16 @@ class Scheduler:
             if any(a.session == session and not a.correct for a in record.attempts)
         }
 
-    def _most_fragile(self, session: int, in_scope_only: bool = False) -> str | None:
-        """Lowest mastery among the facts touched last time, then most missed.
+    def _most_fragile(self, session: int) -> str | None:
+        """Lowest mastery among the facts touched in that session, then most missed.
 
-        The opening exercise of a session asks for the in scope answer only: a
-        lesson named after two facts has to open on one of those two facts, and
-        the one exercise start check has to ask the fact it is checking.
+        What the record says is fragile, for the start payload and for the end
+        summary. It no longer opens the session: the first question of a lesson
+        is drawn like every other one.
         """
         touched = [
             key for key, record in self.state.math.items()
             if any(a.session == session for a in record.attempts)
-            and (not in_scope_only or self._in_scope(key))
         ]
         if not touched:
             return None
@@ -667,7 +673,7 @@ class Scheduler:
             self.history.append(pick)
             return pick
 
-        pick = self._choose(moment)
+        pick = self._choose()
         if pick is None:
             return None
         # Read before the attempt is recorded, so it says what the child knew
@@ -676,16 +682,14 @@ class Scheduler:
         if pick.is_new:
             self.new_this_session.append(pick.fact)
             self.level_bonus = 0              # the step is spent once it is served
-        if not self._in_scope(pick.fact):
-            self.outside_reviews += 1
         self.history.append(pick)
         return pick
 
     def _met_before(self, key: str) -> bool:
         """Whether the child has ever attempted this fact.
 
-        Only the history says it. A fact carries the same answer wherever it was
-        drawn from, the node or the wider range, so this never looks at scope.
+        Only the history says it, and the history is the same wherever the draw
+        landed, so this never looks at the node.
         """
         record = self.state.math.get(key)
         return bool(record and record.seen)
@@ -695,184 +699,115 @@ class Scheduler:
 
         Never inside a course node: its length is fixed and the page scores
         correct out of that length, so a rescue exercise would make three stars
-        arithmetically impossible.
+        arithmetically impossible. The length is all a node still decides.
         """
         if self.target is not None:
             return False
         return bool(self.outcomes) and not self.outcomes[-1].correct \
             and not self.ending_on_success
 
-    def _choose(self, now: datetime) -> Pick | None:
+    def _choose(self) -> Pick | None:
+        """One question, drawn uniformly from the fifteen facts of six to ten.
+
+        Three picks come from a narrower pool than the fifteen, and not one of
+        the three is about the material: a fact the child got wrong comes back
+        from the retry queue, two errors in a row buy a fact the child owns, and
+        a session that has to end on a success ends on one of those. Everything
+        else is the draw, over the facts this session has not served yet.
+        """
+        # Two errors in a row preempt even the retry queue: handing the child
+        # back the fact they have just failed is the opposite of the intent.
+        if self.consecutive_errors >= ERRORS_BEFORE_CONFIDENCE:
+            pick = self._draw(self._mastered_facts(), REACTION_CONFIDENCE)
+            if pick is not None:
+                return pick
         index = len(self.history)
-        candidates = list(self._candidates(now, index))
-        # First pass: a fact this session has not asked yet, so the lesson keeps
-        # moving. Second pass: the other orientation of a fact already asked,
-        # which is a different question and still counts as variety.
-        for fresh in (True, False):
-            for candidate, reason, is_new in candidates:
-                left, right = self._orientation(candidate)
-                if self._allowed(candidate, left, right,
-                                 repeat_ok=reason == REACTION_RETRY, fresh=fresh):
-                    return Pick(candidate, left, right, reason, is_new)
+        for due_index, key in self.retry_queue:
+            if index >= due_index:
+                pick = self._draw([key], REACTION_RETRY, repeat_ok=True)
+                if pick is not None:
+                    return pick
+        served = self._served_facts()
+        pick = self._draw([key for key in all_facts() if key not in served])
+        if pick is not None:
+            return pick
         # Nothing satisfied the constraints, so relax them rather than stall.
         return self._any_pick()
 
-    def _candidates(self, now: datetime, index: int) -> Iterable[tuple[str, str, bool]]:
-        """Every candidate in priority order, best first.
+    def _draw(self, pool: Iterable[str], reason: str | None = None,
+              repeat_ok: bool = False) -> Pick | None:
+        """One fact at random among the ones the pick rules leave standing.
 
-        The node's own pairs are offered at every stage before the wider range,
-        so a lesson named "Six and seven" opens on six and seven and only widens
-        once its own facts are served or blocked.
+        The pool is sorted before the draw, so the same seed replays the same
+        lesson whatever order the caller happened to build it in.
         """
-        # Two errors in a row preempt everything else: a mastered fact, to break
-        # the spiral. The listed order puts this third, after retry and after the
-        # due queue, where it could never fire, because a failed fact is queued
-        # for retry and a mastery 0 fact is due in the same session, so one of the
-        # two always has a candidate. The stop rule that counts errors after a
-        # confidence exercise would never trigger either. Handing the child back
-        # the fact they just failed twice is also the opposite of the intent.
-        if self.consecutive_errors >= ERRORS_BEFORE_CONFIDENCE:
-            for key in self._mastered_facts():
-                yield key, REACTION_CONFIDENCE, False
-            if index > 0:
-                for key in self._mastered_facts(wide=True):
-                    yield key, REACTION_CONFIDENCE, False
+        legal = sorted({key for key in pool
+                        if self._allowed(key, repeat_ok=repeat_ok)})
+        if not legal:
+            return None
+        return self._as_pick(self.rng.choice(legal), reason)
 
-        # The session opens on the most fragile fact of the previous session,
-        # and only ever on one that is in scope, so the opening exercise is
-        # about the node the child chose.
-        if index == 0 and self.opening_fact and self._in_scope(self.opening_fact):
-            yield self.opening_fact, REACTION_REVIEW, False
+    def _as_pick(self, key: str, reason: str | None = None) -> Pick:
+        """A drawn fact, the hands it is asked with, and what Tally calls it.
 
-        # 1. a fact queued for retry, served two exercises after the error. This
-        # is the one repeat a session is allowed: a wrong fact always comes back.
-        for due_index, key in self.retry_queue:
-            if index >= due_index:
-                yield key, REACTION_RETRY, False
-
-        # 2. the oldest due fact of the node itself
-        due = self._due_facts(now)
-        for key in due:
-            if self._in_scope(key):
-                yield key, REACTION_REVIEW, False
-
-        # 3. the next new fact, only once the last two new ones landed first try.
-        # New material is the node's alone: the widening below is practice of
-        # facts the child has met, never the place where a fact is taught.
-        if self._may_open_a_new_fact():
-            new = self._next_new_fact()
-            if new is not None:
-                reason = REACTION_LEVEL_UP if self.level_bonus else REACTION_NEXT_NEW
-                yield new, reason, True
-
-        # 4. something half learned in the node, then anything of the node
-        for key in self._facts_at_mastery(1, 2):
-            yield key, REACTION_REVIEW, False
-        for key in fact_order(self.state):
-            if self._in_scope(key) and self.state.math.get(key, Record()).seen:
-                yield key, REACTION_REVIEW, False
-
-        # 5. the node's own facts are served, so widen to FACTORS, every table
-        # the app teaches, and fill the lesson without repeating. There is no
-        # unlocking to derive: six to ten is the range for every child, new or
-        # not. Never as the opening exercise: a lesson named after two facts
-        # opens on those two facts.
-        if index > 0:
-            for key in due:
-                if not self._in_scope(key):
-                    yield key, REACTION_REVIEW, False
-            for key in self._facts_at_mastery(1, 2, wide=True):
-                if not self._in_scope(key):
-                    yield key, REACTION_REVIEW, False
-            for key in fact_order(self.state):
-                if not self._in_scope(key) and self.state.math.get(key, Record()).seen:
-                    yield key, REACTION_REVIEW, False
-            for key in fact_order(self.state):
-                if not self._in_scope(key):
-                    yield key, REACTION_REVIEW, False
-
-        # and finally anything of the node, so a session never stalls
-        for key in fact_order(self.state):
-            if self._in_scope(key):
-                yield key, REACTION_REVIEW, False
-
-    def _due_facts(self, now: datetime) -> list[str]:
-        due = [key for key, record in self.state.math.items()
-               if is_due(record, now, self.session)]
-        order = {key: position for position, key in enumerate(DIFFICULTY_ORDER)}
-        return sorted(due, key=lambda key: (self._last_seen(key), order.get(key, 99)))
-
-    def _last_seen(self, key: str) -> str:
-        record = self.state.math.get(key)
-        return record.attempts[-1].at if record and record.attempts else ""
-
-    def _mastered_facts(self, wide: bool = False) -> list[str]:
-        """Solid facts of the node, or of every table when the lesson widens.
-
-        The node's own solid facts come first, so the confidence exercise after
-        two errors stays on the material the lesson is named after.
+        A fact the child has never met is new material while the mastery gate is
+        open. Once the gate is shut the draw still serves whatever it lands on,
+        as plain practice: skipping a fact would bend the draw, and the child
+        meeting a fact is not the same event as Tally teaching it.
         """
-        return [key for key in fact_order(self.state)
-                if (wide or self._in_scope(key))
-                and self.state.math.get(key, Record()).mastery >= MASTERED_FROM]
+        left, right = self._orientation(key)
+        if reason is not None:
+            return Pick(key, left, right, reason)
+        if not self._met_before(key) and self._may_open_a_new_fact():
+            opened = REACTION_LEVEL_UP if self.level_bonus else REACTION_NEXT_NEW
+            return Pick(key, left, right, opened, is_new=True)
+        return Pick(key, left, right, REACTION_REVIEW)
 
-    def _facts_at_mastery(self, low: int, high: int, wide: bool = False) -> list[str]:
-        return [key for key in fact_order(self.state)
-                if (wide or self._in_scope(key))
-                and low <= self.state.math.get(key, Record()).mastery <= high
-                and self.state.math.get(key, Record()).seen]
+    def _mastered_facts(self) -> list[str]:
+        """The facts this child owns, from anywhere in six to ten."""
+        return [key for key in all_facts()
+                if self.state.math.get(key, Record()).mastery >= MASTERED_FROM]
 
     def _may_open_a_new_fact(self) -> bool:
         if len(self.new_results) < NEW_FACT_SUCCESSES_REQUIRED:
             return True                       # nothing opened yet, go ahead
         return all(self.new_results[-NEW_FACT_SUCCESSES_REQUIRED:])
 
-    def _next_new_fact(self) -> str | None:
-        unseen = [key for key in fact_order(self.state)
-                  if self._in_scope(key)
-                  and not self.state.math.get(key, Record()).seen]
-        if not unseen:
-            return None
-        return unseen[min(self.level_bonus, len(unseen) - 1)]
-
     def _mastered_pick(self) -> Pick | None:
-        for key in self._mastered_facts():
-            left, right = self._orientation(key)
-            return Pick(key, left, right, REACTION_CONFIDENCE)
-        return None
+        """A fact the child owns, for the exercise that ends on a success."""
+        mastered = self._mastered_facts()
+        pick = self._draw(mastered, REACTION_CONFIDENCE)
+        if pick is not None or not mastered:
+            return pick
+        return self._as_pick(self.rng.choice(sorted(mastered)), REACTION_CONFIDENCE)
 
     def _any_pick(self) -> Pick | None:
         """The relief valve: a session must never stall for want of a candidate.
 
         It gives the rules up one at a time, in the order they can be spared:
-        first a fact this session has not asked, then a question it has not
-        asked, then the table that just came up, and last of all the fact that
-        was just asked. The node comes before the wider range at every step.
+        first the table that just came up, then the no repeat rule, and last of
+        all the fact that was just asked. The draw stays uniform at every step.
         """
-        pool = [key for key in fact_order(self.state) if self._in_scope(key)]
-        pool += [key for key in fact_order(self.state) if not self._in_scope(key)]
-        for fresh in (True, False):
-            for key in pool:
-                left, right = self._orientation(key)
-                if self._allowed(key, left, right, fresh=fresh):
-                    return Pick(key, left, right, REACTION_REVIEW)
+        served = self._served_facts()
         previous = self.history[-1].fact if self.history else None
-        for key in pool:
-            if key != previous:
-                left, right = self._orientation(key)
-                return Pick(key, left, right, REACTION_REVIEW)
-        return Pick(pool[0], *self._orientation(pool[0]), REACTION_REVIEW) if pool else None
+        pools = (
+            [key for key in all_facts() if key not in served and key != previous],
+            [key for key in all_facts() if key != previous],
+            list(all_facts()),
+        )
+        for pool in pools:
+            if pool:
+                return self._as_pick(self.rng.choice(sorted(pool)))
+        return None
 
     def _orientation(self, key: str) -> tuple[int, int]:
         """Alternate the two orientations of a fact across its attempts.
 
-        A course node names its orientations explicitly, for example [6, 8] and
-        [8, 6], so when one is in scope its list wins over the default pair.
+        Six on the left with seven on the right is a different question from
+        seven on the left with six on the right, so a fact that comes back is
+        asked the other way round.
         """
         seen = self.state.math.get(key, Record()).logged
-        listed = self.orientations.get(key)
-        if listed:
-            return listed[seen % len(listed)]
         low, high = factors_of(key)
         if low == high:
             return low, high
@@ -881,24 +816,11 @@ class Scheduler:
     def _served_facts(self) -> set[str]:
         return {pick.fact for pick in self.history}
 
-    def _served_poses(self) -> set[tuple[int, int]]:
-        """The questions already asked this session, hands and all: 6 on the
-        left with 7 on the right is not the question 7 on the left with 6 on
-        the right, and asking both is variety rather than repetition."""
-        return {(pick.left, pick.right) for pick in self.history}
-
-    def _is_node_fact(self, key: str) -> bool:
-        return self.allowed is not None and key in self.allowed
-
-    def _allowed(self, key: str, left: int, right: int,
-                 repeat_ok: bool = False, fresh: bool = True) -> bool:
-        """Whether this question may be asked now.
+    def _allowed(self, key: str, repeat_ok: bool = False) -> bool:
+        """Whether this fact may be asked now.
 
         repeat_ok is the retry queue: a fact the child got wrong comes back
         whatever else has been asked, and it is the only repeat a session gets.
-        fresh is the first pass of _choose, which wants a fact this session has
-        not touched at all; the node's own pairs are exempt, because showing
-        their other orientation is the lesson doing its job.
         """
         if self.history and self.history[-1].fact == key:
             return False                      # never the same fact twice in a row
@@ -907,11 +829,7 @@ class Scheduler:
             return False                      # never the same table twice in a row
         if repeat_ok:
             return True
-        if (left, right) in self._served_poses():
-            return False                      # never the same question twice
-        if fresh and key in self._served_facts() and not self._is_node_fact(key):
-            return False
-        return True
+        return key not in self._served_facts()
 
     # -- recording --
 
