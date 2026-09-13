@@ -5,13 +5,16 @@ classifier.schema, classifier.features. No file, network or introspection access
 
 Hypothesis log (one line per accepted patch, newest last):
 - v0: nearest fingertip pair on the newest frame with both hands; contact if closer than one threshold.
+- v1: measured (not the diagnosis's pair-selection guess) that near_contact holds were the biggest failure:
+  the correct pair is found but sits just under 0.35, so contact flips true when the label expects false.
+  Lowered CONTACT_THRESHOLD to 0.2975 (best passing value from --sweep-all), near_contact_accuracy 0.41 -> 0.73.
 """
 from __future__ import annotations
 
 from classifier import features
 from classifier.schema import GestureState, Window
 
-CONTACT_THRESHOLD = 0.35  # fingertip distance, in units of mean hand scale
+CONTACT_THRESHOLD = 0.2975  # fingertip distance, in units of mean hand scale
 UNKNOWN_THRESHOLD = 0.5  # below this detection confidence we refuse to answer
 
 
