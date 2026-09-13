@@ -960,8 +960,9 @@ def test_the_gate_timings_come_from_the_policy_file(page):
 
 def test_the_success_beat_plays_on_the_numbers_it_is_given(page):
     """The tutor calls the beat and hands the page its numbers. The parts it names run
-    for success_ms and no longer, and the line that closes it is said when the next
-    exercise arrives, never over the success line the child has just earned."""
+    for success_ms past the success line and no longer, and the line that closes it is
+    said on its own clock, never over the success line the child has just earned and
+    never cut by the next exercise arriving."""
     context, url = page
     tab = context.new_page()
     tab.add_init_script(FAKE_RECOGNITION + CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
@@ -987,6 +988,94 @@ def test_the_success_beat_plays_on_the_numbers_it_is_given(page):
     # the success line goes out first, whole: it is short sentences, one utterance each
     assert " ".join(said(tab)[:2]) == beat["line"], said(tab)
     assert tab.evaluate("window.__cancelled") == 0, "the success line was cut by the next exercise"
+
+
+def beat_from_the_policy_file() -> dict:
+    """The success beat on the numbers lesson/tutor_params.json carries today, with the
+    closing line: what the tutor sends when the file is read."""
+    params = json.loads((REPO / "lesson" / "tutor_params.json").read_text(encoding="utf-8"))
+    success_ms = params["global"]["success_beat_ms"]
+    pause_ms = params["global"]["next_pause_ms"]
+    for key, value in (("success_beat_ms", success_ms), ("next_pause_ms", pause_ms)):
+        low, high = params["bounds"][key]
+        assert low <= value <= high, key
+    return dict(SUCCESS_BEAT, success_ms=success_ms, pause_ms=pause_ms,
+                total_ms=success_ms + pause_ms, next_line="Next one.")
+
+
+def spoken_at(tab, text: str) -> list[int]:
+    """The moments one line went out, from the fake engine's record."""
+    return [u["at"] for u in tab.evaluate("window.__spoken") if u["text"] == text]
+
+
+def test_the_beat_breathes_before_next_one(page):
+    """Seen live: the success line and "Next one." with no air between them. The order
+    is the success line, success_beat_ms of silence, "Next one.", next_pause_ms of
+    silence, then the new exercise line. Both silences are counted from the end of the
+    line before them, so a long success line never eats its own pause. The next
+    exercise lands from the server total_ms after the answer, before the closing line
+    is due: its line waits. "Next one." is said exactly once per correct answer."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_lesson(tab, url)
+    node = running_lesson(tab)
+    # the lines the node opened on go out first, so the record starts at the answer
+    tab.wait_for_function("() => !Tenfold.queue.line && Tenfold.queue.waiting.length === 0",
+                          timeout=10000)
+    tab.evaluate("() => { window.__spoken = []; }")
+    beat = beat_from_the_policy_file()
+    success_ms, pause_ms = beat["success_ms"], beat["pause_ms"]
+
+    feed(tab, node, state="correct_pose")
+    feed(tab, node, state="answer_correct", answer=42, first_try=True,
+         tutor_line=beat["line"], tutor_beat=beat)
+    tab.wait_for_function("window.__spoken.length >= 2", timeout=5000)
+    # The server holds the next exercise for total_ms from the answer; a real voice takes
+    # longer than that to say the success line and its silence, so the exercise lands
+    # before the closing line is due. The fake engine ends a line at once, so the same
+    # arrival is fed early here: the exercise line has to wait its turn either way.
+    tab.wait_for_timeout(300)
+    assert said(tab).count("Next one.") == 0, "Next one. came inside the beat"
+    feed(tab, node, state="exercise_shown", exercise="7 x 8", tutor_line="Here we go.")
+    assert said(tab).count("Next one.") == 0 and "Here we go." not in said(tab), said(tab)
+    tab.wait_for_function("window.__spoken.some((u) => u.text === 'Here we go.')", timeout=15000)
+    lines = said(tab)
+    assert lines == ["Yes.", "Six times seven is forty two.", "Next one.", "Here we go."], lines
+
+    # the fake engine ends every utterance on the next tick, so the moment the last
+    # sentence of the success line went out is, within a tick, the moment it ended
+    record = tab.evaluate("window.__spoken")
+    success_end = record[1]["at"]
+    next_one_at = record[2]["at"]
+    exercise_at = record[3]["at"]
+    gap_success_to_next = next_one_at - success_end
+    gap_next_to_exercise = exercise_at - next_one_at
+    print(f"\nbeat gaps: success line to Next one. {gap_success_to_next} ms "
+          f"(>= {success_ms}), Next one. to exercise line {gap_next_to_exercise} ms (>= {pause_ms})")
+    assert gap_success_to_next >= success_ms, gap_success_to_next
+    assert gap_next_to_exercise >= pause_ms, gap_next_to_exercise
+    # once, and once only, however long the page is looked at afterwards
+    tab.wait_for_timeout(success_ms + pause_ms)
+    assert said(tab).count("Next one.") == 1, said(tab)
+
+    # The other arrival: an exercise that lands after the closing line and its pause
+    # plays when it arrives, and "Next one." was still said once, on its own clock,
+    # with the exercise nowhere in sight.
+    tab.evaluate("() => { window.__spoken = []; }")
+    feed(tab, node, state="correct_pose")
+    feed(tab, node, state="answer_correct", answer=56, first_try=True,
+         tutor_line="Yes. Seven times eight is fifty six.", tutor_beat=beat)
+    tab.wait_for_function("window.__spoken.some((u) => u.text === 'Next one.')", timeout=15000)
+    late = spoken_at(tab, "Next one.")
+    assert len(late) == 1 and late[0] - spoken_at(tab, "Seven times eight is fifty six.")[0] >= success_ms
+    tab.wait_for_timeout(pause_ms + 200)
+    tab.evaluate("() => { window.__t0 = Date.now(); }")
+    feed(tab, node, state="exercise_shown", exercise="6 x 8", tutor_line="One more.")
+    tab.wait_for_function("window.__spoken.some((u) => u.text === 'One more.')", timeout=5000)
+    waited = spoken_at(tab, "One more.")[0] - tab.evaluate("window.__t0")
+    assert waited < 600, f"an exercise arriving after its moment still waited {waited} ms"
+    assert said(tab).count("Next one.") == 1, said(tab)
 
 
 def test_a_lesson_line_never_plays_over_the_finish_card(page):
