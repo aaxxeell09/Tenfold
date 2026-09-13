@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-13T17:54:34+00:00",
-  "best_version": "6b2664d2ecdf1e493ee63a8417af6efb0c3cb6f4",
+  "generated_at": "2026-09-13T17:57:31+00:00",
+  "best_version": "46ade8a291471589f29474cbec9e16d985a3febe",
   "informed": [
     {
       "tag": "v0",
@@ -100,7 +100,13 @@
         },
         "scorers_sha256": null
       },
-      "heldout": null
+      "heldout": null,
+      "hidden_gate": null,
+      "rules_sha256": "5f1709769f71e1fe466f7c294112948e5638e2b704343b77ff0f249def332e41",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "eval/scorers.py at the version commit"
+      }
     },
     {
       "tag": "v1",
@@ -201,6 +207,12 @@
         "scorers_sha256": null
       },
       "heldout": null,
+      "hidden_gate": null,
+      "rules_sha256": "6ec34b9f7eab9d23867de199d067501110cdc7f650290c464c1dfa731d1fb1ca",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "eval/scorers.py at the version commit"
+      },
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex 8da771e..dce690c 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -5,13 +5,16 @@ classifier.schema, classifier.features. No file, network or introspection access\n \n Hypothesis log (one line per accepted patch, newest last):\n - v0: nearest fingertip pair on the newest frame with both hands; contact if closer than one threshold.\n+- v1: measured (not the diagnosis's pair-selection guess) that near_contact holds were the biggest failure:\n+  the correct pair is found but sits just under 0.35, so contact flips true when the label expects false.\n+  Lowered CONTACT_THRESHOLD to 0.2975 (best passing value from --sweep-all), near_contact_accuracy 0.41 -> 0.73.\n \"\"\"\n from __future__ import annotations\n \n from classifier import features\n from classifier.schema import GestureState, Window\n \n-CONTACT_THRESHOLD = 0.35  # fingertip distance, in units of mean hand scale\n+CONTACT_THRESHOLD = 0.2975  # fingertip distance, in units of mean hand scale\n UNKNOWN_THRESHOLD = 0.5  # below this detection confidence we refuse to answer\n \n \n"
     },
     {
@@ -302,6 +314,12 @@
         "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
       },
       "heldout": null,
+      "hidden_gate": null,
+      "rules_sha256": "6ec34b9f7eab9d23867de199d067501110cdc7f650290c464c1dfa731d1fb1ca",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "recorded with the metrics"
+      },
       "diff": ""
     },
     {
@@ -403,6 +421,12 @@
         "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
       },
       "heldout": null,
+      "hidden_gate": null,
+      "rules_sha256": "798785dbf211145ef301578b9c5469a783e009b54e789a89b980a1f4d1546656",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "recorded with the metrics"
+      },
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex dce690c..b799053 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -8,6 +8,12 @@ Hypothesis log (one line per accepted patch, newest last):\n - v1: measured (not the diagnosis's pair-selection guess) that near_contact holds were the biggest failure:\n   the correct pair is found but sits just under 0.35, so contact flips true when the label expects false.\n   Lowered CONTACT_THRESHOLD to 0.2975 (best passing value from --sweep-all), near_contact_accuracy 0.41 -> 0.73.\n+- v2: measured that the diagnosed 6x7/6x8 pair-selection failure (nearest-pair picks index-index over\n+  thumb-index) is real but not reachable by any single constant or a recent-frame vote/average without\n+  regressing a small class (e.g. 8x10, near:6x10 each lose their one hold). Instead found low-confidence\n+  frames (~0.50-0.52, e.g. s000500, s000513, s000560, s000561) slip past UNKNOWN_THRESHOLD and produce a\n+  spurious pair on negative/transition samples. Raised UNKNOWN_THRESHOLD to 0.525 (best passing value from\n+  --sweep-all), exact_match 0.492 -> 0.497, false_unknown_rate unchanged at 0.047.\n \"\"\"\n from __future__ import annotations\n \n@@ -15,7 +21,7 @@ from classifier import features\n from classifier.schema import GestureState, Window\n \n CONTACT_THRESHOLD = 0.2975  # fingertip distance, in units of mean hand scale\n-UNKNOWN_THRESHOLD = 0.5  # below this detection confidence we refuse to answer\n+UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer\n \n \n def classify(window: Window) -> GestureState:\n"
     },
     {
@@ -504,6 +528,23 @@
         "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
       },
       "heldout": null,
+      "hidden_gate": {
+        "validation": {
+          "exact_match": 0.46060606060606063,
+          "n_holds": 55,
+          "n_samples": 125
+        },
+        "live": {
+          "exact_match": 1.0,
+          "n_holds": 20,
+          "n_samples": 154
+        }
+      },
+      "rules_sha256": "b6ae2cb80816233d4723d51504c700ed4d52036c7ae7827164931317f5a89a44",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "recorded with the metrics"
+      },
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex b799053..c3fbacd 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -14,13 +14,20 @@ Hypothesis log (one line per accepted patch, newest last):\n   frames (~0.50-0.52, e.g. s000500, s000513, s000560, s000561) slip past UNKNOWN_THRESHOLD and produce a\n   spurious pair on negative/transition samples. Raised UNKNOWN_THRESHOLD to 0.525 (best passing value from\n   --sweep-all), exact_match 0.492 -> 0.497, false_unknown_rate unchanged at 0.047.\n+- v3: re-measured the diagnosed 6x6/6x7/6x8 pair-selection failure directly (--class 6x7): it is real\n+  (index-index beats thumb-index in 3 of 4 failing samples) but --sweep-all confirms again no single\n+  constant reaches it, and v2 already found frame-voting regresses small classes. Sweep-all's best\n+  passing change is instead a near-contact boundary miscalibration one step down from v1's value:\n+  CONTACT_THRESHOLD 0.2975 -> 0.2826 fixes near-contact samples (e.g. class 9x6) sitting just above the\n+  old threshold, near_contact_accuracy 0.736 -> 0.778, exact_match 0.497 -> 0.500, false_unknown_rate\n+  unchanged at 0.047, no class regressed.\n \"\"\"\n from __future__ import annotations\n \n from classifier import features\n from classifier.schema import GestureState, Window\n \n-CONTACT_THRESHOLD = 0.2975  # fingertip distance, in units of mean hand scale\n+CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale\n UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer\n \n \n"
     },
     {
@@ -605,6 +646,23 @@
         "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
       },
       "heldout": null,
+      "hidden_gate": {
+        "validation": {
+          "exact_match": 0.46060606060606063,
+          "n_holds": 55,
+          "n_samples": 125
+        },
+        "live": {
+          "exact_match": 1.0,
+          "n_holds": 20,
+          "n_samples": 154
+        }
+      },
+      "rules_sha256": "60d9a6c49072348ebf91341dd59580775ffff7d4aa7b122a548b91045af34186",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "recorded with the metrics"
+      },
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex c3fbacd..77bd689 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -21,14 +21,50 @@ Hypothesis log (one line per accepted patch, newest last):\n   CONTACT_THRESHOLD 0.2975 -> 0.2826 fixes near-contact samples (e.g. class 9x6) sitting just above the\n   old threshold, near_contact_accuracy 0.736 -> 0.778, exact_match 0.497 -> 0.500, false_unknown_rate\n   unchanged at 0.047, no class regressed.\n+- v4: diagnosis's \"no frame with both hands present\" claim for 6x6/6x8/6x9 (s000001, s000002, s000010,\n+  s000011, s000012) does not hold: both_present_frames on those windows is empty regardless of the finite\n+  check, i.e. no rule can recover them (tracker hand loss). Measured instead that the biggest reachable\n+  failure is last-frame pair noise (e.g. s000421, s000426: 3-4 of 5 frames agree on one pair, the last\n+  frame flips to a neighbour by a hair). A flat vote/average over the window was already tried (v2) and\n+  regresses a small class every time (this run: near:10x8 or 8x10 depending on window size), because early\n+  frames of a settling hand outvote a decisive last frame. Instead only fall back to the window average\n+  when the last frame's own top two pairs are within AMBIGUITY_MARGIN=0.025 of each other (a coin flip);\n+  otherwise keep trusting the last frame as before. exact_match 0.500 -> 0.505, false_unknown_rate\n+  unchanged at 0.047, no class regressed beyond the gate's limit.\n \"\"\"\n from __future__ import annotations\n \n+import numpy as np\n+\n from classifier import features\n-from classifier.schema import GestureState, Window\n+from classifier.schema import FINGER_NUMBERS, GestureState, Window\n \n CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale\n UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer\n+AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the last frame's own top pair is a coin flip\n+\n+\n+def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:\n+    \"\"\"Nearest pair, falling back to the window average only when the last frame's own choice is ambiguous.\n+\n+    The last frame alone is what classify() has always used, and it is right the great majority of the\n+    time: trusting it by default avoids the regressions seen when every frame is blended (a hand still\n+    settling into position early in the window then outvotes a decisive final frame). But when the last\n+    frame's closest pair and the next-closest pair are almost tied, a single noisy frame can flip the\n+    argmin to the wrong finger. In that narrow case only, average the distance matrix over all finite\n+    both-present frames and let the steadier consensus break the tie.\n+    \"\"\"\n+    d = features.tip_distance_matrix(*last)\n+    flat = np.sort(d.reshape(-1))\n+    if flat[1] - flat[0] >= AMBIGUITY_MARGIN:\n+        return features.nearest_pair(*last)\n+    mats = [m for m in (features.tip_distance_matrix(l, r) for l, r in features.both_present_frames(window))\n+            if np.isfinite(m).all()]\n+    if len(mats) < 2:\n+        return features.nearest_pair(*last)\n+    mean_d = np.mean(mats, axis=0)\n+    i, j = np.unravel_index(int(np.argmin(mean_d)), mean_d.shape)\n+    return FINGER_NUMBERS[i], FINGER_NUMBERS[j], float(d[i, j])\n \n \n def classify(window: Window) -> GestureState:\n@@ -39,7 +75,7 @@ def classify(window: Window) -> GestureState:\n     confidence = min(float(left.detection_conf), float(right.detection_conf))\n     if confidence < UNKNOWN_THRESHOLD:\n         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n-    lf, rf, dist = features.nearest_pair(left, right)\n+    lf, rf, dist = averaged_pair(window, frame)\n     return GestureState(\n         method=\"6-10\",\n         left=lf,\n"
     },
     {
@@ -706,12 +764,29 @@
         "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
       },
       "heldout": null,
+      "hidden_gate": {
+        "validation": {
+          "exact_match": 0.4787878787878788,
+          "n_holds": 55,
+          "n_samples": 125
+        },
+        "live": {
+          "exact_match": 1.0,
+          "n_holds": 20,
+          "n_samples": 154
+        }
+      },
+      "rules_sha256": "ec9ebc0d0563c7456ecb061f89dcfa7e9bd5775fac1c5196f73a1307d46bd51e",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "recorded with the metrics"
+      },
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex 77bd689..2781ab9 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -42,6 +42,32 @@ from classifier.schema import FINGER_NUMBERS, GestureState, Window\n CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale\n UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer\n AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the last frame's own top pair is a coin flip\n+MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units, above which hands are still moving\n+\n+\n+def wrist_motion(window: Window) -> float:\n+    \"\"\"Mean per-step wrist displacement of both hands, in mean-scale units, over both-present frames.\n+\n+    A held gesture keeps the wrist still while the fingertips make contact; a transition is the wrist\n+    still travelling between two holds. Averaged over the whole window (not just the last step) so one\n+    noisy frame pair cannot hide steady travel.\n+    \"\"\"\n+    frames = features.both_present_frames(window)\n+    if len(frames) < 2:\n+        return 0.0\n+    total = 0.0\n+    steps = 0\n+    for (l0, r0), (l1, r1) in zip(frames, frames[1:]):\n+        s = features.mean_scale(l0, r0)\n+        if not s > 0:\n+            continue\n+        lw0, lw1 = np.asarray(l0.wrist_xy, dtype=float), np.asarray(l1.wrist_xy, dtype=float)\n+        rw0, rw1 = np.asarray(r0.wrist_xy, dtype=float), np.asarray(r1.wrist_xy, dtype=float)\n+        step = (float(np.linalg.norm(lw1 - lw0)) + float(np.linalg.norm(rw1 - rw0))) / (2.0 * s)\n+        if np.isfinite(step):\n+            total += step\n+            steps += 1\n+    return total / steps if steps else 0.0\n \n \n def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:\n@@ -75,6 +101,8 @@ def classify(window: Window) -> GestureState:\n     confidence = min(float(left.detection_conf), float(right.detection_conf))\n     if confidence < UNKNOWN_THRESHOLD:\n         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n+    if wrist_motion(window) > MOTION_THRESHOLD:\n+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n     lf, rf, dist = averaged_pair(window, frame)\n     return GestureState(\n         method=\"6-10\",\n"
     },
     {
       "tag": "v6",
       "version": 6,
-      "sha": "6b2664d2ecdf1e493ee63a8417af6efb0c3cb6f4",
+      "sha": "46ade8a291471589f29474cbec9e16d985a3febe",
       "ts": "2026-09-13T17:54:32+00:00",
       "kind": "patch",
       "data": {
@@ -807,6 +882,23 @@
         "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
       },
       "heldout": null,
+      "hidden_gate": {
+        "validation": {
+          "exact_match": 0.4787878787878788,
+          "n_holds": 55,
+          "n_samples": 125
+        },
+        "live": {
+          "exact_match": 1.0,
+          "n_holds": 20,
+          "n_samples": 154
+        }
+      },
+      "rules_sha256": "81db82a68799d9e426443b4f5819c876f3eda0c2e5f05aa5457fce099d2cb46b",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "recorded with the metrics"
+      },
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex 2781ab9..daf54b0 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -31,6 +31,12 @@ Hypothesis log (one line per accepted patch, newest last):\n   when the last frame's own top two pairs are within AMBIGUITY_MARGIN=0.025 of each other (a coin flip);\n   otherwise keep trusting the last frame as before. exact_match 0.500 -> 0.505, false_unknown_rate\n   unchanged at 0.047, no class regressed beyond the gate's limit.\n+- v5: measured (not the diagnosis's wrist-motion guess) that wrist_motion already sits under MOTION_THRESHOLD\n+  for failing transition samples (e.g. s000004, s000005): the wrist is still while fingers keep reconfiguring,\n+  which wrist-only motion cannot see. Added tip_motion (mean per-frame fingertip displacement) gated to fire\n+  only above TIP_MOTION_CONF_GATE=0.75, since low-confidence tracking jitter (e.g. class 8x9, conf ~0.56-0.74)\n+  looks like motion but is noise, not travel. TIP_MOTION_THRESHOLD=0.2 (best passing value from --sweep):\n+  exact_match 0.510 -> 0.516, false_unknown_rate unchanged at 0.047, no class regressed.\n \"\"\"\n from __future__ import annotations\n \n@@ -43,6 +49,8 @@ CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale\n UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer\n AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the last frame's own top pair is a coin flip\n MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units, above which hands are still moving\n+TIP_MOTION_THRESHOLD = 0.2  # mean per-frame fingertip displacement, in mean-scale units, above which fingers are still moving into shape\n+TIP_MOTION_CONF_GATE = 0.75  # only trust tip_motion above this confidence: low-confidence tracking jitter looks like motion but isn't\n \n \n def wrist_motion(window: Window) -> float:\n@@ -70,6 +78,37 @@ def wrist_motion(window: Window) -> float:\n     return total / steps if steps else 0.0\n \n \n+def tip_motion(window: Window) -> float:\n+    \"\"\"Mean per-step fingertip displacement of both hands, in mean-scale units, over both-present frames.\n+\n+    A held gesture keeps the fingers still once contact is made; a hand still curling or reaching into\n+    shape moves its tips even while the wrist itself is nearly stationary (e.g. rotating at the elbow),\n+    which wrist_motion alone cannot see.\n+    \"\"\"\n+    frames = features.both_present_frames(window)\n+    if len(frames) < 2:\n+        return 0.0\n+    total = 0.0\n+    steps = 0\n+    for (l0, r0), (l1, r1) in zip(frames, frames[1:]):\n+        s = features.mean_scale(l0, r0)\n+        if not s > 0:\n+            continue\n+        try:\n+            lp0, rp0 = features.image_points(l0), features.image_points(r0)\n+            lp1, rp1 = features.image_points(l1), features.image_points(r1)\n+        except (ValueError, TypeError):\n+            continue\n+        tips = [features.TIP_INDEX[f] for f in FINGER_NUMBERS]\n+        l_step = float(np.mean(np.linalg.norm(lp1[tips] - lp0[tips], axis=1)))\n+        r_step = float(np.mean(np.linalg.norm(rp1[tips] - rp0[tips], axis=1)))\n+        step = (l_step + r_step) / (2.0 * s)\n+        if np.isfinite(step):\n+            total += step\n+            steps += 1\n+    return total / steps if steps else 0.0\n+\n+\n def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:\n     \"\"\"Nearest pair, falling back to the window average only when the last frame's own choice is ambiguous.\n \n@@ -103,6 +142,8 @@ def classify(window: Window) -> GestureState:\n         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n     if wrist_motion(window) > MOTION_THRESHOLD:\n         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n+    if confidence > TIP_MOTION_CONF_GATE and tip_motion(window) > TIP_MOTION_THRESHOLD:\n+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n     lf, rf, dist = averaged_pair(window, frame)\n     return GestureState(\n         method=\"6-10\",\n"
     }
   ],
@@ -841,7 +933,7 @@
   ],
   "critic_commits": [
     {
-      "sha": "6b2664d2ecdf1e493ee63a8417af6efb0c3cb6f4",
+      "sha": "46ade8a291471589f29474cbec9e16d985a3febe",
       "date": "2026-09-13T10:54:22-07:00",
       "subject": "critic v6: The failure family that costs the most failed holds is transition, with 86 failed holds, followed by out_of_frame with 4 | patch: Added a tip_motion check (mean per-frame fingertip displacement) that rejects to unknown above TIP_MOTION_THRESHOLD=0.2, | expected: Transition samples with active finger reconfiguration should now correctly resolve to unknown while high-motion-noise cl"
     },
@@ -1036,6 +1128,7 @@
     "compare": {
       "a": {
         "commit": "fdea731d41569a96a36eb175e1abc3b3a8675fd5",
+        "rules_sha256": "5f1709769f71e1fe466f7c294112948e5638e2b704343b77ff0f249def332e41",
         "constants": {
           "CONTACT_THRESHOLD": 0.35,
           "UNKNOWN_THRESHOLD": 0.5
@@ -1048,7 +1141,8 @@
         "near_contact_accuracy": 0.40277777777777773
       },
       "b": {
-        "commit": "6b2664d2ecdf1e493ee63a8417af6efb0c3cb6f4",
+        "commit": "46ade8a291471589f29474cbec9e16d985a3febe",
+        "rules_sha256": "81db82a68799d9e426443b4f5819c876f3eda0c2e5f05aa5457fce099d2cb46b",
         "constants": {
           "CONTACT_THRESHOLD": 0.2826,
           "UNKNOWN_THRESHOLD": 0.525,
@@ -1064,6 +1158,8 @@
         "negative_rejection_accuracy": 0.3848920863309353,
         "near_contact_accuracy": 0.7777777777777777
       },
+      "data_sha": "448d3292a217",
+      "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
       "windows": 483,
       "holds": 220,
       "near_windows": 72,
@@ -8004,6 +8100,13 @@
             "contact": false
           },
           {
+            "threshold": 0.2826,
+            "method": "6-10",
+            "left": 6,
+            "right": 10,
+            "contact": false
+          },
+          {
             "threshold": 0.2875,
             "method": "6-10",
             "left": 6,
@@ -8475,6 +8578,13 @@
           },
           {
             "threshold": 0.275,
+            "method": "6-10",
+            "left": 6,
+            "right": 6,
+            "contact": false
+          },
+          {
+            "threshold": 0.2826,
             "method": "6-10",
             "left": 6,
             "right": 6,
@@ -8958,6 +9068,13 @@
             "contact": false
           },
           {
+            "threshold": 0.2826,
+            "method": "6-10",
+            "left": 10,
+            "right": 8,
+            "contact": false
+          },
+          {
             "threshold": 0.2875,
             "method": "6-10",
             "left": 10,
@@ -9429,6 +9546,13 @@
           },
           {
             "threshold": 0.275,
+            "method": "6-10",
+            "left": 9,
+            "right": 10,
+            "contact": false
+          },
+          {
+            "threshold": 0.2826,
             "method": "6-10",
             "left": 9,
             "right": 10,
@@ -9912,6 +10036,13 @@
             "contact": true
           },
           {
+            "threshold": 0.2826,
+            "method": "6-10",
+            "left": 6,
+            "right": 6,
+            "contact": true
+          },
+          {
             "threshold": 0.2875,
             "method": "6-10",
             "left": 6,
@@ -10389,6 +10520,13 @@
             "contact": true
           },
           {
+            "threshold": 0.2826,
+            "method": "6-10",
+            "left": 7,
+            "right": 8,
+            "contact": true
+          },
+          {
             "threshold": 0.2875,
             "method": "6-10",
             "left": 7,
@@ -10860,6 +10998,13 @@
           },
           {
             "threshold": 0.275,
+            "method": "6-10",
+            "left": 10,
+            "right": 10,
+            "contact": true
+          },
+          {
+            "threshold": 0.2826,
             "method": "6-10",
             "left": 10,
             "right": 10,
