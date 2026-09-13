@@ -847,6 +847,11 @@ class Lesson:
             node=(self.node or {}).get("id"), demo=self.demo_available,
             pose_slip=self.scored_gesture_error, hint_auto=self.hint_auto,
             tutor=self.decided())
+        if self.gate:
+            # The gate's words are the page's, from the same line file. The
+            # lesson phrasing of the engine state, "count the fingers at the
+            # bottom", is about an exercise the gate is not running.
+            message["tally"] = ""
         if self.fault:
             message["tally"] = self.fault
         self.hub.publish(message)

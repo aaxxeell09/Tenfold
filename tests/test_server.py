@@ -1982,6 +1982,7 @@ def test_the_gate_node_draws_nothing_scores_nothing_and_writes_nothing():
         lesson.observe(correct, _hands(), 2, step / 15)
     assert lesson.engine.latched, "the gate's pose step reads the pose"
     assert lesson.hub.message["state"] == "correct_pose"
+    assert lesson.hub.message["tally"] == "", "the gate speaks the page's lines, not a lesson's"
     lesson.command({"type": "check", "value": 36})
     assert lesson.scheduler.outcomes == [] and lesson.live.confirmed == 0
     lesson.command({"type": "quit"})
