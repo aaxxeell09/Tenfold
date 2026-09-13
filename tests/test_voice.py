@@ -2434,14 +2434,8 @@ def test_every_bubble_shown_is_spoken(page):
     tab.goto(url + "#home", wait_until="domcontentloaded")
     tab.wait_for_function("!!window.Tenfold")
 
-    # the ready gate, its steps driven by the camera
-    tab.click("a.door[href='#check']")
-    tab.wait_for_selector("#check-mic", state="visible", timeout=30000)
-    tab.wait_for_timeout(300)
-    assert silent(tab) == []
-
-    # the practice card, once the gate is through
-    hear(tab, "yes")
+    # Practice opens the path with no gate: the one gate runs at the level
+    tab.click("a.door[href='#practice']")
     tab.wait_for_selector('[data-action="start"]', timeout=15000)
     tab.wait_for_timeout(300)
     assert silent(tab) == []
