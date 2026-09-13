@@ -3,11 +3,12 @@
     python loop/train_eval.py                                          # metrics, 6 worst classes, up to 8 failing samples
     python loop/train_eval.py --class 7x8                              # failures of one class only (names as in per_class)
     python loop/train_eval.py --set CONTACT_THRESHOLD=0.3              # same report with a module constant overridden
-    python loop/train_eval.py --sweep CONTACT_THRESHOLD=0.2,0.25,0.3   # one metrics line per value, in one call
+    python loop/train_eval.py --sweep CONTACT_THRESHOLD=0.2,0.25,0.3   # one metrics line and gate verdict per value
 
 --set and --sweep change the loaded module only, never the file, and only reach constants that classify() reads
-at call time. The patch agent uses this to test a hypothesis before and after editing rules.py. The blind arm
-does not have it.
+at call time. A sweep line ends with what the metric gate (loop/gate.py) would say about that value against the
+file as it stands. The patch agent uses this to test a hypothesis before and after editing rules.py. The blind
+arm does not have it.
 """
 from __future__ import annotations
 
@@ -25,6 +26,7 @@ from classifier import features  # noqa: E402
 from classifier.schema import GestureState, window_from_json  # noqa: E402
 from eval import scorers  # noqa: E402
 from eval.slices import per_slice  # noqa: E402
+from loop import gate  # noqa: E402
 
 CONSTANT = re.compile(r"[A-Z][A-Z0-9_]*")
 
@@ -88,7 +90,9 @@ def evaluate(classify, samples: list[dict]) -> tuple[dict, list[dict]]:
             out, err = None, f"{type(e).__name__}: {e}"
         rows.append({"id": s["id"], "hold_id": s.get("hold_id", s["id"]), "kind": s.get("kind", "positive"),
                      "target": s["label"], "output": out, "error": err, "sample": s})
-    return scorers.aggregate(rows, bootstrap=0), rows
+    m = scorers.aggregate(rows, bootstrap=0)
+    m["per_slice"] = per_slice(samples, rows)
+    return m, rows
 
 
 def worst(m: dict, n: int = 6) -> str:
@@ -113,33 +117,39 @@ def main() -> int:
         print("no data/train.jsonl in this worktree: reason from the code instead")
         return 1
     mod = load_rules(ROOT / "classifier" / "rules.py")
-    for text in a.sets:
-        name, values = parse_assignment(text, mod)
-        if len(values) != 1:
-            sys.exit(f"train_eval: --set takes one value, got {text!r}; use --sweep for several")
-        setattr(mod, name, values[0])
     samples = [json.loads(l) for l in data.read_text().splitlines() if l.strip()]
 
     if a.sweep:
         name, values = parse_assignment(a.sweep, mod)
         file_value = getattr(mod, name)
+        base, _ = evaluate(mod.classify, samples)  # the file as it stands, before any --set
+        for text in a.sets:
+            n, vals = parse_assignment(text, mod)
+            setattr(mod, n, vals[0])
         overrides = f" with {', '.join(a.sets)}" if a.sets else ""
-        print(f"train: {len(samples)} samples; sweeping {name} (currently {file_value}){overrides}")
+        print(f"train: {len(samples)} samples; sweeping {name} (file value {file_value}){overrides}; "
+              f"gate = the metric gate's verdict against the file value (exact_match {fmt(base['exact_match'])})")
         for v in values:
             setattr(mod, name, v)
             m, _ = evaluate(mod.classify, samples)
-            print(f"  {name}={v}  " + "  ".join(f"{k}={fmt(m.get(k))}" for k in scorers.METRICS) + f"  worst: {worst(m, 3)}")
+            ok, why = gate.check(base, m)
+            print(f"  {name}={v}  " + "  ".join(f"{k}={fmt(m.get(k))}" for k in scorers.METRICS)
+                  + f"  worst: {worst(m, 3)}  gate: {'PASS' if ok else 'FAIL ' + why}")
         return 0
 
+    for text in a.sets:
+        name, values = parse_assignment(text, mod)
+        if len(values) != 1:
+            sys.exit(f"train_eval: --set takes one value, got {text!r}; use --sweep for several")
+        setattr(mod, name, values[0])
     m, rows = evaluate(mod.classify, samples)
     print(f"train: {m['n_samples']} samples, {m['n_holds']} holds" + (f" (overrides: {', '.join(a.sets)})" if a.sets else ""))
     for k in scorers.METRICS:
         print(f"  {k:28s} {fmt(m.get(k))}")
     print("  worst classes: " + worst(m))
-    slices = per_slice(samples, rows)
-    if slices:
-        print("  by condition: " + ", ".join(f"{k}={fmt(v['exact_match'])} (n={v['n_samples']})" for k, v in slices.items()))
-    failed =[r for r in rows if not scorers.exact_match(r["output"], r["target"])]
+    if m["per_slice"]:
+        print("  by condition: " + ", ".join(f"{k}={fmt(v['exact_match'])} (n={v['n_samples']})" for k, v in m["per_slice"].items()))
+    failed = [r for r in rows if not scorers.exact_match(r["output"], r["target"])]
     if a.cls:
         failed = [r for r in failed if scorers.class_of(r["target"], r["kind"]) == a.cls]
     print(f"\nfailing samples: {len(failed)} (showing {min(len(failed), a.limit)})")

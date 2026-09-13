@@ -5,9 +5,11 @@ The diagnostic agent found:
 
 Your job: one hypothesis, one coherent patch to classifier/rules.py, one justification, one expected effect.
 
-Success means: exact_match on the train evaluation goes up and false_unknown_rate does not rise (part of it is
-frames where the tracker lost a hand, which no rule can recover). The other scorers are diagnostic signals, not
-targets. Do not "improve" accuracy by refusing to answer: an unknown on a positive sample is a failure. Treat
+Success means passing the metric gate on the train evaluation, against the file as you found it: exact_match
+strictly goes up, no class and no capture condition (camera angle, distance) loses more than 5 points, and
+false_unknown_rate rises by at most 2 points (part of it is frames where the tracker lost a hand, which no rule
+can recover). A small class fails the gate by losing a single hold, so the best headline number is not always
+a passing patch. The other scorers are diagnostic signals, not targets. Do not "improve" accuracy by refusing to answer: an unknown on a positive sample is a failure. Treat
 confidence consistently: do not pick the most favourable frame's confidence to slip past the unknown threshold.
 
 The diagnosis was written without running anything: its HYPOTHESIS is a guess. Measure first. If measurement

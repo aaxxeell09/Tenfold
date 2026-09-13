@@ -418,6 +418,8 @@ def test_train_eval_sweep_scores_each_value_without_touching_rules(tmp_path):
     assert len(rows) == 2 and all("exact_match=" in r and "worst:" in r for r in rows)
     em = [float(r.split("exact_match=")[1].split()[0]) for r in rows]
     assert em[0] > em[1]  # hard synthetic data: 0.30 beats the V0 threshold
+    assert rows[0].endswith("gate: PASS") or "gate: FAIL class" in rows[0], rows[0]
+    assert "gate: FAIL no improvement" in rows[1]  # the file value cannot beat itself
     assert (repo / "classifier" / "rules.py").read_text() == before
 
 
