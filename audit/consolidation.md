@@ -1,12 +1,12 @@
 # Consolidation audit, after the morning passes
 
-Commit audited: **dd3ae9e**, which carries origin/main as of the last merge
+Commit audited: **fbbeceb**, which carries origin/main as of the last merge
 before this was written.
 
-main moved five times while this was being read (331c4ef, 554dc0d, e15ab97,
-c9e8224, dd3ae9e), so every finding was re-checked at dd3ae9e by grep before
-being kept. Four were fixed under me and are marked as closed rather than
-deleted, because what changed and why is half of what a consolidation audit is
+main moved six times while this was being read (331c4ef, 554dc0d, e15ab97,
+c9e8224, dd3ae9e, fbbeceb), so every finding was re-checked at fbbeceb by grep
+before being kept. Six were fixed under me, in whole or in half, and are marked as closed rather
+than deleted, because what changed and why is half of what a consolidation audit is
 for; two are new and exist only because of those fixes. Anything fixed and not
 interesting was simply dropped.
 
@@ -278,38 +278,47 @@ Found on c9e8224, after the gate landed. `web/course/app.js:675`:
 no `else`, so the message passes the ownership check and then falls out of the
 `if/elif` chain in silence. Not even a log line.
 
-This is the brief's "a message the page sends that the server ignores", and it
-is the direct cause of 2.4c.
+Still true at fbbeceb, where the page sends it from two places
+(`app.js:697` and `app.js:709`). It was the direct cause of the first half of
+2.4c, which has since been fixed another way, by closing the measurement in
+`_quit`. So `ready` is now a message the page sends, the server drops, and
+nothing depends on: the cheapest of all the findings here to resolve, in either
+direction.
 
-### 2.4c BUG. The camera check measures a threshold that is thrown away, twice over
+### 2.4c BUG. The camera check's threshold is still thrown away, once instead of twice
 
 `docs/tutor_contract.md` 2.3: "It is computed once per server run." It is not.
 
-**First**, `end_check()` is never called on the gate path. `app/server.py:1257`
-calls `self.tutor.check_started()` when the node kind is `check`, which turns on
-the jitter collection. The only call to `check_ended()` is at `app/server.py:965`,
-inside `_end_session`. `_end_session` fires when the node's outcome count reaches
-its target, and **the gate records no outcome at all now that it asks no
-question**. The child leaves it through `quit`, and `_quit` (line 1330) calls
-`self.tutor.close("quit", ...)` and never `check_ended()`.
+**The first half is fixed at fbbeceb.** When I found this, `end_check()` was
+unreachable on the gate path: the only caller was `_end_session`, which fires on
+a node's outcome count, and the gate records no outcome now that it asks no
+question, so the child left through `quit` and the measurement was never closed.
+`app/server.py:1368` now does it, with a docstring that says exactly why:
 
-So `_jitter_on` stays true for the rest of the run and `motion_threshold` is
-never set from what was measured. It stays at `MOTION_FLOOR`.
+```python
+        if self.gate and self.running:
+            self.tutor.check_ended()
+```
 
-**Second**, and this one would bite even if the first were fixed:
-`TutorLink.open` (`app/server.py:519-527`) calls `build_tutor` unconditionally,
-and `_start_node` calls `open` for **every node**. Each node therefore gets a
-brand new `Tutor`, whose `motion_threshold` starts at `MOTION_FLOOR` again. A
-threshold measured during the gate could not reach the lesson that follows it
-even if `end_check()` ran, because the object holding it is discarded when the
-lesson node starts.
+**The second half stands, and it is the one that decides whether the feature
+does anything.** `TutorLink.open` (`app/server.py:519-527`) calls `build_tutor`
+unconditionally, and `_start_node` calls `open` for **every node**. Each node
+gets a brand new `Tutor`, whose `motion_threshold` starts at `MOTION_FLOOR`
+again. `grep -n motion_threshold app/server.py` returns nothing at all: the
+server never reads the value, never carries it, and has nowhere to put it.
 
-The consequence is quiet and total: the whole camera check feature, measure the
-jitter of this camera in this room and scale "the child is moving" to it, has no
-effect on any lesson. Invariant 1 runs on the hard floor for every child in every
-room. Nothing fails, nothing logs, and `effective_params.motion_threshold` on
-every `intervention` line reads 0.3 forever, which is exactly the number Loop 2
-would use to conclude the threshold does not matter.
+So the threshold is now correctly measured and correctly fixed, on an object
+that is discarded when the child leaves the gate and the first lesson node
+begins. Every lesson still runs on the hard floor, invariant 1 is still scaled
+to no particular camera in no particular room, and
+`effective_params.motion_threshold` on every `intervention` line still reads 0.3,
+which is exactly the number Loop 2 would use to conclude the threshold does not
+matter.
+
+The fix is not in `app/tutor.py`: the tutor is right to own the number. It is
+that the number has to outlive the object, the way `learner_factors` already
+does through `read_factors` and the learner record.
+
 
 ### 2.5 BUG. Two ladders on one voice, now sharing a line file
 
@@ -838,10 +847,13 @@ Ordered by cost if nobody touches it.
 3. **The mock auto-skip under `--demo`** (2.4). One condition on one line, and
    without it `make demo` is not reproducible, which is the whole point of
    `demo/scenario.json`. Axel.
-4. **`ready` and `end_check`** (2.4b, 2.4c). The page sends a message the server
-   drops, and the camera check's threshold is both never fixed and thrown away
-   per node. Decide whether the measurement is meant to survive a node at all; if
-   it is, it cannot live on an object rebuilt per node. Axel and Ilan.
+4. **The camera check's threshold** (2.4c). Closing the measurement in `_quit`
+   landed while this was being written, so it is now measured and fixed
+   correctly, on a `Tutor` that `TutorLink.open` rebuilds for the next node.
+   Decide whether the measurement is meant to survive a node; if it is, it has
+   to outlive the object, the way `learner_factors` already does. Axel and Ilan.
+   And `ready` (2.4b) is now a message the page sends twice, the server drops,
+   and nothing depends on: delete it or handle it.
 5. **Which ladder speaks** (2.5). This is now the second most expensive one
    after the gate. The visual ladder pass decided Tally shows before he speaks
    and made L1 and L2 silent; the server's `hint_1..3` ladder speaks at 5 s and
