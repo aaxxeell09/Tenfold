@@ -213,9 +213,17 @@ FRAME_PARAMS = ("pose_confirm_frames",)
 # post_line_grace_ms is the quiet after any line Tally says, the floor under
 # min_verbal_gap. The two are measured from the same moment, the last line, so
 # the quiet is the longer of them and never the sum.
+# visibility_grace_ms is how long both hands, or the missing one, have to be
+# out of frame without a break before the tutor believes they are gone at all.
+# A tracker dropping a frame or two is the camera blinking, not a child
+# leaving: within the grace nothing is said, nothing is drawn and no visibility
+# situation is entered. It is the mirror of recovery_grace_ms: that one is the
+# hush after the hands come back, this one is the doubt before they are
+# declared missing. Camera latency, so it is read as written and only clamped.
 MS_PARAMS = ("pose_confirm_ms", "ack_delay_ms", "check_step_min_ms",
              "answer_first_number_ms", "pose_ready_delay_ms", "recovery_grace_ms",
-             "visibility_prompt_ms", "gate_step_pause_ms", "post_line_grace_ms")
+             "visibility_prompt_ms", "visibility_grace_ms", "gate_step_pause_ms",
+             "post_line_grace_ms")
 LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
 # The success beat, in milliseconds: how long the celebration itself runs, and
 # how long the silence after it lasts before the next exercise is announced.
@@ -761,6 +769,9 @@ class Tutor:
         self._hands_ok = False
         self._hands_misses = 0
         self._hands_since = 0.0
+        # Pedagogical clock reading of the first frame of the current run of
+        # frames with fewer than two hands, None while both hands are in frame.
+        self._missing_since: float | None = None
         self._contact_ok = True
         self._contact_frames = 0
         # Per hand, the finger the classifier last read on it and how many
@@ -1150,6 +1161,15 @@ class Tutor:
             # never inherits the clock of the thing they fixed.
             self._situation_now = situation
             self._situation_since = self._ped
+            if situation in VISIBILITY_PROBLEMS and self._missing_since is not None:
+                # The hands have been gone for the whole of visibility_grace_ms
+                # before the tutor admits it. The reminders' clocks read from
+                # the moment they went, not from the moment of the admission,
+                # so no_hands_visual, no_hands_voice, one_hand_voice and the
+                # opening call keep the meaning they had: the grace delays the
+                # verdict, never the reminder once the verdict is in. Never
+                # earlier than this exercise, whose hands were never lost.
+                self._situation_since = max(self._missing_since, self._ex_start_ped)
             if situation != SIT_WRONG:
                 self._correction_since = None
         self._update_recovery(moment, situation)
@@ -2155,6 +2175,13 @@ class Tutor:
     def _update_hands(self, hands_seen: int, moment: float) -> None:
         self._advance_ladder_clock()
         both = hands_seen >= 2
+        # The run of frames with a hand missing, on the pedagogical clock the
+        # visibility reminders are timed on. Any frame with both hands ends it:
+        # the grace is continuous, a flicker never adds up to an absence.
+        if both:
+            self._missing_since = None
+        elif self._missing_since is None:
+            self._missing_since = self._ped
         tolerance = self._tolerance(self._frames(self.effective("hands_visible_stable")))
         if both == self._hands_ok:
             self._hands_misses = 0
@@ -2329,11 +2356,26 @@ class Tutor:
     def _situation(self, obs: Observation) -> str:
         if self._held_key is not None:
             return self._condition(self._held_key)
+        if obs.hands_seen >= 2:
+            return SIT_UNKNOWN
+        if not self._hands_gone:
+            # A hand the tracker lost a moment ago is not a hand that left.
+            # Until visibility_grace_ms of unbroken absence the tutor reads the
+            # frame as two hands it cannot read a pose from: no reminder, no
+            # zones, no recovery state, and nothing for the hands coming back
+            # in the next frame to be welcomed back from.
+            return SIT_UNKNOWN
         if obs.hands_seen <= 0:
             return SIT_NO_HANDS
-        if obs.hands_seen == 1:
-            return SIT_ONE_HAND
-        return SIT_UNKNOWN
+        return SIT_ONE_HAND
+
+    @property
+    def _hands_gone(self) -> bool:
+        """Whether a hand has been missing for the whole of visibility_grace_ms."""
+        if self._missing_since is None:
+            return False
+        grace = self.effective("visibility_grace_ms") / MS_PER_S
+        return self._ped - self._missing_since >= grace
 
     # -- the log -------------------------------------------------------------
 

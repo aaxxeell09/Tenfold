@@ -9,6 +9,7 @@ the numbers cannot.
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
@@ -2214,3 +2215,165 @@ def test_the_praise_decision_is_logged_once_with_its_fields() -> None:
     assert int(event["frames_matched"]) >= frames
     assert event["praised"] is True
     assert event["line_key"] == "wrong_left"
+
+
+# --------------------------------------------------------------------------
+# 19. the grace before a visibility line
+# --------------------------------------------------------------------------
+#
+# A tracker that drops a frame or two is the camera blinking, not a child
+# leaving. Nothing about visibility is said, drawn or entered until a hand has
+# been missing for visibility_grace_ms without a single frame of both hands in
+# between. Once it has, the reminders come when they always did: their clocks
+# read from the frame the hands went, not from the end of the grace.
+
+VISIBILITY_GRACE_S = GLOBALS["visibility_grace_ms"] / 1000.0
+VISIBILITY_PROMPT_S = GLOBALS["visibility_prompt_ms"] / 1000.0
+# Feeding this many frames with a hand missing stays inside the grace: the
+# elapsed time is measured from the first of them, so it is one frame short.
+# One more frame and the grace has run out.
+GRACE_FRAMES = int(math.ceil(VISIBILITY_GRACE_S * FPS))
+VISIBILITY_LINES = load_lines(LINES_FILE)
+NO_HANDS_LINE = VISIBILITY_LINES["visibility_none"]
+ONE_HAND_LINE = VISIBILITY_LINES["visibility_one"]
+
+
+def watch_hands(harness: Harness, frames: int, hands: int,
+                ) -> tuple[list[str], set[str | None], set[str]]:
+    """Feed frames with this many hands and no pose; collect lines, visuals, states."""
+    said: list[str] = []
+    visuals: set[str | None] = set()
+    states: set[str] = set()
+    for _ in range(frames):
+        harness.clock.tick()
+        obs = Observation(gesture=None, fingers=fingers(0.0, hands), hands_seen=hands)
+        harness.last = harness.tutor.observe(obs, harness.clock.t)
+        if harness.last.tutor_line:
+            said.append(harness.last.tutor_line)
+        visual = harness.last.tutor_visual
+        visuals.add(visual["kind"] if visual else None)
+        states.add(harness.last.tutor_state)
+    return said, visuals, states
+
+
+def settled_harness() -> Harness:
+    """Both hands in frame for a second and no pose yet: the tutor knows they are there."""
+    harness = wrong_pose_harness()
+    harness.feed(1.0, gesture=UNKNOWN, hands=2)
+    assert harness.tutor._hands_ok is True
+    assert harness.last.tutor_state == WORKING
+    return harness
+
+
+def test_the_visibility_grace_key_is_known_with_its_bounds() -> None:
+    raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
+    params = load_params(PARAMS_FILE)
+    assert "visibility_grace_ms" in REQUIRED_PARAMS
+    assert raw["global"]["visibility_grace_ms"] == 1500
+    assert raw["bounds"]["visibility_grace_ms"] == [500, 3000]
+    assert params.values["visibility_grace_ms"] == 1500
+    assert params.bound("visibility_grace_ms") == (500.0, 3000.0)
+    for outside in (100, 9000):
+        with pytest.raises(ParamsError) as excinfo:
+            params_with(visibility_grace_ms=outside)
+        message = str(excinfo.value)
+        assert "visibility_grace_ms" in message
+        assert "500" in message and "3000" in message
+
+
+def test_the_visibility_grace_is_read_as_written_for_every_child() -> None:
+    """Camera latency, like recovery_grace_ms: no pace factor, no mode factor."""
+    harness = Harness(factors={"pace_factor": 9.0, "help_factor": 9.0,
+                               "tutor_observations": 500})
+    for mode in (SUPPORTIVE, NORMAL, INDEPENDENT):
+        harness.tutor._mode = mode
+        assert harness.tutor.effective("visibility_grace_ms") == 1500
+
+
+@pytest.mark.parametrize("hands", (0, 1))
+def test_one_lost_frame_says_nothing_and_changes_no_state(hands: int) -> None:
+    harness = settled_harness()
+    before = harness.tutor.state_fields()
+    situation = (harness.tutor._situation_now, harness.tutor._situation_since)
+    said, visuals, states = watch_hands(harness, 1, hands)
+    assert said == [] and visuals == {None} and states == {WORKING}
+    assert harness.tutor.state_fields() == before
+    assert (harness.tutor._situation_now, harness.tutor._situation_since) == situation
+    assert harness.tutor._hands_ok is True
+    said, visuals, states = watch_hands(harness, FPS, hands=2)
+    assert said == [] and visuals == {None} and states == {WORKING}
+    assert harness.kind("intervention") == []
+
+
+@pytest.mark.parametrize("hands", (0, 1))
+def test_hands_missing_for_less_than_the_grace_get_nothing(hands: int) -> None:
+    harness = settled_harness()
+    said, visuals, states = watch_hands(harness, GRACE_FRAMES, hands)
+    assert said == [] and visuals == {None} and states == {WORKING}
+    assert harness.tutor._situation_now not in ("no_hands", "one_hand")
+    said, visuals, states = watch_hands(harness, FPS, hands=2)
+    assert said == [] and visuals == {None} and states == {WORKING}
+    assert harness.kind("intervention") == []
+
+
+def test_no_hands_for_the_grace_get_the_zones_then_the_line_as_before() -> None:
+    harness = settled_harness()
+    said, _, _ = watch_hands(harness, GRACE_FRAMES + 1, hands=0)
+    assert said == []
+    # The grace has run out: the zones and the recovery state, at the
+    # no_hands_visual the file always had, because the clock reads from the
+    # frame the hands went.
+    assert harness.last.tutor_state == VISIBILITY_RECOVERY
+    assert harness.last.tutor_visual == {"kind": "placement_zones"}
+    voice_frames = int(math.ceil(GLOBALS["no_hands_voice"] * FPS)) + 2
+    said, _, _ = watch_hands(harness, voice_frames - (GRACE_FRAMES + 1), hands=0)
+    assert said == [NO_HANDS_LINE]
+
+
+def test_one_hand_for_the_grace_gets_the_line_as_before() -> None:
+    harness = settled_harness()
+    said, visuals, _ = watch_hands(harness, GRACE_FRAMES + 1, hands=1)
+    assert said == [] and visuals == {None}
+    voice_frames = int(math.ceil(GLOBALS["one_hand_voice"] * FPS)) + 2
+    said, _, _ = watch_hands(harness, voice_frames - (GRACE_FRAMES + 1), hands=1)
+    assert said == [ONE_HAND_LINE]
+    assert harness.last.tutor_state == VISIBILITY_RECOVERY
+
+
+def test_the_grace_is_continuous_so_a_flicker_never_adds_up() -> None:
+    """Twelve seconds of hands mostly gone, one good frame short of the grace each time."""
+    harness = settled_harness()
+    said: list[str] = []
+    visuals: set[str | None] = set()
+    states: set[str] = set()
+    for _ in range(8):
+        for hands, frames in ((0, GRACE_FRAMES), (2, 1)):
+            more, kinds, seen = watch_hands(harness, frames, hands)
+            said += more
+            visuals |= kinds
+            states |= seen
+    assert said == [] and visuals == {None}
+    assert VISIBILITY_RECOVERY not in states
+    assert harness.kind("intervention") == []
+
+
+def test_hands_already_missing_when_the_exercise_opens_start_its_clock_then() -> None:
+    """The grace ran out before the exercise: the opening still waits its own time."""
+    harness = Harness()
+    harness.feed(5.0, gesture=None, hands=0)
+    harness.tutor.new_exercise(8, 7, node="u2-l3", now=harness.clock.t)
+    said, visuals, _ = watch_hands(harness, FPS, hands=0)
+    assert said == [] and visuals == {None}
+    said, _, _ = watch_hands(harness, int(math.ceil(VISIBILITY_PROMPT_S * FPS)) - FPS + 2,
+                             hands=0)
+    assert said == [COME_HERE]
+
+
+def test_the_recovery_grace_is_untouched_by_the_visibility_grace() -> None:
+    """Entering is gated by one grace, leaving still opens the other."""
+    harness = settled_harness()
+    harness.feed(INITIAL_SILENCE, gesture=UNKNOWN, hands=2)
+    watch_hands(harness, GRACE_FRAMES + 1, hands=0)
+    assert harness.last.tutor_state == VISIBILITY_RECOVERY
+    harness.feed(1.0, gesture=UNKNOWN, hands=2)
+    assert harness.tutor.in_recovery is True
