@@ -308,21 +308,41 @@ def _outside(p: str, worktree: str) -> bool:
     return not (full == worktree or full.startswith(worktree + os.sep))
 
 
-def check_transcript(path: Path, worktree: Path) -> list[str]:
+def _own_tool_result(p: str, config_dir: str, session_id: str | None) -> bool:
+    """Whether p is a tool output this very session saved and reads back: Claude Code writes a large tool result to
+    <config dir>/projects/<project>/<session id>/tool-results/ and the agent opens it with Read. Only the session
+    the transcript belongs to: the same folder holds earlier sessions' transcripts and, with a shared config dir,
+    the other arm's. Symlinks and .. are resolved before the check."""
+    if not session_id:
+        return False
+    projects = os.path.realpath(os.path.join(config_dir, "projects"))
+    full = os.path.realpath(p.strip().rstrip(".,;:"))
+    if not full.startswith(projects + os.sep):
+        return False
+    parts = full[len(projects) + 1:].split(os.sep)
+    return len(parts) >= 4 and parts[1] == session_id and parts[2] == "tool-results"
+
+
+def check_transcript(path: Path, worktree: Path, config_dir: str | None = None) -> list[str]:
     """Audit a claude stream-json transcript.
     - Any tool input (executed or denied) that references the held-out data is rejected: that is intent.
-    - Executed tool calls whose path fields or command arguments leave the worktree are rejected.
+    - Executed tool calls whose path fields or command arguments leave the worktree are rejected, except a Read of
+      the session's own saved tool output (see _own_tool_result) under the agents' config dir, CLAUDE_CONFIG_DIR as
+      critic.py passes it, else ~/.claude. The held-out rule above still applies to those reads.
     Denied calls never ran and code inside Edit/Write payloads is not a path, so neither is flagged.
     Assistant prose and tool results are not audited."""
     if not path.exists():
         return []
     wt = os.path.realpath(worktree)
+    config_dir = config_dir or os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
     events = []
     for line in path.read_text().splitlines():
         try:
             events.append(json.loads(line))
         except json.JSONDecodeError:
             continue
+    session_id = next((ev.get("session_id") for ev in events
+                       if ev.get("type") == "system" and ev.get("subtype") == "init" and isinstance(ev.get("session_id"), str)), None)
     errored: dict[str, bool] = {}
     for ev in events:
         content = (ev.get("message") or {}).get("content") if ev.get("type") == "user" else None
@@ -349,6 +369,8 @@ def check_transcript(path: Path, worktree: Path) -> list[str]:
             if isinstance(inp.get("command"), str):
                 paths += _command_paths(inp["command"])
             for p in paths:
+                if block.get("name") == "Read" and _own_tool_result(p, config_dir, session_id):
+                    continue
                 if _outside(p, wt):
                     out.append(reject("path", f"{block.get('name')} used {p}", "paths outside the worktree are off limits",
                                       "use paths relative to the worktree only"))
