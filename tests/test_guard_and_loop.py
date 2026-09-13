@@ -176,6 +176,50 @@ def test_guard_transcript_audit(worktree, tmp_path):
     assert rc == 0
 
 
+def test_guard_lets_the_agent_read_back_only_its_own_saved_tool_output(worktree, tmp_path):
+    """Claude Code saves a large tool result under the agents' config dir and the patch agent Reads it back: that
+    cost a loop iteration as a path violation. Only this session's tool-results pass; every other read there stays
+    rejected, and the held-out rule still applies."""
+    r = worktree / "classifier" / "rules.py"
+    r.write_text(r.read_text().replace("0.35", "0.30"))
+    config = tmp_path / ".claude-critic"
+    sid, old_sid = "4deea878-7f64-4a12-a7b0-3e7a11bc2a85", "11111111-2222-3333-4444-555555555555"
+    project = config / "projects" / "-Users-someone-tenfold-critic"
+    own = project / sid / "tool-results" / "bqmu54frl.txt"
+    other = project / old_sid / "tool-results" / "old.txt"
+    for f in (own, other):
+        f.parent.mkdir(parents=True)
+        f.write_text("sweep output")
+    (project / f"{old_sid}.jsonl").write_text("{}")
+    (config / "settings.json").write_text("{}")
+    (tmp_path / "secret.txt").write_text("secret")
+    (own.parent / "link.txt").symlink_to(tmp_path / "secret.txt")
+    env = {**os.environ, "PYTHONPATH": str(REPO), "CLAUDE_CONFIG_DIR": str(config)}
+
+    def audit(calls, session_id=sid):
+        t = tmp_path / "t.jsonl"
+        events = [{"type": "system", "subtype": "init", "session_id": session_id}] if session_id else []
+        events += [{"type": "assistant", "message": {"content": [{"type": "tool_use", "id": f"c{i}", "name": name, "input": inp}]}}
+                   for i, (name, inp) in enumerate(calls)]
+        t.write_text("\n".join(json.dumps(e) for e in events))
+        p = subprocess.run([PY, str(REPO / "loop" / "guard.py"), "--worktree", str(worktree), "--transcript", str(t)],
+                           capture_output=True, text=True, env=env)
+        return p.returncode, p.stdout
+
+    rc, out = audit([("Read", {"file_path": str(own)})])
+    assert rc == 0 and "GUARD_OK" in out, out
+    for path in (other, project / f"{old_sid}.jsonl", own.parent / ".." / ".." / f"{old_sid}.jsonl",
+                 config / "settings.json", own.parent / "link.txt"):
+        rc, out = audit([("Read", {"file_path": str(path)})])
+        assert rc == 1 and "GUARD_REJECT path" in out, (path, out)
+    rc, out = audit([("Read", {"file_path": str(own)})], session_id=None)  # whose session, unknown: not allowed
+    assert rc == 1 and "GUARD_REJECT path" in out, out
+    rc, out = audit([("Bash", {"command": f"python loop/smoke.py --rules {own}"})])  # only Read reads it back
+    assert rc == 1 and "GUARD_REJECT path" in out, out
+    rc, out = audit([("Read", {"file_path": str(own.parent / "tenfold-heldout.txt")})])
+    assert rc == 1 and "GUARD_REJECT held_out" in out, out
+
+
 def test_guard_check_mode_from_inside_worktree(worktree):
     p = subprocess.run([PY, "loop/guard.py", "--check"], cwd=worktree, capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(worktree)})
     assert p.returncode == 0 and "GUARD_OK" in p.stdout
