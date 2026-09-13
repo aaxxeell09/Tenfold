@@ -403,10 +403,25 @@ def test_an_unexplained_salvaged_edit_reaches_the_guard_without_an_account(tmp_p
 
 # ---------- train_eval overrides and sweeps ----------
 
-def _train_eval(repo: Path, *args: str) -> subprocess.CompletedProcess:
+def _train_eval(repo: Path, *args: str, keep_report: bool = False) -> subprocess.CompletedProcess:
     shutil.copy(repo / "data" / "samples.jsonl", repo / "data" / "train.jsonl")
+    if not keep_report:  # without the report the gate compares against the file as it stands
+        (repo / "eval" / "last_train_report.json").unlink(missing_ok=True)
     return subprocess.run([PY, "loop/train_eval.py", *args], cwd=repo, capture_output=True, text=True,
                           env={**os.environ, "PYTHONPATH": str(repo)})
+
+
+def test_train_eval_gives_the_gate_verdict_against_the_last_accepted_version(tmp_path):
+    repo = make_repo(tmp_path)
+    v0 = subprocess.run([PY, "eval/run_eval.py", "--split", "train", "--local", "--tag", "v0"], cwd=repo, capture_output=True,
+                        text=True, env={**os.environ, "PYTHONPATH": str(repo)})
+    assert v0.returncode == 0, v0.stderr
+    same = _train_eval(repo, keep_report=True)
+    assert "gate vs the last accepted version: FAIL no improvement" in same.stdout, same.stdout + same.stderr
+    better = _train_eval(repo, "--set", "CONTACT_THRESHOLD=0.30", keep_report=True)
+    assert "gate vs the last accepted version: PASS" in better.stdout, better.stdout + better.stderr
+    sweep = _train_eval(repo, "--sweep", "CONTACT_THRESHOLD=0.30", keep_report=True)
+    assert "against the last accepted version" in sweep.stdout and sweep.stdout.rstrip().endswith("gate: PASS"), sweep.stdout
 
 
 def test_train_eval_sweep_scores_each_value_without_touching_rules(tmp_path):

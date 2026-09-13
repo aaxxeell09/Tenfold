@@ -45,11 +45,14 @@ DIAG_TOOLS = "Read,mcp__wandb__*"
 # never useful to the critic; disallowing them stops the agent from burning turns on denied attempts
 DISALLOWED = "Write,Task,WebSearch,WebFetch,NotebookEdit,Skill,EnterPlanMode,Agent,Workflow"
 TOOLS_NOTE = ("To test your hypothesis before and after the edit, run `python loop/train_eval.py` (train set only: "
-              "metrics, worst classes, failing samples with per-frame nearest pairs; `--class 7x8` to focus). To try "
-              "several values of a constant, sweep them in one call instead of editing and re-running per value: "
-              "`python loop/train_eval.py --sweep CONTACT_THRESHOLD=0.25,0.3,0.35` (`--set NAME=VALUE` overrides one "
-              "value for a full report); neither touches rules.py. Do not create scratch files or run any other "
-              "command: they are denied and waste your turns.")
+              "metrics, worst classes, failing samples with per-frame nearest pairs, and the metric gate's verdict "
+              "against the last accepted version; `--class 7x8` to focus). To try several values of a constant, "
+              "sweep them in one call instead of editing and re-running per value: "
+              "`python loop/train_eval.py --sweep CONTACT_THRESHOLD=0.25,0.3,0.35` (each line ends with the gate's "
+              "verdict; `--set NAME=VALUE` overrides one value for a full report); neither touches rules.py. Finish "
+              "only when `python loop/train_eval.py` on your edited file prints `gate vs the last accepted version: "
+              "PASS`: a patch that fails the gate is thrown away. Read files with the Read tool. Do not run sed, cat, "
+              "git or any other command, and do not create scratch files: they are denied and waste your turns.")
 TOOLS_NOTE_BLIND = ("You have no data and no evaluation tool here: reason from the code. Do not create scratch files "
                     "or run any other command: they are denied and waste your turns.")
 TRACE = {"on": False}

@@ -119,16 +119,27 @@ def main() -> int:
     mod = load_rules(ROOT / "classifier" / "rules.py")
     samples = [json.loads(l) for l in data.read_text().splitlines() if l.strip()]
 
+    accepted = None  # metrics of the last accepted version, when the critic copied its report in
+    report = ROOT / "eval" / "last_train_report.json"
+    if report.exists():
+        try:
+            accepted = json.loads(report.read_text())["metrics"]
+        except (KeyError, ValueError):
+            accepted = None
+
     if a.sweep:
         name, values = parse_assignment(a.sweep, mod)
         file_value = getattr(mod, name)
-        base, _ = evaluate(mod.classify, samples)  # the file as it stands, before any --set
+        base = accepted
+        if base is None:
+            base, _ = evaluate(mod.classify, samples)  # no report: compare with the file as it stands, before any --set
         for text in a.sets:
             n, vals = parse_assignment(text, mod)
             setattr(mod, n, vals[0])
         overrides = f" with {', '.join(a.sets)}" if a.sets else ""
+        against = "the last accepted version" if accepted is not None else "the file value"
         print(f"train: {len(samples)} samples; sweeping {name} (file value {file_value}){overrides}; "
-              f"gate = the metric gate's verdict against the file value (exact_match {fmt(base['exact_match'])})")
+              f"gate = the metric gate's verdict against {against} (exact_match {fmt(base['exact_match'])})")
         for v in values:
             setattr(mod, name, v)
             m, _ = evaluate(mod.classify, samples)
@@ -149,6 +160,9 @@ def main() -> int:
     print("  worst classes: " + worst(m))
     if m["per_slice"]:
         print("  by condition: " + ", ".join(f"{k}={fmt(v['exact_match'])} (n={v['n_samples']})" for k, v in m["per_slice"].items()))
+    if accepted is not None:
+        ok, why = gate.check(accepted, m)
+        print(f"  gate vs the last accepted version: {'PASS' if ok else 'FAIL ' + why}")
     failed = [r for r in rows if not scorers.exact_match(r["output"], r["target"])]
     if a.cls:
         failed = [r for r in failed if scorers.class_of(r["target"], r["kind"]) == a.cls]
