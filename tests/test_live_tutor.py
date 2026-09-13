@@ -1224,7 +1224,8 @@ def test_the_motion_threshold_in_force_rides_every_intervention_line() -> None:
 # --------------------------------------------------------------------------
 
 DECISION_KEYS = {"kind", "ts", "learner_id", "exercise", "state", "stable_for",
-                 "intervention", "reason", "scored_error", "mode", "params_version"}
+                 "intervention", "reason", "reading", "scored_error", "mode",
+                 "params_version"}
 INTERVENTION_KEYS = {"kind", "ts", "learner_id", "exercise", "intervention",
                      "trigger_after_s", "state_before", "child_was_already_moving",
                      "child_moved_after_s", "correct_pose_within_5s",

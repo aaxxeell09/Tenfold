@@ -48,3 +48,15 @@ Tout le reste : `tests/test_server.py` (70), `tests/test_canonical_lines.py`
 (les trois couches python), `tests/test_ladder_contact.py`,
 `tests/test_opening.py`, `tests/test_pose_beat.py`, `tests/test_recovery.py`,
 `tests/test_post_line_grace.py`, `tests/test_tally.py`, `tests/test_scheduler.py`.
+
+## 4. tests/test_live_tutor.py, one more with the pose reading
+
+`test_supportive_after_two_hard_exercises_with_the_finger_numbers`.
+
+It asserts that the finger numbers of supportive mode are taken down after
+`SUPPORTIVE_VISUAL_S`, with both hands in frame and a pose the classifier
+cannot read. The tutor now reads that pose: hands open, no two fingertips
+within the contact distance, so the child does not know which fingers, and the
+first row of the decision table puts the numbers up at `wrong_pose_prompt` and
+leaves them there, because the level never goes down. The numbers staying is
+the aid the owner asked for, not a drawing that failed to clear.

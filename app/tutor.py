@@ -155,20 +155,12 @@ VIS_PLACEMENT_ZONES = "placement_zones"
 VIS_FINGER_NUMBERS = "finger_numbers"
 VIS_CLOSING_IN = "closing_in"
 
-# contact_ratio is the fingertip distance, in hand scales, at which two
-# fingertips count as touching. It is optional in the parameter file: until it
-# is written there the tutor falls back on the distance the classifier itself
-# uses, so the reading means the same thing on both sides of the pipeline.
-CONTACT_RATIO = "contact_ratio"
-CONTACT_RATIO_DEFAULT = 0.2826
-CONTACT_RATIO_BOUND = (0.1, 0.6)
-# "close but not touching" is twice the contact distance, contract wording.
+# contact_ratio is the fingertip distance at which two fingertips count as
+# touching, as a fraction of a palm. It comes from the parameter file, through
+# RATIO_PARAMS, and _update_contact already reads the same key: the table and
+# the contact check mean the same thing by touching, to the same number.
+# "close but not touching" is twice that distance, contract wording.
 CLOSING_MULTIPLE = 2.0
-# The classifier measures in hand scales, one wrist to middle MCP length, and
-# the tutor never sees a wrist: it gets fingertips and nothing else. An open
-# hand is about two of those lengths from thumb tip to little finger tip, so the
-# widest distance inside one hand, halved, lands in the classifier's unit.
-HAND_SPAN_SCALES = 2.0
 
 # --- decision log reasons, the V0 vocabulary of contract section 3.1 ---------
 
@@ -385,32 +377,6 @@ def load_params(path: Path | str = PARAMS_PATH) -> TutorParams:
             values[key] = value
             bounds[key] = (low, high)
 
-    # contact_ratio is optional, and the only parameter that is. It is geometry
-    # rather than patience, so it is read as written, and while the parameter
-    # file does not carry it the classifier's own contact distance stands in:
-    # the tutor and the classifier then mean the same thing by touching.
-    if CONTACT_RATIO in values_raw:
-        pair = bounds_raw.get(CONTACT_RATIO, list(CONTACT_RATIO_BOUND))
-        if not isinstance(pair, (list, tuple)) or len(pair) != 2:
-            raise ParamsError(
-                f"bounds.{CONTACT_RATIO}: expected [min, max], got {pair!r}")
-        low = _as_number(f"bounds.{CONTACT_RATIO}[0]", pair[0])
-        high = _as_number(f"bounds.{CONTACT_RATIO}[1]", pair[1])
-        if low > high:
-            raise ParamsError(
-                f"bounds.{CONTACT_RATIO}: min {low} is above max {high}")
-        value = _as_number(f"global.{CONTACT_RATIO}", values_raw[CONTACT_RATIO])
-        if value < low or value > high:
-            raise ParamsError(
-                f"global.{CONTACT_RATIO} = {value} is outside its bounds "
-                f"[{low}, {high}]"
-            )
-        values[CONTACT_RATIO] = value
-        bounds[CONTACT_RATIO] = (low, high)
-    else:
-        values[CONTACT_RATIO] = CONTACT_RATIO_DEFAULT
-        bounds[CONTACT_RATIO] = CONTACT_RATIO_BOUND
-
     invariants = raw["invariants"]
     if not isinstance(invariants, list) or not all(isinstance(s, str) for s in invariants):
         raise ParamsError(f"{path}: invariants must be a list of strings")
@@ -498,38 +464,46 @@ class PoseReading:
 class Aid:
     """One row of the decision table: what a reading asks the tutor to do.
 
-    level   the ladder step the reading asks for, L0 to L4. L0 asks for no step
-            at all: the drawing, if there is one, is the whole aid.
-    visual  the tutor_visual kind the reading asks to draw, or None.
-    voice   whether the step is spoken. A spoken step climbs the ladder one at a
-            time, as it always has. A silent one is drawn at the level named,
-            because colours that arrive two steps late are not the aid the pose
-            asked for.
-    after   the params key whose clock must have run on this reading before the
-            aid is given, or None when the aid is immediate.
+    level    the step of the ladder this reading asks for, L0 to L4. L0 asks
+             for no step at all. It is what the reading asks of the table, never
+             a cap on the clocks: they stay the ceiling and climb past it.
+    visual   the drawing the reading asks for on top of the step, or None to
+             leave the level's own drawing alone. The ladder owns what each
+             level draws, L1 the numbers, L2 the colour, L3 the ghost; the
+             reading only says which hand it goes on, and adds the one drawing
+             the ladder has no level for, the two dots of a child closing in.
+    at_once  whether the step may be taken at the level named instead of one
+             step at a time. Only an unambiguous reading earns it: a pair
+             already touching does not need the numbers on every fingertip
+             first, it needs to know which finger is wrong.
+    after    the params key whose clock must have run on this reading before the
+             step is taken, or None when the reading is its own trigger.
+
+    No row speaks. What is said at a level, and whether anything is said at all,
+    stays with _ladder_line: L1 and L2 are shown, L3 is the first with a voice.
     """
 
     level: int
     visual: str | None
-    voice: bool
+    at_once: bool = False
     after: str | None = None
 
 
-# The decision table. One row per reading, read top to bottom in _read_pose, and
-# the only place that says which aid answers which pose.
+# The decision table. One row per reading, in the order _read_pose tries them,
+# and the only place that says which aid answers which pose.
 #
 #   reading             what the hands are saying          the aid
 #   hands_gone          a hand has drifted out of frame    the zones, then the come here line
 #   correct             the pose is made                   nothing: the acknowledgement owns this moment
-#   wrong_pair_held     the same wrong pair still touching the ghost move, spoken
+#   wrong_pair_held     the same wrong pair still touching the ghost move, and the voice with it
 #                       hint_2_delay after the colours
-#   wrong_pair          two fingertips touching, the       the colours, and no voice yet
+#   wrong_pair          two fingertips touching, the       the colours, at once, and no voice yet
 #                       numbers wrong
 #   one_hand_searching  one hand on its number, the other  the colours on the searching hand,
-#                       still looking                      the correct hand left green
+#                       still looking                      the hand that is right left alone
 #   closing_in          the two fingertips the exercise    a green dot on each of the two, and
 #                       asks for, within twice the         nothing said
-#                       contact distance, not touching
+#                       contact distance
 #   searching           nothing within contact distance,   the numbers on every fingertip
 #                       the child does not know which
 #                       fingers
@@ -538,18 +512,18 @@ class Aid:
 # The clocks stay the ceiling above all of it: a reading the table gives no aid
 # for still escalates when its own clock runs out, in _consider below.
 POSE_TABLE: Mapping[str, Aid] = MappingProxyType({
-    READ_HANDS_GONE: Aid(level=1, visual=VIS_PLACEMENT_ZONES, voice=True,
+    READ_HANDS_GONE: Aid(level=1, visual=VIS_PLACEMENT_ZONES,
                          after="no_hands_visual"),
-    READ_CORRECT: Aid(level=0, visual=None, voice=False),
-    READ_WRONG_PAIR_HELD: Aid(level=3, visual=VIS_GHOST, voice=True),
-    READ_WRONG_PAIR: Aid(level=2, visual=VIS_CORRECTION, voice=False,
+    READ_CORRECT: Aid(level=0, visual=None),
+    READ_WRONG_PAIR_HELD: Aid(level=3, visual=VIS_GHOST),
+    READ_WRONG_PAIR: Aid(level=2, visual=VIS_CORRECTION, at_once=True,
                          after="wrong_pose_prompt"),
-    READ_ONE_HAND_SEARCHING: Aid(level=2, visual=VIS_CORRECTION, voice=True,
+    READ_ONE_HAND_SEARCHING: Aid(level=2, visual=VIS_CORRECTION,
                                  after="wrong_pose_prompt"),
-    READ_CLOSING_IN: Aid(level=0, visual=VIS_CLOSING_IN, voice=False),
-    READ_SEARCHING: Aid(level=1, visual=VIS_FINGER_NUMBERS, voice=False,
+    READ_CLOSING_IN: Aid(level=0, visual=VIS_CLOSING_IN),
+    READ_SEARCHING: Aid(level=1, visual=VIS_FINGER_NUMBERS,
                         after="wrong_pose_prompt"),
-    READ_UNCLEAR: Aid(level=0, visual=None, voice=False),
+    READ_UNCLEAR: Aid(level=0, visual=None),
 })
 
 
@@ -575,46 +549,25 @@ def tip_positions(fingers: Sequence[Mapping[str, Any]]
     return out
 
 
-def hand_scale(tips: Mapping[str, Mapping[int, tuple[float, float]]]) -> float | None:
-    """One hand scale, in frame fractions, from the fingertips alone.
-
-    The widest distance inside a hand is thumb tip to little finger tip on an
-    open hand, which is about HAND_SPAN_SCALES hand scales, so halving it lands
-    in the unit contact_ratio is written in. Both hands are averaged, because
-    one of them can be turned away from the camera.
-    """
-    spans: list[float] = []
-    for hand in tips.values():
-        points = list(hand.values())
-        widest = max((math.dist(one, other)
-                      for index, one in enumerate(points)
-                      for other in points[index + 1:]), default=0.0)
-        if widest > 0.0:
-            spans.append(widest / HAND_SPAN_SCALES)
-    if not spans:
-        return None
-    return sum(spans) / len(spans)
-
-
-def tip_gap(tips: Mapping[str, Mapping[int, tuple[float, float]]], scale: float,
+def tip_gap(tips: Mapping[str, Mapping[int, tuple[float, float]]], palm: float,
             left: int, right: int) -> float | None:
-    """The distance between two named fingertips, in hand scales."""
+    """The distance between two named fingertips, in palms."""
     here = tips.get("left", {}).get(left)
     there = tips.get("right", {}).get(right)
-    if here is None or there is None or not scale > 0.0:
+    if here is None or there is None or not palm > 0.0:
         return None
-    return math.dist(here, there) / scale
+    return math.dist(here, there) / palm
 
 
-def nearest_gap(tips: Mapping[str, Mapping[int, tuple[float, float]]], scale: float
+def nearest_gap(tips: Mapping[str, Mapping[int, tuple[float, float]]], palm: float
                 ) -> tuple[float, tuple[tuple[str, int], tuple[str, int]]] | None:
-    """The closest left fingertip to right fingertip pair, in hand scales."""
-    if not scale > 0.0:
+    """The closest left fingertip to right fingertip pair, in palms."""
+    if not palm > 0.0:
         return None
     best: tuple[float, tuple[tuple[str, int], tuple[str, int]]] | None = None
     for left, here in tips.get("left", {}).items():
         for right, there in tips.get("right", {}).items():
-            gap = math.dist(here, there) / scale
+            gap = math.dist(here, there) / palm
             if best is None or gap < best[0]:
                 best = (gap, (("left", left), ("right", right)))
     return best
@@ -1370,9 +1323,9 @@ class Tutor:
         """Turn one perception window into one row of POSE_TABLE.
 
         Read top to bottom, in the order of the table. The landmarks say what is
-        touching and what is closing in, through contact_ratio; the classifier
-        says which number each hand is holding, because a fingertip position on
-        its own cannot.
+        touching and what is closing in, through contact_ratio and the same palm
+        _update_contact measures in; the classifier says which number each hand
+        is holding, because a fingertip position on its own cannot.
         """
         if situation in VISIBILITY_PROBLEMS:
             return PoseReading(name=READ_HANDS_GONE)
@@ -1380,17 +1333,17 @@ class Tutor:
             return PoseReading(name=READ_CORRECT)
         hand, shows, wants = self._searching_hand()
         tips = tip_positions(obs.fingers)
-        scale = hand_scale(tips)
-        nearest = nearest_gap(tips, scale) if scale is not None else None
+        palm = self._palm(obs) if tips else 0.0
+        nearest = nearest_gap(tips, palm)
         if nearest is None:
             # Nothing usable came back from the camera this window. The table
             # says nothing rather than guessing, and the clocks decide alone.
             return PoseReading(name=READ_UNCLEAR, hand=hand, shows=shows,
                                wants=wants)
-        contact = self.effective(CONTACT_RATIO)
+        contact = self.effective("contact_ratio")
         gap, pair = nearest
         left_wants, right_wants = self._expected_numbers()
-        asked = tip_gap(tips, scale or 0.0, left_wants, right_wants)
+        asked = tip_gap(tips, palm, left_wants, right_wants)
         expected_pair = (("left", left_wants), ("right", right_wants))
         if gap <= contact and situation == SIT_WRONG:
             # Two fingertips together and a finger number actually wrong: the
@@ -1401,9 +1354,9 @@ class Tutor:
                                shows=shows, wants=wants)
         if asked is not None and asked <= CLOSING_MULTIPLE * contact:
             # The two fingertips the exercise asks for are within twice the
-            # contact distance, touching included: the child knows which fingers
-            # and is closing in, or has just arrived and the classifier has yet
-            # to confirm it. Either way there is nothing to correct.
+            # contact distance: the child knows which fingers and is closing in,
+            # or has just arrived and the classifier has yet to confirm it.
+            # Either way there is nothing to correct.
             return PoseReading(name=READ_CLOSING_IN, gap=asked,
                                pair=expected_pair)
         if hand is not None:
@@ -1429,8 +1382,8 @@ class Tutor:
     def _searching_hand(self) -> tuple[str | None, int | None, int | None]:
         """The one hand still looking, the number it holds and the one it wants.
 
-        None when both hands are right, or when both are wrong: the row of the
-        table that colours one hand only is for one hand only.
+        None when both hands are right, and None when both are wrong: the row of
+        the table that colours one hand only is for one hand only.
         """
         left_wrong, right_wrong = self._wrong_hands()
         if left_wrong == right_wrong:
@@ -1450,15 +1403,16 @@ class Tutor:
         return self._ped - self._colours_since >= self.effective("hint_2_delay")
 
     def _table_aid(self, moment: float, situation: str) -> tuple[bool, str | None]:
-        """Give the aid this reading asks for, or leave the tick to the clocks.
+        """Take the step this reading asks for, or leave the tick to the clocks.
 
-        Returns whether the table acted, and the line it said if it said one. A
-        spoken step climbs the ladder one at a time, as it always has. A silent
-        one is given at the level the table names: colours that arrive two steps
-        late are not the aid the pose asked for.
+        Returns whether the table acted, and the line the ladder said if it said
+        one. The step is the ladder's in every other respect: the level climbs
+        one at a time unless the reading is unambiguous enough to earn its level
+        outright, _ladder_line decides what is said at it, which is nothing below
+        L3, and the two graces come first.
         """
         aid = POSE_TABLE[self._reading.name]
-        if aid.level <= 0 or self._answered:
+        if aid.level <= 0 or self._answered or self.in_recovery:
             return False, None
         if not self._past_initial_silence():
             return False, None
@@ -1467,10 +1421,15 @@ class Tutor:
             # own gate, in _visibility above. The table names the aid; that
             # branch is the one that gives it.
             return False, None
+        if self._last_line_ped is not None:
+            if self._ped - self._last_line_ped < self._quiet_after_a_line():
+                # A child changing a pose is not corrected mid movement, whatever
+                # the table can see.
+                return False, None
         if aid.after is not None:
             if self._ped - self._reading_since < self.effective(aid.after):
                 return False, None
-        target = self._gate_level(min(RESCUE_LEVEL, aid.level if not aid.voice
+        target = self._gate_level(min(RESCUE_LEVEL, aid.level if aid.at_once
                                       else self._level + 1))
         target = min(target, max(aid.level, self._level))
         if target <= self._level:
@@ -1479,53 +1438,41 @@ class Tutor:
         if self._level > 0 and since < self.effective("wrong_pose_prompt"):
             return False, None
         keys = ("wrong_pose_prompt", "wrong_pose_error_after_help",
-                "min_verbal_gap", "post_movement_silence", "hint_2_delay",
+                "min_verbal_gap", "post_line_grace_ms", "hint_2_delay",
                 "rescue_delay")
-        if not aid.voice:
-            self._deliver(moment, target, None, solicited=False,
-                          reason=REASON_WRONG_POSE_HELD, keys=keys,
-                          problem=situation)
-            return True, None
-        line = self._ladder_line(target, situation=situation)
-        said = self._offer(moment, target, line, situation,
-                           REASON_WRONG_POSE_HELD, keys,
+        said = self._offer(moment, target, self._ladder_line(target, situation=situation),
+                           situation, REASON_WRONG_POSE_HELD, keys,
                            rescue=target >= RESCUE_LEVEL)
-        return said is not None, said
+        return True, said
 
     def _reading_visual(self) -> dict[str, Any] | None:
-        """The drawing this reading asks for, or None to leave it to the ladder.
+        """The drawing this reading asks for, or None to leave the ladder alone.
 
-        The reading picks which aid is drawn and on which hand. How strong it is
-        drawn stays the ladder's: a pulse at L1, the colours at L2, the ghost
-        move at L3, the same three steps as before.
+        The ladder owns what each level draws: the numbers at L1, the colour at
+        L2, the ghost at L3. All the reading does is put the colour and the
+        ghost on the hand the pose says is still looking, rather than on the
+        hand the engine guessed, and draw the one thing the ladder has no level
+        for: the two dots of a child closing in, before any step is taken.
         """
         reading = self._reading
         aid = POSE_TABLE[reading.name]
         if aid.visual == VIS_CLOSING_IN and reading.pair is not None:
-            # Green dots on the two fingertips, whatever the level: the child is
-            # closing in, and the aid is to say nothing and mark the target.
+            if self._level > 0:
+                # The ladder is already drawing at this level, and the level's
+                # drawing is the level's own.
+                return None
             return {"kind": VIS_CLOSING_IN,
                     "tips": [{"hand": hand, "finger": finger}
                              for hand, finger in reading.pair]}
-        if self._level < 1:
+        if reading.hand is None or reading.wants is None:
             return None
-        if aid.visual == VIS_CORRECTION and reading.hand is not None:
+        if aid.visual in (VIS_CORRECTION, VIS_GHOST):
             if self._level >= 3 and reading.shows is not None:
                 return {"kind": VIS_GHOST, "hand": reading.hand,
                         "from": reading.shows, "to": reading.wants}
-            if self._level >= 2:
+            if self._level == 2:
                 return {"kind": VIS_CORRECTION, "wrong_hand": reading.hand,
                         "expected_finger": reading.wants}
-            return {"kind": VIS_PULSE_FINGER, "hand": reading.hand,
-                    "finger": reading.wants}
-        if aid.visual == VIS_GHOST and reading.hand is not None:
-            if reading.shows is None:
-                return {"kind": VIS_CORRECTION, "wrong_hand": reading.hand,
-                        "expected_finger": reading.wants}
-            return {"kind": VIS_GHOST, "hand": reading.hand,
-                    "from": reading.shows, "to": reading.wants}
-        if aid.visual == VIS_FINGER_NUMBERS:
-            return {"kind": VIS_FINGER_NUMBERS}
         return None
 
     def _escalate(self, moment: float, situation: str) -> str | None:
@@ -1693,19 +1640,7 @@ class Tutor:
             # The two numbers are right and each is on the other hand, so the
             # line that says which number belongs where is the swap advice.
             return self._render("wrong_both", a=self._a, b=self._b)
-        if asked and level <= 1:
-            # Help the child asked for is worth more than a nudge: the first
-            # concrete step, on the hand they start from.
-            return self._render("hesitation_2", a=self._a)
-        if level >= 3:
-            # Without a hint there is no fingertip to point at, so showing is
-            # meaningless and the nudge is all that is left.
-            if (self._hint or {}).get("hand") or self._reading.hand:
-                return self._render("show")
-            return self._render("hesitation_1")
-        if level == 2:
-            return self._correction_line()
-        return self._render("hesitation_1")
+        return self._correction_line()
 
     def _correction_line(self) -> str | None:
         """Name the hand, or the two hands, holding a finger nobody asked for."""
@@ -2005,6 +1940,7 @@ class Tutor:
             # Whatever the child is holding, its clock starts now: the ladder
             # may not climb on a pose nobody was allowed to correct.
             self._situation_since = self._ped
+            self._reading_since = self._ped
             self._correction_since = None
             self._level = 0
         if self._state == VISIBILITY_RECOVERY:
