@@ -7,7 +7,7 @@
  * same record lesson/scheduler.py round trips, so one profile carries everything.
  * The camera lesson is driven by app/server.py over the websocket, scoped to a
  * node's pairs by the scheduler; this file renders, counts and stores. Tally is
- * drawn from tally.svg through tally.js, the node icons from icons.svg.
+ * drawn from the renders in art/ through tally.js, the node icons from icons.svg.
  */
 (function () {
   "use strict";
@@ -59,7 +59,7 @@
   function setMuted(on) {
     muted = Boolean(on);
     write(KEY_MUTED, muted);
-    if (muted) { speech.serial += 1; speech.queue = []; speech.pending = null; try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } hush(); }
+    if (muted) { speech.serial += 1; speech.queue = []; speech.pending = null; try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } hush(); ttsSay(false); }
     markMute();
   }
   function markMute() {
@@ -106,6 +106,9 @@
     // keeps running on the server and Tally talks over the next screen
     if (lesson) leaveLesson();
     view = name;
+    // a screen the child opens says its lines again: the memory that keeps a line
+    // from being repeated on every state message is per bubble, and starts fresh here
+    $$("[data-said]").forEach(sayAgain);
     VIEWS.forEach((v) => { const el = document.getElementById(v); if (el) el.hidden = v !== name; });
     document.body.dataset.view = name;
     $("#lesson").hidden = true;
@@ -151,7 +154,7 @@
     let svg = `<path class="track" d="M 60 30 Q 168 58 150 92 Q 122 124 68 152 Q 26 180 158 212"></path>`;
     units.forEach((u, i) => {
       const [x, y] = pts[i];
-      const fill = u.state === "done" ? ["#255a56", "#2f6f6a"] : u.state === "current" ? ["#2f5e1e", "#3f7d2a"] : ["#c9c0ae", "#e2dbcd"];
+      const fill = u.state === "done" ? ["var(--green-lip)", "var(--green)"] : u.state === "current" ? ["var(--blue-lip)", "var(--blue)"] : ["var(--lock-lip)", "var(--lock)"];
       svg += `<circle cx="${x}" cy="${y + 4}" r="17" fill="${fill[0]}"></circle><circle cx="${x}" cy="${y}" r="17" fill="${fill[1]}"></circle>` +
              `<text x="${x + 28}" y="${y + 6}" class="${u.state === "locked" ? "lock-label" : ""}">${u.title}</text>`;
     });
@@ -177,9 +180,10 @@
       html += `<section class="unit" style="--unit:${tone[0]};--unit-lip:${tone[1]}"><div class="unit-banner"><div><div class="unit-kicker">${u.kicker}</div><h2>${u.name}</h2><p>${u.desc}</p></div><div class="unit-count">${use("icon-star")}${u.count}</div></div><div class="path">`;
       u.nodes.forEach((n, i) => {
         const cls = "node" + (n.t === "boss" ? " node-boss" : n.t === "chest" ? " node-chest" : "") + (n.s === "locked" ? " is-locked" : n.s === "done" ? " is-done" : " is-current");
-        const ring = n.s === "current" ? `<svg class="ring" viewBox="0 0 102 102"><circle cx="51" cy="51" r="44"></circle><circle class="ring-arc" cx="51" cy="51" r="44" stroke-dasharray="276" stroke-dashoffset="186"></circle></svg>` : "";
-        const bubble = n.s === "current" ? `<div class="bubble">Start</div>` : "";
-        html += `<div class="row"><div class="node-wrap" style="--x:${OFFSETS[i % OFFSETS.length]}px">${bubble}<button class="${cls}" type="button" data-status="${n.s}" disabled>${use(iconFor(n.t, n.s), n.t === "chest" ? "0 0 88 80" : "0 0 48 48")}</button>${ring}${miniStars(n.stars || 0)}</div></div>`;
+        const face = n.t === "chest"
+          ? use(iconFor(n.t, n.s), "0 0 88 80")
+          : `<span class="art" style="background-image:url(art/${nodeArt(n.t, n.s)})"></span>`;
+        html += `<div class="row"><div class="node-wrap" style="--x:${OFFSETS[i % OFFSETS.length]}px"><button class="${cls}" type="button" data-status="${n.s}" disabled>${face}</button>${miniStars(n.stars || 0)}</div></div>`;
       });
       if (u.mascot) html += `<div class="row"><div class="mascot mascot-${u.mascot}"><div class="tally" data-tally="${u.mascot === "right" ? "happy" : "ready"}"></div></div></div>`;
       html += `</div></section>`;
@@ -201,8 +205,24 @@
     if (!n) return `<div class="mini-stars"></div>`;
     return `<div class="mini-stars">${[0, 1, 2].map((i) => starSvg(i < n)).join("")}</div>`;
   }
-  // one unit on screen at a time, the current one unless the learner switched
-  const SPOTS = [[20, 18], [47, 31], [71, 47], [48, 63], [20, 75], [44, 90]];
+  // one unit on screen at a time, the current one unless the learner switched.
+  // The export's zigzag across the panel; the nodes are spread evenly down it, so a
+  // unit of four fills the same panel a unit of six does.
+  const SPOT_X = [22, 43, 64, 42, 23, 46];
+  function spotsFor(count) {
+    const top = 16, bottom = 86;
+    return Array.from({ length: count }, (unused, i) => [
+      SPOT_X[i % SPOT_X.length],
+      count > 1 ? top + i * (bottom - top) / (count - 1) : (top + bottom) / 2,
+    ]);
+  }
+  // the path furniture is rendered art, one image per node state. A chest has no
+  // render in the export, so it keeps the drawn icon of icons.svg.
+  function nodeArt(kind, state) {
+    if (state === "locked") return "n-lock.png";
+    if (state === "done") return "n-done.png";
+    return kind === "boss" ? "n-boss.png" : "start.png";
+  }
   function unitIndex() {
     if (unitAt !== null) return unitAt;
     const cur = L.currentNode(progress);
@@ -229,25 +249,28 @@
     const line = here
       ? (cur.kind === "chest" ? "A chest! Open it." : cur.kind === "boss" ? "The boss. Eight questions, three hearts." : `Next up: ${cur.title}.`)
       : done === scored.length ? "All done here. Replay for three stars." : "Finish the unit before this one first.";
-    $("#u-say").textContent = line;
-    if (line !== speech.lastLine) { speech.lastLine = line; speak(line, $("#u-tally")); }
+    say($("#u-say"), line, $("#u-tally"));
     setTally($("#u-tally"), here ? "ready" : "happy");
-    $("#unit-switch").innerHTML = L.UNITS.map((u, i) => `<button type="button" class="${i === ui ? "on" : ""}" data-action="unit" data-u="${i}">Unit ${i + 1}</button>`).join("");
-    const pts = nodes.map((n, i) => SPOTS[i % SPOTS.length]);
+    $("#unit-switch").innerHTML = L.UNITS.map((u, i) => `<button type="button" class="${i === ui ? "on" : ""}" data-action="unit" data-u="${i}" aria-label="Unit ${i + 1}"><img src="art/tile-${i + 1}-${i === ui ? "on" : "off"}.png" alt=""></button>`).join("");
+    const pts = spotsFor(nodes.length);
     const d = pts.map(([x, y], i) => `${i ? "L" : "M"} ${x} ${y}`).join(" ");
     let html = `<svg class="track" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${d}"></path></svg>`;
     nodes.forEach((n, i) => {
       const [x, y] = pts[i];
       const state = L.nodeState(progress, n.id);
-      const box = n.kind === "chest" ? "0 0 88 80" : "0 0 48 48";
       const cls = "node" + (n.kind === "boss" ? " node-boss" : n.kind === "chest" ? " node-chest" : "") +
         (state === "locked" ? " is-locked" : state === "done" ? " is-done" : " is-current");
       const pos = `left:${x}%;top:${y}%`;
-      if (state === "current") {
-        html += `<svg class="ring" viewBox="0 0 102 102" style="${pos}"><circle cx="51" cy="51" r="44"></circle><circle class="arc" cx="51" cy="51" r="44" stroke-dasharray="276" stroke-dashoffset="${n.kind === "chest" ? 0 : 186}"></circle></svg>`;
-        html += `<button class="bubble" type="button" data-action="${n.kind === "chest" ? "chest" : "start"}" data-node="${n.id}" style="left:${x}%;top:calc(${y}% - ${n.kind === "boss" ? 76 : 66}px)">${n.kind === "chest" ? "Open" : "Start"}</button>`;
+      // the current node is the way in: the render already says START, so the node
+      // itself carries the action and no second button is stacked on top of it
+      const action = state !== "current" ? "node" : n.kind === "chest" ? "chest" : "start";
+      const face = n.kind === "chest"
+        ? use(iconFor(n.kind, state), "0 0 88 80")
+        : `<span class="art" style="background-image:url(art/${nodeArt(n.kind, state)})"></span>`;
+      if (state === "current" && n.kind === "chest") {
+        html += `<button class="bubble" type="button" data-action="chest" data-node="${n.id}" style="left:${x}%;top:calc(${y}% - 66px)">Open</button>`;
       }
-      html += `<button class="${cls}" type="button" data-action="node" data-node="${n.id}" data-status="${state}" aria-label="${n.title}" style="${pos}">${use(iconFor(n.kind, state), box)}</button>`;
+      html += `<button class="${cls}" type="button" data-action="${action}" data-node="${n.id}" data-status="${state}" aria-label="${n.title}" style="${pos}">${face}</button>`;
       if (n.kind !== "chest" && progress.stars[n.id]) html += `<div class="mini-stars" style="${pos}">${[0, 1, 2].map((k) => starSvg(k < progress.stars[n.id])).join("")}</div>`;
     });
     $("#course").innerHTML = html;
@@ -271,10 +294,7 @@
     connect(() => sendLesson({ type: "start_node", state: learner(), node: { id: "check", kind: "check", pairs: [[6, 6]], count: 1 } }));
     decorate(root);
   }
-  function checkSay(text) {
-    $("#check-say").textContent = text;
-    speak(text, $("#check-tally"));
-  }
+  function checkSay(text) { say($("#check-say"), text, $("#check-tally")); }
   function stopCheck() {
     if (!checkRun) return;
     checkRun.timers.forEach(clearTimeout);
@@ -285,7 +305,11 @@
     sendLesson({ type: "quit" });
   }
   function setStepDots(n) {
-    $$("#check .stepnum i").forEach((dot, i) => dot.classList.toggle("on", i === n - 1));
+    $$("#check .stepnum img").forEach((tile, i) => {
+      const on = i === n - 1;
+      tile.src = `art/tile-${i + 1}-${on ? "on" : "off"}.png`;
+      tile.alt = on ? `Step ${i + 1}` : "";
+    });
   }
   function later(ms, fn) { if (checkRun) checkRun.timers.push(setTimeout(fn, ms)); }
   function checkMessage(m) {
@@ -393,7 +417,7 @@
   function sentencesOf(text) {
     return String(text || "").replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
   }
-  const speech = { queue: [], host: null, serial: 0, pending: null, waiting: false, lastLine: null };
+  const speech = { queue: [], host: null, serial: 0, pending: null, waiting: false };
   // Chrome hands the voice list over asynchronously: the first sentence waits for
   // voiceschanged (or a short timeout for browsers that never fire it) rather than
   // going out in the wrong voice.
@@ -415,15 +439,61 @@
     $$(".is-talking").forEach((el) => el.classList.remove("is-talking"));
     voice.spokeUntil = 0;
   }
+  // ---------- one door for every visible Tally line ----------
+  // Anything Tally shows, Tally says. Writing a bubble is the only way into speak(),
+  // so a line cannot reach the screen without a voice: a new sentence anywhere in
+  // this file goes through say() and is spoken by construction. Lines written in the
+  // same breath are spoken as one queue, in the order they were written, and a bubble
+  // never says again the line it is already showing.
+  const saying = { lines: [], host: null, timer: null };
+  function say(el, text, host) {
+    if (!el) return "";
+    if (text !== undefined) {
+      const line = String(text === null ? "" : text);
+      if (el.textContent !== line) el.textContent = line;
+    }
+    const shown = (el.textContent || "").replace(/\s+/g, " ").trim();
+    if (!shown) { sayAgain(el); return ""; }
+    if (el.dataset.said === shown) return shown;
+    el.dataset.said = shown;
+    // one utterance per bubble: a line with no full stop of its own gets one
+    saying.lines.push(/[.!?]$/.test(shown) ? shown : `${shown}.`);
+    if (host) saying.host = host;
+    if (!saying.timer) saying.timer = setTimeout(flushSay, 0);
+    return shown;
+  }
+  function flushSay() {
+    saying.timer = null;
+    const lines = saying.lines.splice(0), host = saying.host;
+    saying.host = null;
+    if (lines.length) speak(lines.join(" "), host);
+  }
+  // a bubble forgets what it said: the same line on a screen opened again is new
+  function sayAgain(el) { if (el) delete el.dataset.said; }
+  // The server's pedagogical clocks run on these: true before Tally's line starts,
+  // false when it ends, errors, or is cancelled. The pair brackets the whole line,
+  // not each sentence of it. A muted page, and a browser with no speech synthesis at
+  // all, send the pair back to back, so the clock that starts at the end of the line
+  // starts there too. Two false in a row are the same as one, so nothing is repeated.
+  const tts = { speaking: false };
+  function ttsSay(on) {
+    const speaking = Boolean(on);
+    if (speaking === tts.speaking) return;
+    tts.speaking = speaking;
+    sendLesson({ type: "tts", speaking });
+  }
   function speak(text, host) {
-    if (!("speechSynthesis" in window) || !text) return;
+    if (!text) return;
+    if (!("speechSynthesis" in window)) { ttsSay(true); ttsSay(false); return; }
     try {
       window.speechSynthesis.cancel();
       speech.serial += 1;
       speech.queue = [];
       hush();
-      if (muted) return;
+      ttsSay(false);
+      if (muted) { ttsSay(true); ttsSay(false); return; }
       voice.said = numbersIn(text);
+      voice.saidText = plainSpeech(text);
       if (!voicesReady()) { speech.pending = { text, host: host || null }; waitForVoices(); return; }
       speech.queue = sentencesOf(text);
       speech.host = host || null;
@@ -437,7 +507,7 @@
       voice.spokeUntil = on ? Infinity : Date.now() + 800;
     };
     const sentence = speech.queue.shift();
-    if (!sentence) { talk(false); return; }
+    if (!sentence) { talk(false); ttsSay(false); return; }
     const u = new SpeechSynthesisUtterance(sentence);
     u.lang = "en-US"; u.rate = 0.92; u.pitch = 1.05;
     const chosen = tallyVoice.done ? tallyVoice.picked : pickVoice();
@@ -445,6 +515,7 @@
     u.onstart = () => { if (serial === speech.serial) talk(true); };
     u.onend = () => speakNext(serial);
     u.onerror = () => speakNext(serial);
+    ttsSay(true);
     window.speechSynthesis.speak(u);
   }
 
@@ -452,7 +523,7 @@
   // Chrome starts recognition only from a user gesture: the first click of the session arms
   // it, then it stays alive across screens. "gate" says whether a heard number is an answer
   // right now; "denied" means the mic was refused and the type field is the way in.
-  const voice = { recognition: null, wanted: false, running: false, denied: false, gate: false, spokeUntil: 0, said: [], last: null, at: 0 };
+  const voice = { recognition: null, wanted: false, running: false, denied: false, gate: false, spokeUntil: 0, said: [], saidText: "", last: null, at: 0 };
   const ONES = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
   const TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
   const TENS = { twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
@@ -500,7 +571,7 @@
         const heard = $(".heard");
         if (heard) heard.textContent = text && voice.gate ? `heard: ${text}` : "";
         if (checkRun && checkRun.step === 3 && !checkRun.done) $("#check-miclabel").textContent = text || "Listening";
-        if (e.results[i].isFinal) submitSpoken(text);
+        if (e.results[i].isFinal) { sendSpeech(text); submitSpoken(text); }
       }
     };
     voice.recognition = r;
@@ -537,6 +608,33 @@
   function stopVoice() { voice.wanted = false; if (voice.recognition && voice.running) { try { voice.recognition.stop(); } catch (e) { /* done */ } } }
   function gateVoice(on) { voice.gate = Boolean(on); markMic(); }
   function listenWhile(state) { gateVoice(state === "correct_pose" || state === "waiting_answer"); }
+  // Tally's own voice is never the child speaking: while one of his lines is in the
+  // air, a transcript that is part of that line, or that carries only numbers he just
+  // said, is dropped instead of being forwarded.
+  function plainSpeech(text) { return String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim(); }
+  // a transcript that is nothing but numbers, which is what an echo of a number
+  // Tally said sounds like. A sentence with a number inside it is the child talking.
+  function onlyNumbers(text) {
+    const tokens = plainSpeech(text).split(" ").filter(Boolean);
+    return tokens.length > 0 && tokens.every((t) => /^\d+$/.test(t) || t in ONES || t in TEENS || t in TENS || t === "hundred" || t === "and");
+  }
+  function tallyEcho(text) {
+    if (Date.now() >= voice.spokeUntil) return false;
+    const heard = plainSpeech(text);
+    if (!heard) return true;
+    if (voice.saidText && (voice.saidText.includes(heard) || heard.includes(voice.saidText))) return true;
+    const numbers = numbersIn(text);
+    return onlyNumbers(text) && numbers.length > 0 && numbers.every((n) => voice.said.includes(n));
+  }
+  // Everything the child says goes to the server, number in it or not: it is what
+  // tells the tutor the child is working, and it pauses his clocks. It never submits
+  // an answer, and it is sent in addition to the check message, never instead of it.
+  function sendSpeech(text) {
+    const said = String(text || "").trim().slice(0, 200);
+    if (!said || (!lesson && !checkRun)) return;
+    if (tallyEcho(said)) return;
+    sendLesson({ type: "speech", text: said });
+  }
   function submitSpoken(text) {
     const value = parseNumber(text);
     if (value === null || (!lesson && !checkRun) || !voice.gate) return;
@@ -605,10 +703,9 @@
     link.trouble = Boolean(on);
     if (!link.trouble) return;
     if (lesson) {
-      const say = $("#lesson .tally-say"), sub = $("#lesson .speech-sub");
-      if (say) say.textContent = LINK_SAY;
+      const sub = $("#lesson .speech-sub");
       if (sub) sub.textContent = "Trying again";
-      speak(LINK_SAY, $("#lesson .tally"));
+      say($("#lesson .tally-say"), LINK_SAY, $("#lesson .tally"));
     } else if (checkRun) {
       checkSay(LINK_SAY);
     }
@@ -641,27 +738,20 @@
     // A new exercise, not a new fact: a node can serve the same fact five times over
     // (u1-l2 is 6x7 both ways), and only the engine's rearm to exercise_shown moves
     // once per question. That is the counter and the clean first try again.
-    if (fresh && m.state === "exercise_shown") { lesson.done += 1; lesson.slipped = false; }
+    if (fresh && m.state === "exercise_shown") lesson.done += 1;
     if (m.fact) lesson.fact = m.fact;
-    // A fixed finger is how the input works, not a mistake: the server counts that
-    // answer for the stars, so it keeps the first try XP too. Only a wrong pose still
-    // held after the server's grace is a slip, and the server is the one with the
-    // clock: it says so with pose_slip. A hint costs the bonus when the child asked
-    // for it, never when the server raised it on its own (hint_auto). An older server
-    // sends neither field, and a missing field counts as false.
-    if (m.pose_slip === true || (m.hint_level > 0 && m.hint_auto !== true)) lesson.slipped = true;
-    if (fresh && m.state === "answer_wrong") {
-      lesson.slipped = true;
-      if (lesson.hearts !== null) {
-        lesson.hearts -= 1; lesson.hit = true;
-        if (lesson.hearts <= 0) { sendLesson({ type: "quit" }); return finish(true); }
-      }
+    if (fresh && m.state === "answer_wrong" && lesson.hearts !== null) {
+      lesson.hearts -= 1; lesson.hit = true;
+      if (lesson.hearts <= 0) { sendLesson({ type: "quit" }); return finish(true); }
     }
-    if (fresh && m.state === "answer_correct") { lesson.correct += 1; if (!lesson.slipped) lesson.firstTry += 1; }
+    // First try is the server's answer, not the page's: it holds the clock, the ladder
+    // and the params, and it alone knows whether the child asked for the help given.
+    // The value that counts is the one riding this answer_correct message. A message
+    // without the field counts as false, so an older server simply pays no bonus.
+    if (fresh && m.state === "answer_correct") { lesson.correct += 1; if (m.first_try) lesson.firstTry += 1; }
     lesson.last = m.state;
     renderPractice(m);
     listenWhile(m.state);
-    if (m.tally && m.tally !== lesson.said) { lesson.said = m.tally; speak(m.tally, $("#lesson .tally")); }
   }
   // --demo: the map opens as a showcase, first unit done, second current
   function seedShowcase() {
@@ -681,7 +771,7 @@
   function startLesson(id) {
     const node = L.findNode(id);
     const total = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
-    lesson = { node, total, correct: 0, firstTry: 0, slipped: false, serverCorrect: null, done: 0, fact: null, last: null, said: null,
+    lesson = { node, total, correct: 0, firstTry: 0, serverCorrect: null, done: 0, fact: null, last: null,
       hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", paid: false, t0: Date.now() };
     stopCheck();
     VIEWS.forEach((v) => { $("#" + v).hidden = true; });
@@ -702,8 +792,10 @@
     if (!s) return;
     payLesson();
     s.paid = false;
-    s.done = 0; s.slipped = false; s.serverCorrect = null; s.fact = null; s.last = null; s.said = null;
+    s.done = 0; s.serverCorrect = null; s.fact = null; s.last = null;
     s.hearts = s.node.kind === "boss" ? 3 : null; s.hit = false; s.typed = "";
+    // the node starts again on the same shell: its first line is a new line
+    sayAgain($("#lesson .tally-say"));
   }
   // XP is never lost: every answer already right is paid, whatever happens next
   function payLesson() {
@@ -720,7 +812,7 @@
     const hearts = s.hearts === null ? "" : `<div class="hearts" aria-label="${s.hearts} hearts">${use("icon-flame")}${s.hearts}</div>`;
     $("#lesson").innerHTML = `
       <div class="lesson-top">
-        <button class="icon-btn" data-action="quit" aria-label="Quit lesson">${use("icon-close")}</button>
+        <button class="backbtn2 lesson-back" data-action="quit" aria-label="Quit lesson"><img src="art/btn-back.png" alt=""></button>
         <div class="bar lesson-bar"><i class="bar-fill" style="width:0%"></i></div>
         ${hearts}<div class="lesson-count practice-why"></div>
       </div>
@@ -734,11 +826,14 @@
           <span class="cam-tag">${use("icon-camera")}camera</span>
           <div class="cam-veil">I cannot quite see your fingers<small>Hold them up, palms toward me</small></div>
           <div class="reasons practice-reasoning"></div>
+          <div class="rescue practice-rescue" hidden></div>
         </div>
         <div class="cl-foot">
-          <div class="speaker">
+          <!-- Tally and his bubble are the ask for help: a tap on either sends hint,
+               which is the only help that costs the first try bonus. No new button. -->
+          <div class="speaker" data-action="help" role="button" aria-label="Ask Tally for help">
             <div class="tally" data-tally="ready"></div>
-            <div class="speech"><span class="tally-say">Show me both hands.</span><small class="speech-sub">I am watching your fingers</small></div>
+            <div class="speech"><span class="tally-say"></span><small class="speech-sub">I am watching your fingers</small></div>
           </div>
           <div class="practice-answer">
             <button class="mic" type="button" data-action="mic" hidden aria-label="say the answer">${use("icon-mic")}<span class="bars"><i></i><i></i><i></i></span><span class="mic-label">Listening</span></button>
@@ -748,6 +843,8 @@
         </div>
       </div>`;
     decorate($("#lesson"));
+    // the first line of the lesson is shown and said like every other line
+    say($("#lesson .tally-say"), "Show me both hands.", $("#lesson .tally"));
     videoOn($(".practice-video", $("#lesson")));
     markMic();
   }
@@ -816,7 +913,9 @@
     }
     $(".practice-exercise", root).textContent = (m.exercise || "").replace(" x ", " × ") || "Getting ready";
     $(".practice-why", root).textContent = s.done ? `${Math.min(s.done, s.total)} of ${s.total}` : "";
-    $(".tally-say", root).textContent = m.tally || "";
+    // tutor_line is the line Tally says and shows; tally is the fallback when the
+    // tutor has nothing new. Shown and spoken in one move, once per line.
+    say($(".tally-say", root), m.tutor_line || m.tally || "", $(".tally", root));
     $(".speech-sub", root).textContent = m.reaction === "cannot_see" ? "Palms toward the camera" : m.reason ? ({ retry: "One more try", review: "You have met this one", confidence: "An easy one", next_new: "Brand new", level_up: "Jumping ahead" }[m.reason] || "") : "I am watching your fingers";
     setTally($(".tally", root), m.reaction === "cannot_see" ? "squint" : (MOOD[m.state] || "ready"));
     root.dataset.state = m.state;
@@ -826,33 +925,109 @@
     const lines = m.reasoning || [];
     root.classList.toggle("has-reasons", lines.length > 0);
     band.innerHTML = lines.map((line) => `<span>${line}</span>`).join("");
+    renderRescue(m, root);
     drawFingers(m, $(".practice-stage", root));
+  }
+  // ---------- what the tutor draws ----------
+  // tutor_visual is null or one of six kinds. Everything here is an addition inside
+  // the camera view, in the language the page already draws in: the same fingertip
+  // circles, the same gold ghost, the same dashed zones as the start check.
+  function rescueLines(card, exercise) {
+    const tens = Number(card.tens) || 0, units = Number(card.units) || 0;
+    const up = String(exercise || "").split(/x/i).map((part) => Number(part.trim()));
+    const lines = [`${tens} ${tens === 1 ? "ten" : "tens"} = ${tens * 10}`];
+    // the units are the fingers still up on each hand, in the order the exercise asks
+    lines.push(up.length === 2 && up.every((n) => n >= 6 && n <= 10)
+      ? `${10 - up[0]} x ${10 - up[1]} = ${units}`
+      : `${units} units`);
+    lines.push(`${tens * 10} + ${units} = ${Number(card.total) || tens * 10 + units}`);
+    return lines;
+  }
+  function renderRescue(m, root) {
+    const box = $(".practice-rescue", root);
+    if (!box) return;
+    const visual = m.tutor_visual || null;
+    const card = visual && visual.kind === "rescue_card" ? visual : null;
+    box.hidden = !card;
+    if (!card) { box.dataset.card = ""; box.replaceChildren(); return; }
+    const lines = rescueLines(card, m.exercise);
+    if (box.dataset.card === lines.join("|")) return;
+    box.dataset.card = lines.join("|");
+    box.replaceChildren();
+    lines.forEach((line) => { const el = document.createElement("span"); el.textContent = line; box.appendChild(el); });
+  }
+  // a ring carries a CSS animation, so one already pointing at the same finger is
+  // kept rather than rebuilt: a new element every frame would restart the animation
+  function ringAt(kept, kind, id, x, y) {
+    const tag = `${kind}:${id}`;
+    const ring = kept[tag] || document.createElementNS(NS, "circle");
+    ring.setAttribute("class", `ring ${kind}`);
+    ring.dataset.ring = tag;
+    ring.setAttribute("cx", x); ring.setAttribute("cy", y); ring.setAttribute("r", 0.055);
+    return ring;
+  }
+  // the two hand zones of SPEC section 9, in the dashed style of the start check
+  function placementZones(overlay, span) {
+    [0.3, 0.7].forEach((centre) => {
+      const zone = document.createElementNS(NS, "rect");
+      zone.setAttribute("class", "zone-box");
+      zone.setAttribute("x", (centre - 0.15) * span); zone.setAttribute("y", 0.275);
+      zone.setAttribute("width", 0.3 * span); zone.setAttribute("height", 0.55);
+      zone.setAttribute("rx", 0.06);
+      overlay.appendChild(zone);
+    });
+  }
+  // the wrong hand, outlined where it is. Nothing is drawn on the hand that is right.
+  function handOutline(overlay, fingers) {
+    if (!fingers.length) return;
+    const xs = fingers.map((f) => f.x), ys = fingers.map((f) => f.y), pad = 0.06;
+    const box = document.createElementNS(NS, "rect");
+    box.setAttribute("class", "hand-box");
+    box.setAttribute("x", Math.min.apply(null, xs) - pad); box.setAttribute("y", Math.min.apply(null, ys) - pad);
+    box.setAttribute("width", Math.max.apply(null, xs) - Math.min.apply(null, xs) + pad * 2);
+    box.setAttribute("height", Math.max.apply(null, ys) - Math.min.apply(null, ys) + pad * 2);
+    box.setAttribute("rx", 0.06);
+    overlay.appendChild(box);
   }
   function drawFingers(m, stage) {
     const overlay = $(".practice-overlay", stage);
     if (!overlay) return;
     const span = fitOverlay(stage);
+    const kept = {};
+    $$(".ring", overlay).forEach((el) => { kept[el.dataset.ring] = el; });
     overlay.replaceChildren();
     const key = (f) => `${f.hand}:${f.number}`;
     const wrong = new Set((m.wrong || []).map(key));
     const match = new Set((m.match || []).map(key));
-    const hint = m.hint || {};
-    const ghost = (m.hint_level >= 2 && hint.hand && hint.move_to) ? `${hint.hand}:${hint.move_to}` : null;
-    for (const finger of m.fingers || []) {
+    const visual = m.tutor_visual || null;
+    const kind = visual ? visual.kind : null;
+    const ghost = kind === "ghost" && visual.hand && visual.to ? `${visual.hand}:${visual.to}` : null;
+    const pulse = kind === "pulse_finger" && visual.hand && visual.finger ? `${visual.hand}:${visual.finger}` : null;
+    const expect = kind === "correction" && visual.wrong_hand && visual.expected_finger ? `${visual.wrong_hand}:${visual.expected_finger}` : null;
+    const fingers = m.fingers || [];
+    if (kind === "placement_zones") placementZones(overlay, span);
+    if (kind === "correction") {
+      handOutline(overlay, fingers.filter((f) => f.hand === visual.wrong_hand).map((f) => ({ x: f.x * span, y: f.y })));
+    }
+    for (const finger of fingers) {
       const id = key(finger);
-      const colour = wrong.has(id) ? "#c06214" : match.has(id) ? "#3f7d2a" : "#f4f0e8";
-      if (id === ghost) {
-        const ring = document.createElementNS(NS, "circle");
-        ring.setAttribute("class", "ghost"); ring.setAttribute("cx", finger.x * span); ring.setAttribute("cy", finger.y); ring.setAttribute("r", 0.055);
-        overlay.appendChild(ring);
-      }
+      const colour = wrong.has(id) ? "#f79433" : match.has(id) ? "#2fae82" : "#f4f6fd";
+      if (id === ghost) overlay.appendChild(ringAt(kept, "ghost", id, finger.x * span, finger.y));
+      if (id === pulse) overlay.appendChild(ringAt(kept, "pulse", id, finger.x * span, finger.y));
       const c = document.createElementNS(NS, "circle");
       c.setAttribute("cx", finger.x * span); c.setAttribute("cy", finger.y); c.setAttribute("r", 0.036);
-      c.setAttribute("fill", "rgba(43,39,36,0.78)"); c.setAttribute("stroke", colour); c.setAttribute("stroke-width", 0.006);
+      c.setAttribute("fill", "rgba(42,48,80,0.78)"); c.setAttribute("stroke", colour); c.setAttribute("stroke-width", 0.006);
       c.dataset.number = finger.number;
       overlay.appendChild(c);
+      if (id === expect) {
+        const dot = document.createElementNS(NS, "circle");
+        dot.setAttribute("class", "dot");
+        dot.setAttribute("cx", finger.x * span); dot.setAttribute("cy", finger.y - 0.052); dot.setAttribute("r", 0.014);
+        overlay.appendChild(dot);
+      }
       const t = document.createElementNS(NS, "text");
       t.setAttribute("x", finger.x * span); t.setAttribute("y", finger.y + 0.019); t.setAttribute("fill", colour);
+      if (kind === "finger_numbers") t.setAttribute("class", "lit");
       t.dataset.number = finger.number; t.textContent = finger.number;
       overlay.appendChild(t);
     }
@@ -924,7 +1099,9 @@
     $("#finish").hidden = false;
     document.body.dataset.view = "finish";
     decorate($("#finish"));
-    speak(sub, $("#fn-1 .tally"));
+    // the card is written by the template above: Tally says exactly what it shows
+    say($("#fn-1 h1"), undefined, $("#fn-1 .tally"));
+    say($("#fn-1 .sub"), undefined, $("#fn-1 .tally"));
     countUp(gain, before, after);
   }
   // the XP counts up over a second, the bar and the level name follow; then the level up card
@@ -948,7 +1125,11 @@
     if (!a || !b || $("#finish").hidden) return;
     a.classList.add("out"); b.classList.add("show");
     setTimeout(() => { const f = $("#fn-f2"); if (f) f.style.width = `${L.levelInfo(xp()).percent}%`; }, 500);
-    speak(`Level up! ${$("#fn-2 h1").textContent}.`, $("#fn-2 .tally"));
+    // the level up card, line by line as it is shown: the level, the name, the reward
+    const host = $("#fn-2 .tally");
+    say($("#fn-2 .newlevel"), undefined, host);
+    say($("#fn-2 h1"), undefined, host);
+    say($("#fn-2 .earned") || $("#fn-2 .sub"), undefined, host);
   }
   // glasses are the one plural: "Tally got glasses", "Tally got a wizard hat"
   function accessoryText(key) {
@@ -956,7 +1137,7 @@
     return key === "glasses" ? `<b>${label}</b>` : `a <b>${label}</b>`;
   }
   function confetti() {
-    const colors = ["#3f7d2a", "#2f6f6a", "#d9a227", "#c06214", "#8a6fb3"];
+    const colors = ["#2563d9", "#36a9f5", "#2fae82", "#ef5a4f", "#f8c62c", "#8b6ee0"];
     let out = `<div class="confetti" aria-hidden="true">`;
     for (let i = 0; i < 46; i++) {
       out += `<i style="left:${Math.random() * 100}%;background:${colors[i % colors.length]};animation-duration:${1.8 + Math.random() * 1.6}s;animation-delay:${Math.random() * 0.7}s;--dx:${Math.round(Math.random() * 160 - 80)}px;--rot:${Math.round(Math.random() * 720 - 360)}deg"></i>`;
@@ -981,6 +1162,9 @@
     videoOff($(".practice-video", $("#lesson")));
     gateVoice(false);
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+    // a line cut off on the way out still closes its pair, or the next one would
+    // open without one and the tutor's clock would never start
+    ttsSay(false);
     lesson = null;
   }
   function backToMap() {
@@ -992,6 +1176,10 @@
   }
 
   // ---------- profile ----------
+  // the levels that hand out something to wear, in order: 2, 4, 6, 8, 10
+  function accessoryLevels() {
+    return Object.keys(L.ACCESSORIES).map(Number).sort((a, b) => a - b);
+  }
   function renderProfile() {
     const info = L.levelInfo(xp());
     const who = name();
@@ -1001,13 +1189,24 @@
     $("#pf-xp").textContent = info.next ? `${info.inLevel} / ${info.span}` : `${info.xp} XP`;
     $("#pf-fill").style.width = `${info.percent}%`;
     $("#pf-next").textContent = info.next ? `${info.toNext} XP to ${info.next}` : "Top level. Tally has everything.";
+    // the gear row: what Tally wears now, and what is still waiting for him
+    const worn = new Set(info.accessories.split(" ").filter(Boolean));
+    $("#pf-wardrobe").innerHTML = accessoryLevels().map((level) => {
+      const acc = L.ACCESSORIES[level];
+      const wear = L.ACCESSORY_NAMES[acc];
+      const on = worn.has(acc);
+      return `<span class="slot${on ? " on" : ""}" title="${on ? wear : `${wear} at level ${level}`}"><img src="art/acc-${acc}.png" alt="${wear}"></span>`;
+    }).join("");
     $("#pf-list").innerHTML = L.LEVELS.map((lv, i) => {
       const n = i + 1;
       const acc = L.earnedAt(n);
       const wear = acc ? L.ACCESSORY_NAMES[acc] : "";
       const cls = n < info.level ? " got" : n === info.level ? " now" : "";
-      const tag = n === info.level ? "You are here" : n < info.level ? (wear || "Done") : (wear ? `${wear} at ${lv.at} XP` : `${lv.at} XP`);
-      return `<div class="pf-row${cls}"><span class="no">${n}</span><span class="nm">${lv.name}</span><span class="tag">${tag}</span></div>`;
+      const item = acc ? `<img class="item" src="art/acc-${acc}.png" alt="${wear}" title="${wear}">` : "";
+      const tail = n <= info.level
+        ? `${n === info.level ? `<span class="tag">You are here</span>` : ""}<span class="mark">${use("icon-check")}</span>`
+        : `<span class="tag">${lv.at} XP</span>`;
+      return `<div class="pf-row${cls}"><span class="no">${n}</span><span class="nm">${lv.name}</span><span class="pf-side">${item}${tail}</span></div>`;
     }).join("");
     decorate($("#profile"));
   }
@@ -1026,6 +1225,8 @@
     else if (action === "unit") { unitAt = Number(el.dataset.u); renderCourse(); }
     else if (action === "profile") { leaveLesson(); go("profile"); }
     else if (action === "mute") setMuted(!muted);
+    // help the child asked for, the only help that costs the first try bonus
+    else if (action === "help") { if (lesson) sendLesson({ type: "hint" }); }
     // a refusal is not final: an explicit tap on the mic asks the browser again
     else if (action === "mic") {
       if (voice.denied) { voice.denied = false; voice.wanted = true; startVoice(); }

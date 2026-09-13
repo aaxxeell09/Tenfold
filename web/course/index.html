@@ -8,7 +8,7 @@
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="styles.css?v=6">
+<link rel="stylesheet" href="styles.css?v=7">
 <!-- Nunito is a nicety, not a dependency: loaded for print first so it can never
      block the first paint, then promoted once it is there. With no network the
      page paints at once on the fallback stack in styles.css. -->
@@ -22,6 +22,7 @@
   <section class="centered welcome view" id="welcome" hidden>
     <div class="stack">
       <div class="tally" data-tally="happy" aria-hidden="true"></div>
+      <p class="wordmark-big">tenfold</p>
       <h1>Hi! I am Tally. What is your name?</h1>
       <form id="welcome-form" autocomplete="off">
         <input class="field" id="welcome-name" type="text" maxlength="14" placeholder="Your first name" aria-label="Your first name" style="text-align:center">
@@ -33,12 +34,12 @@
   <!-- home: two doors. Learn is a showcase, Practice is the real path -->
   <section class="hub view" id="home" hidden>
     <nav class="minibar" aria-label="More">
-      <a class="levelbox" href="#profile" data-levelbox>
-        <div class="tally avatar" data-tally="happy" data-outfit></div>
-        <div class="lvl"><div class="lvl-top"><b data-level-name></b><span data-level-xp></span></div><div class="bar2 lvl-bar"><i data-level-fill style="width:0%"></i></div></div>
-      </a>
+      <a class="profile-btn" href="#profile" aria-label="Profile"><img src="art/profile-btn.png" alt=""></a>
     </nav>
-    <h1 id="greeting">Which door today?</h1>
+    <div class="hub-head">
+      <p class="wordmark-big">tenfold</p>
+      <h1 id="greeting">Which door today?</h1>
+    </div>
     <div class="doors">
       <a class="door" href="#learn">
         <div class="door-top"><div class="kicker">Four units</div><h2>Learn</h2></div>
@@ -50,7 +51,7 @@
       <a class="door door-blue" href="#check">
         <div class="door-top"><div class="kicker">Camera and voice</div><h2>Practice</h2></div>
         <div class="door-body">
-          <div class="tally" data-tally="hands" aria-hidden="true"></div>
+          <div class="tally hands-art" data-tally="hands" aria-hidden="true"></div>
           <p>Practice with your hands</p>
         </div>
       </a>
@@ -88,7 +89,7 @@
   <!-- practice: the real path from levels.js, one unit at a time -->
   <section class="pp view" id="practice" hidden>
     <div class="pp-top">
-      <a class="backbtn2" href="#home" aria-label="Back"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M 28 12 L 16 24 L 28 36" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
+      <a class="backbtn2" href="#home" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
       <div><p class="sub">Practice path</p><h1 id="crumb">Meet your fingers</h1></div>
       <a class="levelbox" href="#profile" data-levelbox>
         <div class="tally avatar" data-tally="happy" data-outfit></div>
@@ -117,12 +118,16 @@
       <img class="practice-video" alt="">
       <svg class="practice-overlay" viewBox="0 0 1.333 1" preserveAspectRatio="none"></svg>
       <span class="camtag">camera</span>
-      <div class="stepnum"><i class="on"></i><i></i><i></i></div>
+      <div class="stepnum">
+        <img src="art/tile-1-on.png" alt="Step 1" data-step="1">
+        <img src="art/tile-2-off.png" alt="" data-step="2">
+        <img src="art/tile-3-off.png" alt="" data-step="3">
+      </div>
       <div class="zone l"></div>
       <div class="zone r"></div>
       <div class="banner-top" id="check-banner">That is a 6 and a 6.</div>
       <div class="result" id="check-result">36</div>
-      <div class="bigcheck"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M 11 25 L 20 34 L 37 14" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <div class="bigcheck"><img src="art/n-done.png" alt=""></div>
       <div class="micpill" id="check-mic" hidden>
         <svg viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-mic"></use></svg>
         <span class="bars"><i></i><i></i><i></i><i></i></span>
@@ -138,7 +143,7 @@
 
   <!-- profile: Tally, the level and the ladder -->
   <section class="pf view" id="profile" hidden>
-    <a class="backbtn2" href="#home" aria-label="Back"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M 28 12 L 16 24 L 28 36" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
+    <a class="backbtn2" href="#home" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
     <section class="pf-left">
       <div class="tally" id="pf-tally" data-tally="happy" data-outfit></div>
       <p class="pf-who" id="pf-who"></p>
@@ -149,6 +154,8 @@
         <div class="pf-track"><i id="pf-fill" style="width:0%"></i></div>
       </div>
       <p class="pf-next" id="pf-next"></p>
+      <p class="pf-wardlabel">Tally's gear</p>
+      <div class="pf-wardrobe" id="pf-wardrobe"></div>
     </section>
     <section class="pf-right">
       <h2>Tally's levels</h2>
@@ -168,8 +175,8 @@
 
 </div>
 
-<script src="levels.js?v=6"></script>
-<script src="tally.js?v=6"></script>
-<script src="app.js?v=6"></script>
+<script src="levels.js?v=7"></script>
+<script src="tally.js?v=7"></script>
+<script src="app.js?v=7"></script>
 </body>
 </html>
