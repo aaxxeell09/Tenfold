@@ -122,3 +122,17 @@ gate never compares a candidate on today's data with a baseline on yesterday's. 
 `data/snapshot.json` are pushed, so the dashboard shows each data refresh as its own point: the score can drop
 when harder captures arrive, then climb back as the critic adapts. The money cap holds across cycles
 (`loop/watch-state.json`); the log is `loop/watch.log`, the critic's output `loop/watch-critic.out`.
+
+## Live arm
+
+`app/live_samples.py` records real windows from real lessons into `data/live_samples.jsonl`: the last stable
+windows before an exercise is validated by a correct answer, and the windows of a wrong pose still held after a
+correction, each carrying the pose the classifier saw and the pose the exercise asked for. Nothing is written
+from the demo scenario or the mock camera, and `data/samples.jsonl` is never touched.
+
+This data is weakly labelled. A pose is in the file because the classifier that was running accepted it, so the
+file carries that classifier's bias, and a classifier trained on it can reinforce its own mistakes. The windows
+that would teach it the most are exactly the ones it labelled wrong.
+
+So it is a separate arm: `split` is `live`, not `train`, and it is never merged into train without passing the
+held-out gate. The mixing rule, how much of it enters an evaluation and under what weight, is Ilan's to decide.
