@@ -539,7 +539,9 @@ def test_a_second_tab_cannot_take_the_running_node_and_a_reload_can():
 def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node():
     """The second tab is refused its node but keeps its keys, buttons and microphone.
     Over the real socket, none of what it sends may reach the first tab's lesson."""
-    first_node = {"id": "check", "kind": "check", "pairs": [[6, 6]], "count": 1}
+    # The gate is the node that holds still: it carries no exercise, so the mock
+    # never skips it out from under the test while the second tab is refused.
+    first_node = {"id": "check", "kind": "check", "pairs": [[6, 6]]}
     second_node = {"id": "u1-l2", "kind": "lesson", "pairs": [[6, 7]]}
 
     async def scenario():
@@ -550,7 +552,7 @@ def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node()
             first = await client.ws_connect("/ws")
             await first.send_json({"type": "start_node", "tab": "one", "state": None,
                                    "node": first_node})
-            # the mock never skips inside the check, so the pose latches and waits
+            # the gate arms the pose its step asks for, so the pose latches and waits
             await _await(first, lambda m: m.get("node") == "check"
                          and m.get("state") == "correct_pose")
 
@@ -567,16 +569,12 @@ def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node()
             assert lesson.engine.latched, "repeat reached the running node"
             assert lesson.hint_level == 0, "hint reached the running node"
             assert lesson.scheduler.outcomes == [], "check or next reached the running node"
+            assert lesson.pick is None, "the gate drew an exercise"
 
-            # The node label no longer fixes the fact, amendment F10, so the
-            # answer is whatever was actually drawn, and the mock keeps cycling,
-            # so wait for the pose to be latched again before answering.
-            await _await(first, lambda m: m.get("node") == "check"
-                         and m.get("state") in ("correct_pose", "waiting_answer"))
-            pick = lesson.pick
-            await first.send_json({"type": "check", "value": pick.left * pick.right})
-            ended = await _await(first, lambda m: m.get("type") == "node_end")
-            assert ended["node_id"] == "check" and ended["correct"] == 1
+            # the owner's own quit does end it, which is how the page leaves a gate
+            await first.send_json({"type": "quit"})
+            await asyncio.sleep(0.3)
+            assert not lesson.running and lesson.node is None
             await first.close()
             await second.close()
         finally:
@@ -1374,7 +1372,9 @@ def test_the_camera_check_is_where_the_jitter_is_measured():
     gesture = GestureState(method="unknown", confidence=0.2)
     for step in range(5):
         lesson.observe(gesture, _hands(), 2, step / 15, palm=0.1)
-    lesson.command({"type": "next"})             # the check is one exercise
+    # The gate carries no exercise, so it ends the way the page ends it.
+    assert lesson.pick is None, "a gate draws nothing"
+    lesson.command({"type": "quit"})
     assert ("check_end", None) in _spoke(lesson)
 
 
@@ -1715,6 +1715,26 @@ def test_the_window_count_falls_back_to_eight_without_the_key(tmp_path):
     assert server.windows_from_params(server.load_tutor_params(chosen)) == 5
 
 
+class CountingWriter:
+    """A writer that keeps nothing and counts what it was asked to keep."""
+
+    enabled = True
+
+    def __init__(self) -> None:
+        self.offered = 0
+        self.confirmed = 0
+        self.errors = 0
+
+    def offer(self, window, state):
+        self.offered += 1
+
+    def confirm_correct(self, *args):
+        self.confirmed += 1
+
+    def record_gesture_error(self, *args):
+        self.errors += 1
+
+
 class ExplodingWriter:
     """A writer whose every call raises, which is what a writer must never do."""
 
@@ -1805,49 +1825,6 @@ def test_a_writer_that_raises_on_the_frame_path_is_not_a_camera_failure(monkeypa
     assert lesson.hub.message["tally"] != server.CAMERA_LOST
     assert lesson.fault is None, "a sample is never worth the camera"
 
-
-
-def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node():
-    """The second tab is refused its node but keeps its keys, buttons and microphone.
-    Over the real socket, none of what it sends may reach the first tab's lesson."""
-    first_node = {"id": "check", "kind": "check", "pairs": [[6, 6]], "count": 1}
-    second_node = {"id": "u1-l2", "kind": "lesson", "pairs": [[6, 7]]}
-
-    async def scenario():
-        app = server.create_app(mock=True)
-        lesson = app[server.LESSON_KEY]
-        srv, client = await _client(app)
-        try:
-            first = await client.ws_connect("/ws")
-            await first.send_json({"type": "start_node", "tab": "one", "state": None,
-                                   "node": first_node})
-            # the mock never skips inside the check, so the pose latches and waits
-            await _await(first, lambda m: m.get("node") == "check"
-                         and m.get("state") == "correct_pose")
-
-            second = await client.ws_connect("/ws")
-            await second.send_json({"type": "start_node", "tab": "two", "state": None,
-                                    "node": second_node})
-            await _await(second, lambda m: m.get("tally") == server.ALREADY_PLAYING)
-            for command in ({"type": "hint"}, {"type": "repeat"},
-                            {"type": "check", "value": 36}, {"type": "next"},
-                            {"type": "quit"}):
-                await second.send_json(command)
-            await asyncio.sleep(0.3)
-            assert lesson.running and lesson.node["id"] == "check", "the node was taken"
-            assert lesson.engine.latched, "repeat reached the running node"
-            assert lesson.hint_level == 0, "hint reached the running node"
-            assert lesson.scheduler.outcomes == [], "check or next reached the running node"
-
-            await first.send_json({"type": "check", "value": lesson.pick.result})
-            ended = await _await(first, lambda m: m.get("type") == "node_end")
-            assert ended["node_id"] == "check" and ended["correct"] == 1
-            await first.close()
-            await second.close()
-        finally:
-            await client.close()
-            await srv.close()
-    run(scenario())
 
 
 def test_only_the_owner_changes_the_session_and_its_page_can_take_it_back():
@@ -1947,3 +1924,62 @@ def test_the_palm_the_camera_measured_reaches_the_tutor():
     lesson.observe(gesture, _hands(), 2, 1.0)
 
     assert lesson.tutor.tutor.palms == [0.11, None], "measured, then not measured"
+
+
+def test_the_mock_puts_the_touching_fingertips_together():
+    """The tutor reads the gap between the two named tips against the palm.
+
+    A mock that claims contact with the hands a third of a frame apart is a
+    pose the tutor refuses, and then nothing above L0 ever shows on the stage
+    fallback. The two tips the gesture names meet in the middle instead.
+    """
+    import math
+
+    touching = GestureState(method="6-10", left=7, right=8, contact=True, confidence=0.9)
+    tips = {(f["hand"], f["number"]): (f["x"], f["y"])
+            for f in server.mock_fingers(3, touching)}
+    left, right = tips[("left", 7)], tips[("right", 8)]
+    assert math.hypot(left[0] - right[0], left[1] - right[1]) < 0.01
+    # the other fingers stay where they were: a hand, not a pile of points
+    assert abs(tips[("left", 6)][0] - 0.32) < 0.1
+    assert abs(tips[("right", 10)][0] - 0.68) < 0.1
+
+    apart = GestureState(method="6-10", left=7, right=8, contact=False, confidence=0.9)
+    tips = {(f["hand"], f["number"]): f["x"] for f in server.mock_fingers(3, apart)}
+    assert tips[("left", 7)] < 0.45 < 0.55 < tips[("right", 8)]
+    assert server.mock_fingers(3) == server.mock_fingers(3, apart)
+
+
+def test_the_gate_node_draws_nothing_scores_nothing_and_writes_nothing():
+    """The check node is the start gate: the perception stream and no exercise."""
+    lesson = _lesson()
+    lesson.live = CountingWriter()
+    lesson.command({"type": "start_node", "state": None, "node": {
+        "id": "check", "kind": "check", "steps": ["hands", "ready"], "pairs": []}})
+    assert lesson.running and lesson.gate and lesson.pick is None
+    assert lesson.scheduler.history == [], "a gate draws no fact"
+
+    correct = GestureState(method="6-10", left=6, right=6, contact=True, confidence=0.9)
+    for step in range(12):
+        lesson.observe(correct, _hands(), 2, step / 15)
+    lesson.command({"type": "check", "value": 36})
+    lesson.command({"type": "next"})
+    assert lesson.running and lesson.gate, "next and check do not move a gate"
+    assert lesson.scheduler.outcomes == [] and lesson.correct == 0
+    assert lesson.live.confirmed == 0 and lesson.live.errors == 0
+
+    # the pose step of a first pass names its pair: the engine is armed on it
+    # so the verdict reaches the page, and still nothing is recorded
+    lesson.command({"type": "quit"})
+    lesson.command({"type": "start_node", "state": None, "node": {
+        "id": "check", "kind": "check", "steps": ["hands", "pose", "ready"],
+        "pairs": [[6, 6]]}})
+    assert lesson.pick is None and lesson.engine.exercise.a == 6
+    for step in range(12):
+        lesson.observe(correct, _hands(), 2, step / 15)
+    assert lesson.engine.latched, "the gate's pose step reads the pose"
+    assert lesson.hub.message["state"] == "correct_pose"
+    lesson.command({"type": "check", "value": 36})
+    assert lesson.scheduler.outcomes == [] and lesson.live.confirmed == 0
+    lesson.command({"type": "quit"})
+    assert not lesson.running and not lesson.gate

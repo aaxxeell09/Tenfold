@@ -785,6 +785,8 @@ class Lesson:
         self.recorded = False
         self.finished = False
         self.node: dict[str, Any] | None = None
+        # True while the running node is the start gate rather than a lesson.
+        self.gate = False
         self.correct = 0
         self.demo_available = False
         # Set once perception is gone. It rides on every message from then on,
@@ -893,6 +895,9 @@ class Lesson:
         now = time.monotonic()
         if self.pick is not None:
             self.tutor.ended(_reason_for(self.answer_correct), now)
+        if self.gate:
+            self._serve_gate()
+            return
         # A course node fixes its length, and the page scores the child out of
         # that length. The live scheduler stops there on its own; the scripted
         # demo plays its file to the end, so the count is enforced here for both.
@@ -936,6 +941,36 @@ class Lesson:
                             (self.node or {}).get("id"), now)
         self.trace("exercise", pick.to_dict())
         self.push(update, reaction=pick.reason)
+
+    def _serve_gate(self) -> None:
+        """Open the stream the start gate reads, with no exercise behind it.
+
+        The gate has at most one thing to verify, the pose step a child sees
+        once, and the page names the pair for it. The engine is armed on that
+        pair so the verdict reaches the page, and that is all: self.pick stays
+        None, so nothing scores, nothing is recorded and no live sample is
+        written. A gate that names no pair arms nothing at all.
+        """
+        self.pick = None
+        self.hint_level = 0
+        self.hint_auto = False
+        self.scored_gesture_error = False
+        self.scored_math_error = False
+        self.correct_pose = False
+        self.answer_correct = False
+        self.wrong_since = None
+        self.wrong_hand = None
+        self.said_cannot_see = False
+        self.unknown_since = None
+        self.recorded = False
+        self.started_at = time.monotonic()
+        pairs = [pair for pair in (self.node or {}).get("pairs") or [] if len(pair) >= 2]
+        if pairs:
+            left, right = int(pairs[0][0]), int(pairs[0][1])
+            update = self.engine.load(Exercise(left, right))
+        else:
+            update = self.engine.snapshot()
+        self.push(update)
 
     def _mastered_pick(self) -> Pick | None:
         """One fact the child already owns, to end an early stop on a success.
@@ -982,6 +1017,7 @@ class Lesson:
         })
         self.node = None
         self.pick = None
+        self.gate = False
         self.running = False
         self.owner = None
         self.owner_tab = None
@@ -1257,6 +1293,11 @@ class Lesson:
             self.tutor.check_started()
 
         self.node = dict(node)
+        # A gate is not an exercise. The check node opens the perception stream
+        # for the start gate and nothing else: no fact is drawn, no outcome is
+        # recorded, no window is kept. The page runs the steps and ends the node
+        # with quit when the child is ready.
+        self.gate = node.get("kind") == "check"
         self.owner = client
         self.owner_tab = tab
         self.correct = 0
@@ -1317,9 +1358,18 @@ class Lesson:
         return scheduler
 
     def _quit(self) -> None:
-        """The child left the lesson. Nothing is recorded, nothing is scored."""
+        """The child left the lesson. Nothing is recorded, nothing is scored.
+
+        The gate leaves this way and no other: it has no length to run out of,
+        so the page ends it when its steps are passed, and the still hands
+        measurement is closed here rather than at the end of a session that
+        never happens.
+        """
+        if self.gate and self.running:
+            self.tutor.check_ended()
         self.node = None
         self.pick = None
+        self.gate = False
         self.finished = True
         self.running = False
         self.owner = None
@@ -1551,8 +1601,15 @@ def mock_gestures(exercise: Any) -> tuple[GestureState, GestureState, GestureSta
 MOCK_PHASES = 3
 
 
-def mock_fingers(step: int) -> list[dict[str, Any]]:
-    """Ten plausible fingertips, drifting a little so the overlay visibly lives."""
+def mock_fingers(step: int, gesture: GestureState | None = None) -> list[dict[str, Any]]:
+    """Ten plausible fingertips, drifting a little so the overlay visibly lives.
+
+    When the gesture says two fingers touch, those two tips meet in the middle
+    of the frame, the way two hands making the pose do. The tutor reads the gap
+    between them against the palm and refuses a touch held apart, so a mock
+    that only claimed contact left the whole tutor layer dark: no
+    acknowledgement, no colours, no ghost. The stage fallback has to light it.
+    """
     drift = 0.01 * ((step % 4) - 1.5)
     out = []
     for hand, base_x in (("left", 0.32), ("right", 0.68)):
@@ -1564,6 +1621,13 @@ def mock_fingers(step: int) -> list[dict[str, Any]]:
                 "x": round(base_x + (spread if hand == "left" else -spread), 4),
                 "y": round(0.52 - abs(index - 2) * 0.045 + drift, 4),
             })
+    if (gesture is not None and gesture.contact
+            and gesture.left is not None and gesture.right is not None):
+        for tip in out:
+            if ((tip["hand"] == "left" and tip["number"] == gesture.left)
+                    or (tip["hand"] == "right" and tip["number"] == gesture.right)):
+                tip["x"] = 0.5
+                tip["y"] = round(0.5 + drift, 4)
     return out
 
 
@@ -1598,7 +1662,7 @@ def mock_loop(lesson: Lesson, stop: threading.Event) -> None:
             step = slot
         gesture = mock_gestures(lesson.engine.exercise)[phase]
         hands = 0 if gesture.method == "unknown" else 2
-        fingers = mock_fingers(slot) if hands else []
+        fingers = mock_fingers(slot, gesture) if hands else []
         lesson.observe(gesture, fingers, hands, now)
         time.sleep(1 / 30)
 
