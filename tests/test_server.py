@@ -11,6 +11,7 @@ import random
 import json
 import logging
 import threading
+import time
 from datetime import timedelta
 from pathlib import Path
 
@@ -1450,6 +1451,8 @@ def test_the_seam_is_aligned_with_app_tutor_as_it_stands():
 
     correct = _answered_right(lesson, at=2.0)
     assert correct["first_try"] is True, "nothing was asked for and nothing scored"
+    # the success beat holds the node's end back; the test does not wait for it
+    lesson.settle_beat()
     assert lesson.hub.message["state"]["tutor"]["tutor_observations"] == 1
 
 
@@ -1983,3 +1986,32 @@ def test_the_gate_node_draws_nothing_scores_nothing_and_writes_nothing():
     assert lesson.scheduler.outcomes == [] and lesson.live.confirmed == 0
     lesson.command({"type": "quit"})
     assert not lesson.running and not lesson.gate
+
+
+def test_the_success_beat_holds_the_next_exercise_back():
+    """The yes was cut off by the next exercise arriving in the same millisecond.
+
+    With a beat on the wire the server waits its total_ms before advancing;
+    without one, the stub tutor's case, it advances at once as it always did.
+    """
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=3)})
+    first = lesson.pick
+    lesson.tutor.tutor.decision = {"tutor_beat": {
+        "kind": "success", "parts": ["line", "halo", "stars", "counter"],
+        "success_ms": 60, "pause_ms": 40, "total_ms": 100,
+        "line": "Yes.", "next_line": "Next one."}}
+    _answered_right(lesson, at=1.0)
+    assert lesson.hub.message["state"] == "answer_correct"
+    assert lesson.pick is first, "the next exercise waited for the beat"
+    time.sleep(0.3)
+    assert lesson.pick is not first and lesson.hub.message["state"] == "exercise_shown"
+
+    # a node that moves on under a pending beat lets it go without firing
+    second = lesson.pick
+    _answered_right(lesson, at=2.0)
+    assert lesson.pick is second
+    lesson.command({"type": "quit"})
+    time.sleep(0.3)
+    assert not lesson.running and lesson.pick is None
