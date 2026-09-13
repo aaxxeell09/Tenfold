@@ -7,14 +7,15 @@ and a Weave Leaderboard that ranks them.
 
 Every row is one lesson moment: an event of lesson/tally.py with the context app/server.py passes. Each model gets
 the exact prompt the live tutor sends (lesson.tutor.build_messages) under the live tutor's settings, and its reply
-is scored in code against Tally's rules (SPEC.md section 8):
-  safe_words     never says wrong, no or incorrect
-  short          20 words or fewer
-  no_spoiler     the product never appears before the child has typed an answer
-  keeps_numbers  every number in Tally's line survives (the finger to move, the answer)
-  in_time        answered inside the live tutor's 1.5 s window, so the line is actually heard
-and by a judge model on W&B Inference (never one of the candidates) for warmth and clarity to a 7 year old, 1 to 5.
-Every call runs on CoreWeave through W&B Inference and is traced with its token usage.
+is scored in code by lesson/tutor_rules.py, the same rules the live lesson attaches to every tutor.call:
+  non_empty, concise, safe_words, no_spoiler, correction_consistency, in_time   (see lesson/tutor_rules.py)
+plus keeps_numbers, which needs Tally's own line for the moment and so runs offline only: every number in Tally's
+line survives. Each rule is pass, fail, not_applicable or not_verifiable, and only pass and fail count in a fraction.
+A judge model on W&B Inference (never one of the candidates) rates warmth and clarity to a 7 year old, 1 to 5.
+
+Scorer version: tutor_rules.SCORER_VERSION, published as Evaluation EVALUATION with scorer tally_rules_v2 and
+Leaderboard LEADERBOARD. The earlier tally-voice runs used the v1 rules (digits only spoiler check, no hand or
+from/to check): their scores are not comparable with these, which is why the names changed.
 """
 from __future__ import annotations
 
@@ -34,18 +35,21 @@ sys.path.insert(0, str(REPO))
 
 import httpx  # noqa: E402
 
-from lesson import tally  # noqa: E402
+from lesson import tally, tutor_rules  # noqa: E402
 from lesson.tutor import DEFAULT_BASE_URL, build_messages, clean_reply  # noqa: E402
 from tenfold.env import load_env  # noqa: E402
 
 MODELS = ["Qwen/Qwen3-235B-A22B-Instruct-2507", "Qwen/Qwen3-30B-A3B-Instruct-2507", "meta-llama/Llama-3.3-70B-Instruct",
           "deepseek-ai/DeepSeek-V4-Flash", "openai/gpt-oss-120b"]
 JUDGE = "deepseek-ai/DeepSeek-V3.1"
-IN_TIME_MS = 1500  # lesson.tutor.Tutor's default timeout: a later line waits for the next time the moment happens
+IN_TIME_MS = tutor_rules.IN_TIME_MS  # lesson.tutor.Tutor's default timeout: a later line waits for the next time the moment happens
 EXERCISES = [(7, 8), (6, 9), (9, 7)]
+RULES = tutor_rules.RULES + ("keeps_numbers",)
+EVALUATION = "tally-voice-v2"
+LEADERBOARD = "tally-voice-leaderboard-v2"
+SCORER = "tally_rules_v2"
 NUMBER_WORDS = {w: str(i) for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve "
                                                 "thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
-FORBIDDEN = re.compile(r"\b(wrong|no|incorrect)\b", re.IGNORECASE)
 
 
 # ---------- the dataset: lesson moments ----------
@@ -89,37 +93,25 @@ def numbers_in(text: str) -> set[str]:
     return {NUMBER_WORDS.get(w, w) for w in words if w.isdigit() or w in NUMBER_WORDS}
 
 
-def product_of(exercise: str | None) -> int | None:
-    m = re.fullmatch(r"\s*(\d+)\s*x\s*(\d+)\s*", exercise or "")
-    return int(m.group(1)) * int(m.group(2)) if m else None
-
-
-def check_safe_words(text: str) -> bool:
-    return bool(text) and not FORBIDDEN.search(text)
-
-
-def check_short(text: str) -> bool:
-    return 0 < len(text.split()) <= 20
-
-
-def check_no_spoiler(event: str, context: dict, text: str) -> bool:
-    """Before the child answers, the product must not be said. After a correct answer it is the point."""
-    product = product_of(context.get("exercise"))
-    if product is None or event == "answer_correct":
-        return True
-    return str(product) not in numbers_in(text)
-
-
 def check_keeps_numbers(line: str, text: str) -> bool:
     return numbers_in(line) <= numbers_in(text)
 
 
-def score_row(row: dict, output: dict) -> dict[str, bool]:
+def keeps_numbers(line: str, text: str) -> tutor_rules.Check:
+    if not text.strip():
+        return tutor_rules.Check(tutor_rules.NOT_APPLICABLE, "nothing was said")
+    missing = sorted(numbers_in(line) - numbers_in(text))
+    if missing:
+        return tutor_rules.Check(tutor_rules.FAIL, f"drops {', '.join(missing)} from Tally's line")
+    return tutor_rules.Check(tutor_rules.PASS, "every number of Tally's line is said")
+
+
+def score_row(row: dict, output: dict) -> dict[str, Any]:
+    """The shared rules on one reply, plus keeps_numbers. Each rule is {"status", "passed", "reason"}."""
     text = output.get("text") or ""
-    return {"safe_words": check_safe_words(text), "short": check_short(text),
-            "no_spoiler": check_no_spoiler(row["event"], row["context"], text),
-            "keeps_numbers": check_keeps_numbers(row["line"], text),
-            "in_time": bool(text) and (output.get("latency_ms") or 10**9) <= IN_TIME_MS}
+    scores = tutor_rules.score_intervention(row["event"], row["context"], text, output.get("latency_ms"), IN_TIME_MS)
+    scores["keeps_numbers"] = keeps_numbers(row["line"], text).as_dict()
+    return scores
 
 
 def parse_judge(content: str | None) -> dict[str, int | None]:
@@ -190,11 +182,15 @@ def judge(event: str, line: str, text: str, judge_model: str) -> dict[str, int |
 # ---------- runs ----------
 
 def summarize(model: str, rows: list[dict], outputs: list[dict], scores: list[dict], judged: list[dict]) -> dict:
+    """Per rule, the fraction of pass among the rows where the rule gave pass or fail; not_verifiable is counted apart."""
     n = len(rows)
     lat = [o["latency_ms"] for o in outputs if o.get("latency_ms") is not None]
-    out: dict[str, Any] = {"model": model, "n": n, "errors": sum(1 for o in outputs if o.get("error"))}
-    for k in ("safe_words", "short", "no_spoiler", "keeps_numbers", "in_time"):
-        out[k] = round(sum(s[k] for s in scores) / n, 3) if n else None
+    out: dict[str, Any] = {"model": model, "n": n, "errors": sum(1 for o in outputs if o.get("error")),
+                           "scorer_version": tutor_rules.SCORER_VERSION}
+    for k in RULES:
+        decided = [s[k]["passed"] for s in scores if s[k]["passed"] is not None]
+        out[k] = round(sum(decided) / len(decided), 3) if decided else None
+    out["not_verifiable"] = sum(1 for s in scores for k in RULES if s[k]["status"] == tutor_rules.NOT_VERIFIABLE)
     for k in ("warmth", "clarity"):
         vals = [j[k] for j in judged if j.get(k) is not None]
         out[k] = round(statistics.mean(vals), 2) if vals else None
@@ -232,31 +228,31 @@ def run_weave(models: list[str], rows: list[dict], judge_model: str) -> list[dic
         def predict(self, event: str, context: dict) -> dict:
             return speak(self.model, event, context)
 
-    @weave.op
-    def tally_rules(event: str, context: dict, line: str, output: dict) -> dict:
+    @weave.op(name=SCORER)
+    def tally_rules_v2(event: str, context: dict, line: str, output: dict) -> dict:
         return score_row({"event": event, "context": context, "line": line}, output)
 
     @weave.op
     def child_judge(event: str, line: str, output: dict) -> dict:
         return {**judge(event, line, output.get("text") or "", judge_model), "judge": judge_model}
 
-    evaluation = weave.Evaluation(name="tally-voice", dataset=weave.Dataset(name="tally-moments", rows=rows),
-                                  scorers=[tally_rules, child_judge])
+    evaluation = weave.Evaluation(name=EVALUATION, dataset=weave.Dataset(name="tally-moments", rows=rows),
+                                  scorers=[tally_rules_v2, child_judge])
     results = []
     for model in models:
         summary = asyncio.run(evaluation.evaluate(TallyVoice(model=model),
-                                                  __weave={"display_name": f"tally-voice {model.split('/')[-1]}"}))
+                                                  __weave={"display_name": f"{EVALUATION} {model.split('/')[-1]}"}))
         results.append({"model": model, **flatten(summary)})
     try:  # the evaluations are already published; a leaderboard failure must not lose the table
         ref = get_ref(evaluation).uri()
-        columns = [leaderboard.LeaderboardColumn(evaluation_object_ref=ref, scorer_name="tally_rules",
-                                                 summary_metric_path=f"{k}.true_fraction")
-                   for k in ("no_spoiler", "safe_words", "keeps_numbers", "short", "in_time")]
+        columns = [leaderboard.LeaderboardColumn(evaluation_object_ref=ref, scorer_name=SCORER,
+                                                 summary_metric_path=f"{k}.passed.true_fraction") for k in RULES]
         columns += [leaderboard.LeaderboardColumn(evaluation_object_ref=ref, scorer_name="child_judge",
                                                   summary_metric_path=f"{k}.mean") for k in ("warmth", "clarity")]
         weave.publish(leaderboard.Leaderboard(
-            name="tally-voice-leaderboard", description=("Which W&B Inference model speaks for Tally. Rows are lesson moments from "
-                                             "lesson/tally.py; scores are Tally's rules in code plus a judge model."),
+            name=LEADERBOARD, description=("Which W&B Inference model speaks for Tally. Rows are lesson moments from "
+                                           f"lesson/tally.py; scores are {tutor_rules.SCORER_VERSION} in code "
+                                           "(pass among pass or fail) plus a judge model."),
             columns=columns))
     except Exception as e:
         print(f"tutor_eval: leaderboard not published ({type(e).__name__}: {e})", file=sys.stderr)
@@ -269,8 +265,8 @@ def run_weave(models: list[str], rows: list[dict], judge_model: str) -> list[dic
 
 def flatten(summary: dict) -> dict:
     """The Evaluation summary as one flat row for the printed table."""
-    rules, judged = summary.get("tally_rules") or {}, summary.get("child_judge") or {}
-    row = {k: (rules.get(k) or {}).get("true_fraction") for k in ("safe_words", "short", "no_spoiler", "keeps_numbers", "in_time")}
+    rules, judged = summary.get(SCORER) or {}, summary.get("child_judge") or {}
+    row: dict[str, Any] = {k: ((rules.get(k) or {}).get("passed") or {}).get("true_fraction") for k in RULES}
     row.update({k: (judged.get(k) or {}).get("mean") for k in ("warmth", "clarity")})
     lat = summary.get("model_latency") or {}
     row["mean_s"] = round(lat["mean"], 2) if isinstance(lat.get("mean"), (int, float)) else None
@@ -278,8 +274,8 @@ def flatten(summary: dict) -> dict:
 
 
 def print_table(results: list[dict]) -> None:
-    keys = [k for k in ("safe_words", "short", "no_spoiler", "keeps_numbers", "in_time", "warmth", "clarity", "p50_ms",
-                        "mean_s", "tokens", "errors") if any(k in r for r in results)]
+    keys = [k for k in (*RULES, "not_verifiable", "warmth", "clarity", "p50_ms", "mean_s", "tokens", "errors")
+            if any(k in r for r in results)]
     print("\n| model | " + " | ".join(keys) + " |\n|---|" + "---|" * len(keys))
     for r in results:
         print(f"| {r['model']} | " + " | ".join("" if r.get(k) is None else str(r[k]) for k in keys) + " |")
@@ -306,7 +302,8 @@ def main() -> int:
     print_table(results)
     out = Path(a.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"judge": a.judge, "n_moments": len(rows), "results": results}, indent=2))
+    out.write_text(json.dumps({"judge": a.judge, "scorer_version": tutor_rules.SCORER_VERSION,
+                               "n_moments": len(rows), "results": results}, indent=2))
     return 0
 
 
