@@ -271,9 +271,15 @@ def _(datetime, mo, re):
                            "includes no change, so this result does not establish a reliable drop.")
         else:
             badge, text = ("No change observed", "The updated rules scored the same on this retrospective evaluation.")
-        return {"badge": badge, "text": text, "gain": f"{signed(d)} pts",
+        plain = ("A gain, and the likely range stays above zero." if d > 0 and not includes_zero else
+                 "A small gain, but not proven yet: the likely range still includes no gain." if d > 0 else
+                 "A drop, and the likely range stays below zero." if d < 0 and not includes_zero else
+                 "A small drop, but not proven: the likely range still includes no change." if d < 0 else "No change.")
+        ea, eb = (r.get("a") or {}).get("exact_match"), (r.get("b") or {}).get("exact_match")
+        return {"badge": badge, "text": text, "plain": plain, "gain": f"{signed(d)} pts",
                 "ci": f"{signed(lo)} to {signed(hi)} pts" if lo is not None and hi is not None else "",
-                "a": pct(((r.get("a") or {}).get("exact_match")), 2), "b": pct(((r.get("b") or {}).get("exact_match")), 2)}
+                "a": pct(ea, 2), "b": pct(eb, 2),
+                "a_100": "n/a" if ea is None else f"{ea * 100:.0f}", "b_100": "n/a" if eb is None else f"{eb * 100:.0f}"}
 
     return (RETRO_LABEL, basis, comparable, em, kicker, limits, names_for, pct, pill, plain_change, plain_class,
             plain_effect, plain_reason, pts, retro_summary, said, same_pose, section, steps, when)
@@ -349,7 +355,7 @@ def _(best_version, checks, comparable, compare, em, informed, missing, mo, name
         '<h1 class="tf-h1">An AI loop that teaches an app to <em>read</em> children\'s hands.</h1>'
         '<p class="tf-sub-hero">Kids answer a multiplication by touching two fingertips in front of the camera. '
         'Before it can check the answer, the app has to see which fingers touch.</p></div>'
-        f'{_headline}{_limits_html}</div>'
+        f'{_limits_html}</div>'
     )
     return
 
@@ -408,8 +414,8 @@ def _(compare, explorer, mo, set_limit):
 
 
 @app.cell
-def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button, alt, compare, example_pick, explorer,
-      get_limit, icon, kicker, limit_slider, mo, old_rule_button, pd, said, same_pose, steps, style):
+def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button, alt, checks, compare, example_pick,
+      explorer, get_limit, icon, kicker, limit_slider, mo, old_rule_button, pd, said, same_pose, steps, style):
     if example_pick is None or not explorer:
         _view = mo.md("")
     else:
@@ -472,6 +478,15 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
             f'<span class="tf-verdict-icon">{icon("check" if _right else "x", 17, "#fff", 2.6)}</span>'
             f'{"The app reads it right" if _right else "The app reads it wrong"}</div>'
             f'<dl class="tf-rows"><dt>App sees</dt><dd>{said(_answer)}</dd><dt>Child did</dt><dd>{said(_ex["label"])}</dd></dl></div>')
+        # the payoff comes right after the demo: the same hard case, measured on every almost-touching practice gesture
+        _na, _nb = ((compare or {}).get("a") or {}).get("near_contact_accuracy"), ((compare or {}).get("b") or {}).get("near_contact_accuracy")
+        _payoff = mo.Html(
+            f'<div class="tf"><div class="tf-headline"><div class="tf-headline-value"><span class="tf-from">{_na * 100:.0f}</span>'
+            f'<span class="tf-arrow">→</span>{_nb * 100:.0f}<span class="tf-unit">out of 100</span></div>'
+            '<div class="tf-headline-text"><span><b>Across every almost-touching practice gesture</b>, the app reads this many right, '
+            'before the AI and now.</span>'
+            f'<span class="tf-quiet">{compare.get("near_holds")} practice gestures · same data and scorers</span></div></div></div>'
+        ) if checks["compare"] and _na is not None and _nb is not None else mo.md("")
         _keys = mo.Html(
             f'<div class="tf tf-keys"><span class="tf-key"><i class="tf-swatch" style="background:{LEFT_HAND}"></i>left hand</span>'
             f'<span class="tf-key"><i class="tf-swatch" style="background:{RIGHT_HAND}"></i>right hand</span>'
@@ -486,6 +501,7 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
                            mo.hstack([old_rule_button, ai_rule_button], justify="start", wrap=True, gap=0.5),
                            limit_slider, mo.ui.altair_chart(style(_ruler), chart_selection=False, legend_selection=False)], gap=1),
             ], wrap=True, gap=2, align="start"),
+            _payoff,
         ], gap=1)
     _view
     return
@@ -780,11 +796,14 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, gate_since, icon, inform
     _practice_gain = (_b["exact_match"] - _a["exact_match"]) if _a.get("exact_match") is not None and _b.get("exact_match") is not None else None
     _measured_on = _name_of((_retro.get("b") or {}).get("commit")) if _retro else ""
     _retro_pills = ((pill(_rs["badge"]) if _rs else pill("not run"))
-                    + (pill("not verified", "warn") if _retro and not checks["retro"] else "")
-                    + (pill(f"measured on {_measured_on}, not on the rule in use", "warn") if _retro and not retro_current else ""))
+                    + (pill("not verified", "warn") if _retro and not checks["retro"] else ""))
     _pair = f"Original → {_measured_on}" if _retro else ""
-    _gate_note = (f"<br>Since {_names.get(gate_since['tag'], gate_since['tag'])}, the loop also uses these held-back gestures "
-                  "to accept or refuse changes, so they can no longer check later versions independently." if gate_since else "")
+    _in_use_name = next((_names[v["tag"]] for v in informed if v.get("sha") and _best
+                         and (v["sha"].startswith(_best[:7]) or _best.startswith(v["sha"][:7]))), "the rule in use")
+    _gate_note = ((f'<div class="tf-quiet" style="margin-top:8px">Why {_measured_on} and not {_in_use_name}: '
+                   + (f"since {_names.get(gate_since['tag'], gate_since['tag'])}, these gestures help decide which changes to keep, "
+                      "so they can no longer judge the newer fixes fairly." if gate_since else "no report exists yet for the rule in use.")
+                   + '</div>') if _retro and not retro_current else "")
     _method = ((f'<div class="tf-quiet" style="margin-top:10px">Method: these {_retro.get("holds")} gesture holds were set aside after '
                 'earlier development had used the full dataset. Participants are not reliably identified. Evaluation on new users '
                 f'is still needed. ({RETRO_LABEL})</div>') if _retro else "")
@@ -799,10 +818,12 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, gate_since, icon, inform
               else "No verified before and after comparison in this snapshot.",
               pts(_practice_gain) if _practice_gain is not None else ""),
         _rung("partial" if _rs else "next", f"Retrospective evaluation {_retro_pills}",
-              (f"{_pair}: {_rs['a']} → {_rs['b']}, {_rs['gain']} · 95% CI {_rs['ci']}<br>{_rs['text']}{_gate_note}"
+              (f"On {_retro.get('holds')} gestures set aside from practice, {_measured_on} reads <b>{_rs['b_100']}</b> out of 100, "
+               f"against <b>{_rs['a_100']}</b> for the original rule. {_rs['plain']}"
+               f"<br><span class='tf-quiet'>{_pair}: {_rs['a']} → {_rs['b']}, {_rs['gain']} · 95% CI {_rs['ci']}</span>"
                if _rs else "Not in this snapshot."),
               _rs["gain"] if _rs else "",
-              (f'<div class="tf-ci">{_ci_svg(_versions)}</div>' if _versions else "") + _method),
+              (f'<div class="tf-ci">{_ci_svg([_retro])}</div>' if _rs else "") + _gate_note + _method),
         _rung("next", f"Independent evaluation {pill('next')}", "New users the loop has never seen"),
         _rung("later", f"Children's learning {pill('not measured')}",
               "Every check above evaluates gesture recognition, not children's learning outcomes."),
