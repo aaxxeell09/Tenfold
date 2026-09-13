@@ -170,16 +170,26 @@
   // ---------- router ----------
   const VIEWS = ["welcome", "home", "learn", "practice", "check", "profile"];
   let view = "welcome";
+  // The one door every view change goes through, the six routed views, the lesson and
+  // the finish card alike. The screen that is leaving stops talking here: the queue is
+  // emptied, the utterance in flight is cancelled, the tts pair around it is closed and
+  // the memory of the line just said is cleared, before the new screen queues anything.
+  // A line asked for by a screen that is no longer on top is never spoken late, which is
+  // stronger than the staleness test and does not depend on the caller remembering.
+  function enterView(name) {
+    cutSpeech();
+    // a screen the child opens says its lines again: the memory that keeps the map's
+    // line from being repeated on every render starts fresh here
+    speech.lastLine = null;
+    view = name;
+    document.body.dataset.view = name;
+  }
   function show(name) {
     // the Back button is a way out of a running lesson too: without this the node
     // keeps running on the server and Tally talks over the next screen
     if (lesson) leaveLesson();
-    view = name;
-    // a screen the child opens says its lines again: the memory that keeps the map's
-    // line from being repeated on every render starts fresh here
-    speech.lastLine = null;
+    enterView(name);
     VIEWS.forEach((v) => { const el = document.getElementById(v); if (el) el.hidden = v !== name; });
-    document.body.dataset.view = name;
     $("#lesson").hidden = true;
     $("#finish").hidden = true;
     if (name !== "check") stopCheck();
@@ -192,7 +202,6 @@
   }
   function route() {
     const hash = (location.hash || "").replace("#", "");
-    if (hash === "check" && checked()) { location.hash = "practice"; return; }
     if (VIEWS.includes(hash)) { show(hash); return; }
     show(name() ? "home" : "welcome");
   }
@@ -231,7 +240,7 @@
   // ---------- home ----------
   function renderHome() {
     const who = name();
-    $("#greeting").textContent = who ? `Ready to practice, ${who}?` : "Ready to practice?";
+    $("#greeting").textContent = who ? line("home_greeting", { who }) : line("home_greeting_plain");
     $("#switch-child").textContent = who ? `Not ${who}?` : "Switch child";
     decorate($("#home"));
   }
@@ -297,13 +306,13 @@
   // ---------- learn: the export's own showcase units, read only ----------
   const SHOWCASE = [
     { kicker: "Unit 1", name: "Meet your fingers", desc: "Numbers on every fingertip", done: 2,
-      say: "Your 6 times are next.", mood: "happy",
+      say: "showcase_unit_1", mood: "happy",
       nodes: [["lesson", "done"], ["lesson", "done"], ["lesson", "current"], ["chest", "locked"], ["lesson", "locked"], ["boss", "locked"]] },
     { kicker: "Unit 2", name: "Count the tens", desc: "Fingers down make tens", done: 0,
-      say: "Finish unit 1 first.", mood: "ready",
+      say: "showcase_unit_2", mood: "ready",
       nodes: [["lesson", "locked"], ["lesson", "locked"], ["lesson", "locked"], ["chest", "locked"], ["boss", "locked"]] },
     { kicker: "Unit 3", name: "Big numbers", desc: "Nine times and ten times", done: 0,
-      say: "The big ones come last.", mood: "thinking",
+      say: "showcase_unit_3", mood: "thinking",
       nodes: [["lesson", "locked"], ["lesson", "locked"], ["lesson", "locked"], ["boss", "locked"]] },
   ];
   const SHOWCASE_SHELL = `
@@ -338,7 +347,7 @@
     const scored = u.nodes.filter(([kind]) => kind !== "chest").length;
     $("#lrn-count", root).textContent = `${u.done} of ${scored}`;
     $("#lrn-bar", root).style.width = `${scored ? (u.done / scored) * 100 : 0}%`;
-    $("#lrn-say", root).textContent = u.say;
+    $("#lrn-say", root).textContent = line(u.say);
     setTally($("#lrn-tally", root), u.mood);
     $("#lrn-switch", root).innerHTML = tileRow(SHOWCASE.length, showAt, "showcase");
     $("#lrn-path", root).innerHTML = pathHtml(u.nodes.map(([kind, state], i) => ({ kind, state, id: "", label: `${kind} ${i + 1}`, action: null })));
@@ -367,11 +376,11 @@
     $("#u-desc", root).textContent = unit.subtitle;
     $("#u-count", root).textContent = `${done} of ${scored.length}`;
     $("#u-bar", root).style.width = `${scored.length ? (done / scored.length) * 100 : 0}%`;
-    const line = here
-      ? (cur.kind === "chest" ? "A chest! Open it." : cur.kind === "boss" ? "The boss. Eight questions, three hearts." : `Next up: ${cur.title}.`)
-      : done === scored.length ? "All done here. Replay for three stars." : "Finish the unit before this one first.";
-    $("#u-say", root).textContent = line;
-    if (line !== speech.lastLine) { speech.lastLine = line; say(line, $("#u-say", root), $("#u-tally", root)); }
+    const said = here
+      ? (cur.kind === "chest" ? line("path_chest") : cur.kind === "boss" ? line("path_boss") : line("path_next", { title: cur.title }))
+      : done === scored.length ? line("path_all_done") : line("path_locked");
+    $("#u-say", root).textContent = said;
+    if (said !== speech.lastLine) { speech.lastLine = said; say(said, $("#u-say", root), $("#u-tally", root)); }
     setTally($("#u-tally", root), here ? "ready" : "happy");
     $("#switch", root).innerHTML = tileRow(L.UNITS.length, ui, "unit");
     $("#path", root).innerHTML = pathHtml(nodes.map((n) => {
@@ -381,58 +390,139 @@
     }));
     decorate(root);
   }
-  // the Practice door: the start check once per visit, then the path
-  function checked() { try { return sessionStorage.getItem("tenfold.checked") === "1"; } catch (e) { return false; } }
+  // ---------- the two files the page reads ----------
+  // A line Tally says lives in lesson/tally_lines.json and a policy timing in
+  // lesson/tutor_params.json, and in neither case anywhere else: the page reads them
+  // rather than carrying a copy. They are asked for once, at boot, and the page works
+  // without either. A line it could not read is not spoken, a timing it could not read
+  // falls back to the value written next to its key here.
+  const files = { lines: null, params: null };
+  const asked = {};
+  function loadFile(key, url) {
+    if (asked[key]) return asked[key];
+    asked[key] = fetch(url, { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : {}))
+      .catch(() => ({}))
+      .then((data) => { files[key] = (data && typeof data === "object") ? data : {}; });
+    return asked[key];
+  }
+  function loadFiles() {
+    return Promise.all([loadFile("lines", "tally_lines.json"), loadFile("params", "tutor_params.json")]);
+  }
+  function tallyLine(key) { return (files.lines && files.lines[key]) || ""; }
+  // One line of the file, with its placeholders filled the way the tutor fills its
+  // own: {who}, {title}, {need}. A key the file does not carry is an empty line, which
+  // is said by nobody and written nowhere, and never a sentence invented here.
+  function line(key, fill) {
+    const text = tallyLine(key);
+    if (!text || !fill) return text;
+    return text.replace(/\{(\w+)\}/g, (whole, name) => (name in fill ? String(fill[name]) : whole));
+  }
+  // run now when the lines are in, on the same turn as the event that asked for them,
+  // otherwise as soon as they are
+  function withLine(key, fn) {
+    if (files.lines) { fn(tallyLine(key)); return; }
+    loadFile("lines", "tally_lines.json").then(() => fn(tallyLine(key)));
+  }
+  // a timing from lesson/tutor_params.json, held inside the bounds that file carries
+  // for it: the page never runs on a value the policy file itself calls out of range
+  function timing(key, fallback) {
+    const values = (files.params && files.params.global) || null;
+    const raw = values ? Number(values[key]) : NaN;
+    if (!isFinite(raw)) return fallback;
+    const bounds = (files.params && files.params.bounds && files.params.bounds[key]) || null;
+    if (!Array.isArray(bounds) || bounds.length !== 2) return raw;
+    return Math.min(Math.max(raw, Number(bounds[0])), Number(bounds[1]));
+  }
 
-  // ---------- start check: three steps, the camera advances them ----------
-  // The export sheet shows the three steps as three frames side by side; the screen has
-  // one, and the step it is on is its data-step. Every class the export puts on a frame
-  // for the state being shown goes on that one frame here, at the moment it is true:
-  // detected, banner, matched, check, heard, result, mapin.
+  // ---------- the ready gate ----------
+  // It runs at the start of every activity, and it is short: show both hands, say the
+  // word, in. Nothing in it is an exercise, nothing in it is scored, and there is no
+  // question. The very first gate a child ever sees carries one more step, the finger
+  // pose, which proves the camera can read a pose; after that it never comes back.
+  //
+  // The export sheet draws the steps as frames side by side, f1, f2 and f3; the screen
+  // has one frame and the step it is on is its data-step, which is the export frame that
+  // step belongs to. Every class the export puts on a frame for the state being shown
+  // goes on that one frame here at the moment it is true: detected, banner, matched,
+  // check, heard, mapin. The export's result state belonged to a step that asked for a
+  // number; no step asks for one, so the frame never wears it.
+  const KEY_POSE = "tenfold.posestep";        // per child: the pose step has been passed
+  const KEY_GATE_OK = "tenfold.gate.ok";      // this session: camera and microphone both worked
+  // how long the gate waits for a microphone that is not bringing anything back before
+  // it puts a Ready button up instead. lesson/tutor_params.json owns the value.
+  const READY_BUTTON_KEY = "gate_ready_button_s";
+  const READY_BUTTON_S = 6;
+  // the key of the one line the gate asks for. lesson/tally_lines.json is written by
+  // other hands: until the key is in it, the step opens without a line rather than with
+  // a sentence invented here.
+  const READY_LINE_KEY = "gate_ready";
+  function poseMet() { return readText(slot(KEY_POSE)) === "1"; }
+  function markPoseMet() { write(slot(KEY_POSE), "1"); }
+  // Proof, for this session only, that the camera and the microphone both work: the
+  // hands were seen and the word came back in one gate. Only that lets a later gate be
+  // skipped, so a child can never skip past a screen that has never worked for them.
+  function gateProved() { try { return sessionStorage.getItem(KEY_GATE_OK) === "1"; } catch (e) { return false; } }
+  function markGateProved() { try { sessionStorage.setItem(KEY_GATE_OK, "1"); } catch (e) { /* fine */ } }
+  // the first gate for a child has the pose step in it, every later one has two steps
+  function gateSteps() { return poseMet() ? ["hands", "ready"] : ["hands", "pose", "ready"]; }
+  const STEP_FRAME = { hands: "1", pose: "2", ready: "3" };
+  function stepNow(run) { return run ? run.steps[run.at] : null; }
+  function atReady() { return Boolean(checkRun && !checkRun.done && stepNow(checkRun) === "ready"); }
+  // what the child asked for, waiting behind the gate
+  let gateAfter = null;
+  function runGate(after) { gateAfter = after || null; go("check"); }
   function checkFrame() { return $("#check .frame"); }
   function startCheck() {
     if (checkRun) return;
     const root = $("#check");
     const frame = checkFrame();
-    checkRun = { step: 1, stepAt: Date.now(), turning: false, lit: 0, timers: [], done: false, typed: "", said: null };
+    const run = { steps: gateSteps(), at: 0, stepAt: Date.now(), turning: false, lit: 0,
+                  timers: [], done: false, ended: false, listening: false, button: false,
+                  said: null, sawHands: false, heardWord: false };
+    checkRun = run;
     frame.className = "frame";
-    frame.dataset.step = "1";
-    checkSay("Show me both hands.", { kind: "instruction", key: "check_show" });
-    // the check ends on a spoken answer too: its own pill, armed the same way
+    frame.dataset.step = STEP_FRAME.hands;
+    checkSay(line("show_both_hands"), { kind: "instruction", key: "check_show" });
+    // the last step of every gate is a microphone test: the recogniser has to be awake
+    // for it, armed here the way the lesson arms it
     armVoice();
     setTally($("#check-tally"), "ready");
-    setStepDots(1);
+    setStepDots(run);
     videoOn($("#check-cam .practice-video"));
-    connect(() => sendLesson({ type: "start_node", tab: TAB, state: learner(), node: { id: "check", kind: "check", pairs: [[6, 6]], count: 1 } }));
+    // The node carries no exercise: the gate asks the server for the perception stream
+    // and for nothing else. steps says which steps are running, so the server knows
+    // whether a pose verdict is wanted at all, and the pair is the pose that gate step
+    // asks for, which is the only thing a verdict could be read against. A gate without
+    // that step names no pair, because nothing in it is about any pair of hands.
+    const pairs = run.steps.indexOf("pose") === -1 ? [] : [[6, 6]];
+    connect(() => sendLesson({ type: "start_node", tab: TAB, state: learner(),
+      node: { id: "check", kind: "check", steps: run.steps, pairs: pairs } }));
     decorate(root);
   }
   function checkSay(text, opts) { return say(text, $("#check-say"), $("#check-tally"), opts); }
-  // a correction is worth saying only while it is still the child's situation, and the
-  // same sentence pushed again by the camera stream is not a new line
-  function checkReact(text, mood) {
-    const run = checkRun;
-    if (!run || !text || text === run.said) return;
-    const step = run.step;
-    run.said = text;
-    checkSay(text, {
-      kind: "correction", key: "check_correction",
-      still: () => checkRun === run && run.said === text && run.step === step && !run.done,
-      onStart: () => setTally($("#check-tally"), mood),
-    });
-  }
   function stopCheck() {
     if (!checkRun) return;
     checkRun.timers.forEach(clearTimeout);
     checkRun = null;
+    gateAfter = null;
+    resetPill();
     cutSpeech();
     gateVoice(false);
     videoOff($("#check-cam .practice-video"));
     link.start = null; link.waiting = [];
     sendLesson({ type: "quit" });
   }
-  function setStepDots(n) {
+  // The export's tile art and spacing, one tile per step of this gate: two in the usual
+  // gate, three in the one that carries the pose step. There is no spare tile standing
+  // there greyed out, so the row says how long the gate is.
+  function setStepDots(run) {
+    const steps = run ? run.steps.length : 3;
+    const at = run ? run.at : 0;
     $$("#check .stepnum img").forEach((tile, i) => {
-      const on = i === n - 1;
+      tile.style.display = i < steps ? "" : "none";
+      if (i >= steps) { tile.alt = ""; return; }
+      const on = i === at;
       tile.src = `art/tile-${i + 1}-${on ? "on" : "off"}.png`;
       tile.alt = on ? `Step ${i + 1}` : "";
     });
@@ -449,94 +539,177 @@
     run.turning = true;
     later(wait, turn);
   }
+  // the 6 and 6 pose is being held. m.pose is the gate's own field; the state names are
+  // what the server says while the check node is still an exercise node.
+  function posed(m) {
+    if (m.pose === true) return true;
+    return m.state === "correct_pose" || m.state === "waiting_answer";
+  }
   function checkMessage(m) {
     const run = checkRun;
     const frame = checkFrame();
-    if (!run || m.type !== "state") return;
+    if (!run || run.done || m.type !== "state") return;
     readParams(m);
     const cuts = interrupts(m);
     drawFingers(m, $("#check .stage"));
     const hands = new Set((m.fingers || []).map((f) => f.hand)).size;
-    if (run.step === 1) {
+    const step = stepNow(run);
+    if (step === "hands") {
       if (hands === 2 && !frame.classList.contains("detected") && !run.turning) {
         frame.classList.add("detected");
-        // the numbers light up one by one, ten down to six. Decoration on its own
-        // timers: the step never waits for it
-        [10, 9, 8, 7, 6].forEach((n, i) => later(400 + i * 300, () => {
-          $$("#check .practice-overlay [data-number]").forEach((el) => { if (Number(el.dataset.number) <= 10 && Number(el.dataset.number) >= n) el.classList.add("lit"); });
-          run.lit = n;
-        }));
-        // the child is past this step the moment both hands are there, whatever Tally
-        // is still saying: the acknowledgement rides the event, the next instruction
-        // waits its turn in the queue instead of a clock that can run ahead
-        turnStep(run, () => {
-          run.step = 2; run.said = null;
-          checkSay("Perfect.", { kind: "ack", key: "check_hands_seen", interrupt: cuts, onStart: () => { frame.classList.add("check"); setTally($("#check-tally"), "happy"); } });
-          checkSay("Touch your 6 with your 6.", {
-            kind: "instruction", key: "check_touch",
-            still: () => checkRun === run && run.step === 2,
-            onStart: () => {
-              frame.dataset.step = "2"; frame.classList.remove("check"); setStepDots(2);
-              setTally($("#check-tally"), "thinking");
-            },
-          });
-        });
+        // the camera has worked in this gate, and the child is past this step the moment
+        // both hands are there, whatever Tally is still saying: the acknowledgement rides
+        // the event and the next instruction waits its turn in the queue, never a clock
+        run.sawHands = true;
+        turnStep(run, () => openStep(run, line("gate_hands_ok"), "check_hands_seen", cuts));
       }
       if (hands === 2) $$("#check .practice-overlay [data-number]").forEach((el) => { if (run.lit && Number(el.dataset.number) >= run.lit) el.classList.add("lit"); });
       return;
     }
-    if (run.step === 2) {
-      if ((m.state === "correct_pose" || m.state === "waiting_answer") && !run.turning) {
-        turnStep(run, () => {
-          run.step = 3; run.said = null;
-          frame.classList.add("matched", "banner", "check");
-          $("#check .banner-top").textContent = "That is a 6 and a 6.";
-          setTally($("#check-tally"), "happy");
-          checkSay("Yes, that's it.", { kind: "ack", key: "check_pose", interrupt: cuts });
-          // no microphone in this browser, or one that was refused: say so and
-          // show the digits in the pill, which is the only answer field here. The pill
-          // belongs to step 3, so it comes up with the question and never before it.
-          checkSay(canHear() ? "Say the answer." : "Type the answer.", {
-            kind: "instruction", key: "check_ask",
-            still: () => checkRun === run && !run.done,
-            onStart: () => {
-              frame.dataset.step = "3"; frame.classList.remove("check", "banner"); setStepDots(3);
-              $("#check-miclabel").textContent = micLabel();
-              setTally($("#check-tally"), "ready");
-              listenWhile("correct_pose");
-            },
-          });
-        });
-      } else if (m.state === "wrong_pose" && m.tally) {
-        checkReact(m.tally, "almost");
-      }
+    // The pose step is a gate step and nothing else. A pose that is not there yet is not
+    // an error and not a correction: the gate is simply not passed, so nothing is said
+    // about it, nothing is scored and nothing is written anywhere.
+    if (step === "pose" && posed(m) && !run.turning) {
+      markPoseMet();
+      turnStep(run, () => {
+        frame.classList.add("matched", "banner", "check");
+        $("#check .banner-top").textContent = line("gate_banner");
+        setTally($("#check-tally"), "happy");
+        openStep(run, line("gate_pose_ok"), "check_pose", cuts);
+      });
+    }
+  }
+  // one step is passed, the next one opens: the acknowledgement first, then the
+  // instruction, and the screen moves with the instruction rather than ahead of it
+  function openStep(run, ack, key, cuts) {
+    const frame = checkFrame();
+    run.at += 1; run.said = null;
+    const step = stepNow(run);
+    const cheer = { kind: "ack", key: key, interrupt: cuts,
+      onStart: () => { frame.classList.add("check"); setTally($("#check-tally"), "happy"); } };
+    if (step === "pose") {
+      if (ack) checkSay(ack, cheer);
+      // the numbers light up one by one, ten down to six. Decoration on its own timers:
+      // the step never waits for it
+      [10, 9, 8, 7, 6].forEach((n, i) => later(400 + i * 300, () => {
+        $$("#check .practice-overlay [data-number]").forEach((el) => { if (Number(el.dataset.number) <= 10 && Number(el.dataset.number) >= n) el.classList.add("lit"); });
+        run.lit = n;
+      }));
+      checkSay(line("gate_pose"), {
+        kind: "instruction", key: "check_touch",
+        still: () => checkRun === run && stepNow(run) === "pose" && !run.done,
+        onStart: () => {
+          frame.dataset.step = STEP_FRAME.pose; frame.classList.remove("check"); setStepDots(run);
+          setTally($("#check-tally"), "thinking");
+        },
+      });
       return;
     }
-    if (run.step === 3 && m.state === "answer_correct") {
-      frame.classList.add("heard", "result", "check");
-      // the export's own id: the frame wears "result" as a state class, so .result is not it
-      $("#result").textContent = m.answer;
-      $("#check-miclabel").textContent = "Thirty six";
-      run.done = true;
-      gateVoice(false);
-      checkSay("Thirty six. Exactly.", { kind: "ack", key: "check_answer", interrupt: cuts, onStart: () => setTally($("#check-tally"), "happy") });
-    } else if (run.step === 3 && m.state === "answer_wrong" && m.tally) {
-      checkReact(m.tally, "almost");
-    }
+    // The last step: Tally asks for one word, and the recogniser bringing it back is what
+    // passes the gate. The line lives in lesson/tally_lines.json and nowhere else, so it
+    // is read from there by its key, once the acknowledgement is over. The pill belongs
+    // to this step and comes up with the line.
+    const open = () => {
+      frame.dataset.step = STEP_FRAME.ready; frame.classList.remove("check", "banner"); setStepDots(run);
+      $("#check-miclabel").textContent = checkMicLabel();
+      setTally($("#check-tally"), "ready");
+      run.listening = true;
+      armReadyButton(run);
+    };
+    const start = (line) => {
+      if (checkRun !== run || run.done || stepNow(run) !== "ready") return;
+      // a line the page could not read is not spoken and not invented: the step opens in
+      // silence, and the word, the button and the keyboard pass the gate as they always do
+      if (!line) { open(); return; }
+      checkSay(line, { kind: "instruction", key: "check_ask",
+        still: () => checkRun === run && !run.done, onStart: open });
+    };
+    const ask = () => withLine(READY_LINE_KEY, start);
+    if (ack) checkSay(ack, Object.assign({ after: ask }, cheer));
+    else ask();
   }
-  function checkEnd() {
+  // A browser with no speech recognition, or a microphone that brings nothing back: the
+  // pill becomes a Ready button the child taps, and the tap passes the step. With no
+  // recognition at all it is a button from the start; with a microphone that may yet
+  // work it waits the policy timing out first, so the word stays the way through.
+  function armReadyButton(run) {
+    if (!canHear()) { showReadyButton(run); return; }
+    const wait = Math.round(timing(READY_BUTTON_KEY, READY_BUTTON_S) * 1000);
+    later(wait, () => { if (checkRun === run && !run.done) showReadyButton(run); });
+  }
+  function showReadyButton(run) {
+    if (!run || run.done || run.button) return;
+    run.button = true;
+    const pill = $("#check-mic");
+    if (!pill) return;
+    pill.classList.add("is-button");
+    pill.setAttribute("role", "button");
+    pill.setAttribute("tabindex", "0");
+    pill.setAttribute("aria-label", "Ready");
+    pill.style.cursor = "pointer";
+    $("#check-miclabel").textContent = checkMicLabel();
+  }
+  function resetPill() {
+    const pill = $("#check-mic");
+    if (!pill) return;
+    pill.classList.remove("is-button");
+    pill.removeAttribute("role");
+    pill.removeAttribute("tabindex");
+    pill.removeAttribute("aria-label");
+    pill.style.cursor = "";
+  }
+  // The gate is through. "heard" says the word came back through the microphone, which
+  // with the hands already seen is this session's proof that both work. The page ends
+  // the gate itself rather than waiting for a node the server no longer ends on an
+  // answer, and a node_end for the check that lands afterwards is a no op.
+  function passGate(heard) {
+    const run = checkRun;
+    if (!run || run.done || stepNow(run) !== "ready") return;
+    run.done = true; run.listening = false;
+    if (heard) run.heardWord = true;
+    gateVoice(false);
+    checkFrame().classList.add("heard", "check");
+    $("#check-miclabel").textContent = "Ready";
+    setTally($("#check-tally"), "happy");
+    if (run.sawHands && run.heardWord) markGateProved();
+    sendLesson({ type: "ready", node: "check" });
+    endGate(true);
+  }
+  // A tap on Tally skips the gate, but only once the camera and the microphone have both
+  // worked in an earlier gate of this session. Before that the tap does nothing at all
+  // and Tally says nothing new: there is no proof yet that this screen can be skipped.
+  function skipGate() {
+    const run = checkRun;
+    if (!run || run.done || !gateProved()) return;
+    run.done = true; run.listening = false;
+    gateVoice(false);
+    cutSpeech();
+    sendLesson({ type: "ready", node: "check" });
+    endGate(false);
+  }
+  function endGate(spoken) {
+    const run = checkRun;
+    if (!run || run.ended) return;
+    run.ended = true;
+    // Straight into the activity, with nothing said over it. The practice path is the
+    // one destination with a line of its own: the export slides the path in on it, and
+    // behind it is the same path.
+    if (!gateAfter && spoken) {
+      checkSay(line("gate_path_open"), { kind: "instruction", key: "check_done",
+        onStart: () => checkFrame().classList.add("mapin"), after: closeGate });
+      return;
+    }
+    closeGate();
+  }
+  function closeGate() {
     const run = checkRun;
     if (!run) return;
-    // the path opens when Tally has finished saying so, not on a clock. The export
-    // slides its practice path in on that line, and behind it is the same path
-    checkSay("Your path is open.", { kind: "instruction", key: "check_done", onStart: () => checkFrame().classList.add("mapin"), after: closeCheck });
-  }
-  function closeCheck() {
-    if (!checkRun) return;
-    checkRun.timers.forEach(clearTimeout);
-    checkRun = null;
-    try { sessionStorage.setItem("tenfold.checked", "1"); } catch (e) { /* fine */ }
-    go("practice");
+    run.timers.forEach(clearTimeout);
+    const after = gateAfter;
+    gateAfter = null;
+    // checkRun is left standing: the screen the gate hands over to stops it itself, which
+    // is what turns the camera off and closes the node on the server
+    if (after) after(); else go("practice");
   }
 
   // ---------- Tally speaks ----------
@@ -775,7 +948,10 @@
     const line = speech.line;
     speech.line = null;
     if (line) { talking(line, false); ttsPair(false); }
-    if (hasVoice()) { try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } }
+    // An engine with nothing of ours in it is left alone: cancelling an idle voice is
+    // not a cut. Every view change comes through here, and most of them arrive in
+    // silence; only a screen that really was talking touches the engine.
+    if ((line || dropped.length) && hasVoice()) { try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } }
     hush();
     closeItem(line);
     dropped.forEach(closeItem);
@@ -831,13 +1007,15 @@
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const text = e.results[i][0].transcript.trim();
         showTranscript(text);
-        if (checkRun && checkRun.step === 3 && !checkRun.done) $("#check-miclabel").textContent = text || "Listening";
+        if (atReady() && !checkRun.button) $("#check-miclabel").textContent = text || checkMicLabel();
         // the answer goes on the first number heard, interim or not: waiting for the end
         // of the utterance is a wait the child feels. The whole sentence still goes to
         // the server on the final result, where it is what tells the tutor they are
         // working; the guards below are what keep one number from being sent twice.
         submitSpoken(text);
-        if (e.results[i].isFinal) sendSpeech(text);
+        // the gate's word is taken on the final result: the word is short, and an interim
+        // transcript of it is the same word a moment earlier, not a wait the child feels
+        if (e.results[i].isFinal) { sendSpeech(text); checkHeard(text); }
       }
     };
     voice.recognition = r;
@@ -853,6 +1031,12 @@
   function hasSpeech() { return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition); }
   function canHear() { return hasSpeech() && !voice.denied; }
   function micLabel() { return canHear() ? (voice.running ? "Listening" : "Mic off") : "Type it"; }
+  // the gate asks for a word, never a number: its pill says what the child can do, and
+  // once it has become the Ready button it says so until the gate is over
+  function checkMicLabel() {
+    if (checkRun && checkRun.button) return "Ready";
+    return canHear() && voice.running ? "Listening" : "Mic off";
+  }
   // the answer field of the lesson: the number heard, held in the pill with the bars
   // stopped, for as long as it takes the tutor to answer. The bars are stopped the way
   // the export stops them on the check's own heard state, by taking the animation off.
@@ -869,6 +1053,18 @@
     label.textContent = String(value);
     lessonBars(true);
     heardTimer = setTimeout(() => { heardTimer = null; lessonBars(false); setTyped(""); }, HEARD_MS);
+  }
+  // The pill carries one number for one exercise and no longer. The success beat is
+  // where it goes: the moment the beat starts the pill drops the number and is listening
+  // again, and the next exercise is armed with it empty whatever the last one ended
+  // with, a wrong answer or a quit included.
+  function clearHeard() {
+    clearTimeout(heardTimer); heardTimer = null;
+    lessonBars(false);
+    if (lesson) lesson.typed = "";
+    const el = $("#lesson .typed"); if (el) el.textContent = "";
+    const label = $("#lesson .mic .mic-label");
+    if (label) label.textContent = micLabel();
   }
   // the "heard:" readout is for a developer, not for the child: off unless the url asks
   function showTranscript(text) {
@@ -895,7 +1091,7 @@
     const pill = $("#check-mic");
     if (pill) {
       pill.classList.toggle("is-off", !voice.running || voice.denied);
-      if (checkRun && checkRun.step === 3 && !checkRun.done && !(checkRun.typed || "")) $("#check-miclabel").textContent = micLabel();
+      if (atReady()) $("#check-miclabel").textContent = checkMicLabel();
     }
   }
   function startVoice() { if (!voice.recognition || voice.running || !voice.wanted || voice.denied) return; try { voice.recognition.start(); } catch (e) { /* starting */ } }
@@ -931,6 +1127,22 @@
     if (tallyEcho(said)) return;
     sendLesson({ type: "speech", text: said });
   }
+  // The one word the last step of the gate waits for, whatever the recogniser wraps it
+  // in. "I'm ready", "Ready!", "yes", "ok then I am ready" all pass; case, punctuation
+  // and anything said around the word are ignored. A number is not one of these words,
+  // so an answer said out loud never walks the gate on.
+  const READY_WORDS = ["ready", "yes", "yeah", "yep", "yup", "ok", "okay"];
+  function heardReady(text) {
+    return plainSpeech(text).split(" ").some((word) => READY_WORDS.indexOf(word) !== -1);
+  }
+  // the microphone test listens for that word and for nothing else: Tally asking for it
+  // through the speakers is not the child saying it, and a number is not it either
+  function checkHeard(text) {
+    const run = checkRun;
+    if (!run || !run.listening || run.done || stepNow(run) !== "ready") return;
+    if (tallyEcho(text) || !heardReady(text)) return;
+    passGate(true);
+  }
   // answer_first_number_ms is the only wait between hearing a number and sending it, and
   // it is zero by default: the answer leaves on the first result that parses, interim or
   // final. The guards are unchanged, so the same number heard again, as the interim then
@@ -960,7 +1172,7 @@
   // closed socket is reopened with a growing wait, and whatever asked for the last
   // connection is replayed once it is back. A lesson that cannot reach the server
   // says so instead of sitting on "Getting ready" for ever.
-  const LINK_SAY = "I cannot reach the camera. Trying again.";
+  const LINK_KEY = "link_trouble";
   const LINK_TIMEOUT_MS = 4000;
   const LINK_MAX_WAIT_MS = 8000;
   let socket = null, socketReady = false;
@@ -1017,11 +1229,11 @@
     if (lesson) {
       // the export's bubble is the one place a line is said: there is no sub line
       // under it any more, so the trouble is said the way everything else is
-      say(LINK_SAY, $("#lesson .say"), lessonTally());
+      say(line(LINK_KEY), $("#lesson .say"), lessonTally());
     } else if (checkRun) {
-      checkSay(LINK_SAY);
+      checkSay(line(LINK_KEY));
     }
-    toast(LINK_SAY);
+    toast(line(LINK_KEY));
   }
   // every message names the page load it comes from, so the server can tell this page
   // on a new socket from a genuinely second tab whatever order the messages arrive in
@@ -1043,7 +1255,7 @@
         if (!m.state.display_name && mine.display_name) m.state.display_name = mine.display_name;
         saveLearner(m.state);
       }
-      if (forCheck) return checkEnd();
+      if (forCheck) return endGate(true);
       lesson.serverCorrect = m.correct; lesson.total = m.total || lesson.total; lesson.endTally = m.tally;
       return finish(false);
     }
@@ -1056,6 +1268,10 @@
     // (u1-l2 is 6x7 both ways), and only the engine's rearm to exercise_shown moves
     // once per question. That is the counter and the clean first try again.
     if (fresh && m.state === "exercise_shown") lesson.done += 1;
+    // the success beat between two exercises, and the exercise it hands over to: the
+    // pill drops the number it was showing at the start of the beat, and the new
+    // exercise is armed with nothing of the last one left on screen
+    if (m.tutor_beat || (fresh && m.state === "exercise_shown")) clearHeard();
     if (m.fact) lesson.fact = m.fact;
     if (fresh && m.state === "answer_wrong" && lesson.hearts !== null) {
       lesson.hearts -= 1; lesson.hit = true;
@@ -1106,7 +1322,7 @@
     VIEWS.forEach((v) => { $("#" + v).hidden = true; });
     $("#finish").hidden = true;
     $("#lesson").hidden = false;
-    document.body.dataset.view = "lesson";
+    enterView("lesson");
     // the lesson is the screen that asks for a spoken answer, so opening one arms the
     // microphone: the tap that opened it is the gesture Chrome wants, and a lesson
     // opened by name (a test, a hash) still comes up with voice ready
@@ -1126,6 +1342,7 @@
     s.paid = false;
     s.done = 0; s.serverCorrect = null; s.fact = null; s.last = null; s.said = null; s.turn = 0;
     s.hearts = s.node.kind === "boss" ? 3 : null; s.hit = false; s.typed = "";
+    clearHeard();
   }
   // XP is never lost: every answer already right is paid, whatever happens next
   function payLesson() {
@@ -1172,7 +1389,7 @@
     decorate(root);
     renderHearts();
     // the first line of the lesson goes through the same door as every other line
-    say("Show me both hands.", $("#lesson .say"), lessonTally(), { kind: "instruction", key: "waiting_pose" });
+    say(line("show_both_hands"), $("#lesson .say"), lessonTally(), { kind: "instruction", key: "waiting_pose" });
     videoOn($(".practice-video", root));
     markMic();
   }
@@ -1527,23 +1744,16 @@
       overlay.appendChild(dot("ghost", at[ghostTo].x, at[ghostTo].y, 26));
     }
   }
+  // the digits belong to the lesson: the gate asks for a word, so nothing is ever typed
+  // into it any more
   function setTyped(value) {
-    if (!lesson && !checkRun) return;
-    if (lesson) lesson.typed = value;
+    if (!lesson) return;
+    lesson.typed = value;
     // kept in the markup and off the screen: the pill is the one place an answer shows
     const el = $("#lesson .typed"); if (el) { el.textContent = value; el.hidden = true; }
     const caret = $("#lesson .caret"); if (caret) caret.hidden = true;
-    if (lesson) {
-      const label = $("#lesson .mic .mic-label");
-      if (label && !heardTimer) label.textContent = value || micLabel();
-    }
-    if (checkRun && !lesson) {
-      // the check has no answer field of its own: the pill carries the digits, and
-      // it has to follow a Backspace back down to the label
-      checkRun.typed = value;
-      const label = $("#check-miclabel");
-      if (label && !checkRun.done) label.textContent = value || micLabel();
-    }
+    const label = $("#lesson .mic .mic-label");
+    if (label && !heardTimer) label.textContent = value || micLabel();
   }
 
   // ---------- finish ----------
@@ -1568,7 +1778,8 @@
     const fail = outOfHearts || res.stars === 0;
     const title = outOfHearts ? "Out of hearts" : fail ? "Almost there" : s.node.kind === "boss" ? "Boss defeated!" : res.stars === 3 ? "Perfect lesson!" : "Lesson complete!";
     const need = Math.ceil(total * 0.6);
-    const sub = fail ? `Get ${need} of ${total} right to earn a star and open the next lesson.` : s.endTally || (res.unlocked ? "The next lesson is open." : "Come back for all three stars.");
+    const sub = fail ? line("finish_need", { need, total })
+      : s.endTally || (res.unlocked ? line("finish_unlocked") : line("finish_more_stars"));
 
     const p1 = $("#p1", root), p2 = $("#p2", root);
     p1.className = "pane";
@@ -1612,7 +1823,9 @@
     videoOff($(".practice-video", $("#lesson")));
     $("#lesson").hidden = true;
     root.hidden = false;
-    document.body.dataset.view = "finish";
+    // the card is a view change like any other: whatever the lesson was still saying
+    // stops here, so its line can never play over this screen
+    enterView("finish");
     decorate(root);
     // the title, the XP count and the level name are read and stay silent. Tally's one
     // closing line is the sub, the sentence the server ended the node with, and it goes
@@ -1646,7 +1859,7 @@
     // crossing a level is a Tally moment, not a label: one short line, the card's own
     // name read back. It waits its turn behind the closing line like anything else.
     const named = $("#n2", root);
-    say(`Level up. ${named ? named.textContent : ""}.`, null, $("#t-up", root));
+    say(line("level_up_card", { level: named ? named.textContent : "" }), null, $("#t-up", root));
   }
   function confetti(host) {
     if (!host) return;
@@ -1706,7 +1919,7 @@
     $("#lname", root).textContent = info.name;
     $("#lxp", root).textContent = info.next ? `${info.inLevel} / ${info.span}` : "Complete";
     $("#lfill", root).style.width = `${info.percent}%`;
-    $("#nextline", root).textContent = info.next ? `Next: ${info.next}` : "Top level reached.";
+    $("#nextline", root).textContent = info.next ? `Next: ${info.next}` : line("profile_top_level");
     // the gear row: what Tally wears now, and what is still waiting for him
     const worn = new Set(info.accessories.split(" ").filter(Boolean));
     $("#wardrobe", root).innerHTML = accessoryLevels().map((level) => {
@@ -1739,7 +1952,7 @@
       if (el.dataset.status === "locked") return;
       if (L.findNode(id).kind === "chest") openChest(id); else startLesson(id);
     }
-    else if (action === "start") startLesson(id);
+    else if (action === "start") runGate(() => startLesson(id));
     else if (action === "chest") openChest(id);
     else if (action === "unit") { unitAt = Number(el.dataset.u); renderCourse(); }
     else if (action === "showcase") { showAt = Number(el.dataset.u); renderShowcase(); }
@@ -1762,7 +1975,7 @@
       markMic();
     }
     else if (action === "quit" || action === "home") { e.preventDefault(); backToMap(); }
-    else if (action === "retry") { e.preventDefault(); startLesson(id); }
+    else if (action === "retry") { e.preventDefault(); runGate(() => startLesson(id)); }
     // the dev reset is this child's record and no one else's
     else if (action === "reset") {
       progress = L.emptyProgress(); unitAt = null; save();
@@ -1779,14 +1992,21 @@
   }
   document.addEventListener("keydown", (e) => {
     const inField = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
-    const answering = (lesson && !$("#lesson").hidden) || (checkRun && checkRun.step === 3);
+    const answering = (lesson && !$("#lesson").hidden) || atReady();
     if (!answering) {
       // the pane on screen: the card until the level up card slides in over it (.out on #p1, .in.show on #p2)
       if (e.key === "Enter" && !$("#finish").hidden) { const btn = $("#finish .pane:not(.out):not(.in) .btn2, #finish .pane.in.show .btn2"); if (btn) btn.click(); }
       return;
     }
     if (inField) return;
-    const typed = lesson ? lesson.typed : (checkRun.typed || "");
+    // the last step of the gate is a microphone test: no digits go into it, and the
+    // keyboard way through it is the same Enter that answers everywhere else here
+    if (checkRun && !lesson) {
+      if (e.key === "Enter") { e.preventDefault(); passGate(false); }
+      else if (e.key === "Escape") backToMap();
+      return;
+    }
+    const typed = lesson.typed;
     if (e.key >= "0" && e.key <= "9") { if (typed.length < 3) setTyped(typed + e.key); }
     else if (e.key === "Backspace") setTyped(typed.slice(0, -1));
     else if (e.key === "Enter") { e.preventDefault(); if (!typed.length) return; sendLesson({ type: "check", value: Number(typed) }); setTyped(""); }
@@ -1795,6 +2015,15 @@
   });
   // the first click of the session is the gesture Chrome needs to open the mic
   document.addEventListener("click", armVoice, { capture: true });
+  // The Ready button of the last step: a tap on the pill is the child saying they are
+  // ready, and it passes the step exactly as the word does. It is how a browser with no
+  // recognition, or a microphone that was refused, gets through the gate.
+  const checkPill = $("#check-mic");
+  if (checkPill) checkPill.addEventListener("click", () => { if (checkRun && checkRun.listening) passGate(false); });
+  // a tap on Tally skips the gate, and does nothing at all until a gate of this session
+  // has proved that the camera and the microphone both work
+  const checkTally = $("#check-tally");
+  if (checkTally) checkTally.addEventListener("click", () => skipGate());
   window.addEventListener("hashchange", route);
   window.addEventListener("resize", () => { if (lesson) fitOverlay($("#lesson .cam")); if (checkRun) fitOverlay($("#check-cam")); });
 
@@ -1806,7 +2035,7 @@
     probe.onload = () => {
       art.innerHTML = ""; art.appendChild(probe); art.classList.add("is-live");
       if (copy) copy.textContent = "Tally is watching";
-      if (note) note.textContent = "Your hands are on camera. Start a lesson and count with them.";
+      if (note) note.textContent = line("home_camera_live");
     };
     probe.alt = ""; probe.src = "/video";
   }
@@ -1814,16 +2043,24 @@
   // startLesson is on the surface so the camera lesson can be opened without the path
   // screen, and the child helpers so a test can switch child: the screens are wired by
   // different hands and each one's test should fail for its own reasons.
-  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, timing: PARAMS,
-    startLesson, addXp, setChild, roster,
+  window.Tenfold = { parseNumber, numbersIn, heardReady, tallyLine, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, timing: PARAMS,
+    startLesson, runGate, addXp, setChild, roster,
     get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); },
-    get checkStep() { return checkRun ? checkRun.step : 0; },
+    get gate() { return checkRun; }, get gateProved() { return gateProved(); },
+    // the gate's step as a number, the way the export numbers its frames
+    get checkStep() { return checkRun ? checkRun.at + 1 : 0; },
     get child() { return child(); }, get name() { return name(); } };
-  route();
-  markMute();
-  watchCamera();
-  decorate(document);
-  // the demo flag arrives on the socket; connect early so the showcase seeds before the
-  // map is opened. No callback: whatever the first view asked for is what runs on open.
-  connect();
+  // The page holds no sentence of its own, so it opens once it has Tally's lines in
+  // hand: the first screen is drawn with its line rather than with an empty bubble it
+  // would have to fill again. A file it cannot read leaves the bubbles empty and every
+  // screen still works.
+  loadFiles().then(() => {
+    route();
+    markMute();
+    watchCamera();
+    decorate(document);
+    // the demo flag arrives on the socket; connect early so the showcase seeds before
+    // the map is opened. No callback: whatever the first view asked for runs on open.
+    connect();
+  });
 })();

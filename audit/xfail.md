@@ -5,23 +5,14 @@ La démo est le produit. Ce fichier liste chaque test que la suite ne fait plus
 place. Rien ici n'est un bug vu par l'enfant : ce sont des tests écrits contre
 une version antérieure du tuteur, restés derrière les passes de la matinée.
 
-La marque est posée dans `tests/conftest.py` (non stricte : un test qui
-redevient vert est rapporté comme vert) et dans `tests/test_canonical_lines.py`
-pour la page.
+La marque est posée dans `tests/conftest.py`, non stricte : un test qui
+redevient vert est rapporté comme vert.
 
-## 1. web/course/app.js, l'audit des lignes canoniques
+L'audit des lignes canoniques de la page, un moment marqué ici, ne l'est plus :
+les 27 phrases de `web/course/app.js` sont parties dans
+`lesson/tally_lines.json` et les quatre bras du test sont verts.
 
-`tests/test_canonical_lines.py::test_the_page_speaks_only_what_it_is_given[web/course/app.js]`,
-xfail strict.
-
-27 phrases sont encore écrites en dur dans `web/course/app.js` (sous-titres des
-tuiles de la carte, lignes du check, montée de niveau, écran de fin). Les trois
-autres couches sont vertes : `lesson/tally.py`, `app/tutor.py` et
-`app/server.py` ne portent plus une seule phrase. Le déplacement des 27 vers
-`lesson/tally_lines.json` est confié à l'agent qui tient le fichier ; la marque
-tombe avec ce commit.
-
-## 2. tests/test_live_tutor.py, 30 tests
+## tests/test_live_tutor.py, 30 tests
 
 Le tuteur a changé sous eux, sur quatre points :
 
