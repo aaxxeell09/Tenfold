@@ -159,7 +159,7 @@ def feed(tab, node: str, **fields):
 def running_lesson(tab):
     """Open the first node and take the message stream over."""
     tab.wait_for_function("!!Tenfold.lesson")
-    tab.wait_for_function("document.querySelector('#lesson .practice-why').textContent === '1 of 5'")
+    tab.wait_for_function("document.querySelector('#lesson .count').textContent === '1 of 5'")
     tab.evaluate("() => window.__silence()")
     return tab.evaluate("Tenfold.lesson.node.id")
 
@@ -170,12 +170,14 @@ TENS = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty", 6: "sixty",
 
 
 def open_lesson(tab, url):
-    """Land on the practice path and start the first node, where voice lives."""
+    """Open the first node, which is where voice lives. The camera lesson is asked for
+    by name rather than tapped through the path: the two screens are wired by different
+    hands, and a failure here should be this screen's own. The tap on the path is still
+    walked, once, by test_every_bubble_shown_is_spoken."""
     tab.goto(url + "#practice", wait_until="domcontentloaded")
-    # the Start bubble sits on the current node; tapping it opens the lesson
-    tab.wait_for_selector('[data-action="start"]', timeout=10000)
-    tab.click('[data-action="start"]', force=True)
-    tab.wait_for_selector("#lesson .practice-stage", timeout=10000)
+    tab.wait_for_function("!!window.Tenfold", timeout=10000)
+    tab.evaluate("() => Tenfold.startLesson(TenfoldLevels.allNodes()[0].id)")
+    tab.wait_for_selector("#lesson .cam", timeout=10000)
 
 
 # answer_correct lives for one message: the server advances to the next exercise in
@@ -189,7 +191,7 @@ document.addEventListener("DOMContentLoaded", () => {
   new MutationObserver((records) => {
     for (const record of records) {
       const el = record.target;
-      if (el.classList && el.classList.contains("practice-stage")) window.__states.push(el.dataset.state);
+      if (el.classList && el.classList.contains("cam")) window.__states.push(el.dataset.state);
     }
   }).observe(host, { attributes: true, attributeFilter: ["data-state"], subtree: true });
 });
@@ -202,12 +204,12 @@ def saw_state(tab, state: str, timeout: int = 30000):
 
 
 def stage_state(tab) -> str:
-    return tab.evaluate("document.querySelector('#lesson .practice-stage')?.dataset.state || ''")
+    return tab.evaluate("document.querySelector('#lesson .cam')?.dataset.state || ''")
 
 
 def wait_for_state(tab, state: str, timeout: int = 30000):
     tab.wait_for_function(
-        f"document.querySelector('#lesson .practice-stage')?.dataset.state === '{state}'",
+        f"document.querySelector('#lesson .cam')?.dataset.state === '{state}'",
         timeout=timeout)
 
 
@@ -310,7 +312,7 @@ def test_without_the_api_the_microphone_never_appears(page):
     tab.wait_for_timeout(500)
     assert tab.is_hidden("#lesson .mic")
     assert tab.evaluate("Tenfold.voice.recognition") is None
-    assert tab.is_visible("#lesson .practice-answer") and tab.is_visible("#lesson .caret")
+    assert tab.is_visible("#lesson .answer") and tab.is_visible("#lesson .caret")
     # the keyboard has to keep working with no speech API at all
     tab.keyboard.type("42")
     assert tab.inner_text("#lesson .typed") == "42"
@@ -406,7 +408,7 @@ def test_a_spoken_answer_is_sent_and_shown(page):
     open_lesson(tab, url)
     wait_for_state(tab, "correct_pose")
 
-    exercise = tab.inner_text("#lesson .practice-exercise").replace("×", "x")
+    exercise = tab.inner_text("#lesson .ex").replace("×", "x")
     a, b = (int(part.strip()) for part in exercise.split(" x "))
 
     # an interim result is shown but never submitted
@@ -938,7 +940,7 @@ def test_only_tallys_bubble_is_spoken(page):
     feed(tab, node, state="wrong_pose", tally="Move your left thumb down.")
     tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
     assert said(tab) == ["Move your left thumb down."]
-    assert tab.text_content("#lesson .tally-say").strip() == "Move your left thumb down."
+    assert tab.text_content("#lesson .say").strip() == "Move your left thumb down."
 
     # the finish card: Tally keeps one closing line there, and one more if a level was
     # crossed. The title, the stars, the XP count and the level name label stay silent.
@@ -1052,8 +1054,8 @@ def test_the_counter_follows_the_exercise_not_the_fact(page):
         feed(tab, node, state="correct_pose")
         feed(tab, node, state="answer_correct", answer=42, first_try=True)
         feed(tab, node, state="exercise_shown")
-    assert tab.text_content("#lesson .practice-why") == "3 of 5"
-    assert tab.evaluate("document.querySelector('#lesson .bar-fill').style.width") == "40%"
+    assert tab.text_content("#lesson .count") == "3 of 5"
+    assert tab.evaluate("document.querySelector('#lesson .bar i').style.width") == "40%"
     assert tab.evaluate("Tenfold.lesson.done") == 3
     assert tab.evaluate("Tenfold.lesson.correct") == 2
     assert tab.evaluate("Tenfold.lesson.firstTry") == 2, "the same fact twice is still two first tries"
@@ -1137,9 +1139,9 @@ def test_the_back_button_leaves_the_running_lesson(page):
     tab.goto(url + "#home", wait_until="domcontentloaded")
     tab.wait_for_function("!!window.Tenfold")
     tab.evaluate("() => { location.hash = 'practice'; }")
-    tab.wait_for_selector('[data-action="start"]', timeout=10000)
-    tab.click('[data-action="start"]', force=True)
-    tab.wait_for_selector("#lesson .practice-stage", timeout=10000)
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+    tab.evaluate("() => Tenfold.startLesson(TenfoldLevels.allNodes()[0].id)")
+    tab.wait_for_selector("#lesson .cam", timeout=10000)
     tab.wait_for_function("!!Tenfold.lesson")
     tab.evaluate("""() => {
       window.__sent = [];
@@ -1164,7 +1166,7 @@ def test_a_dropped_socket_comes_back_by_itself(page):
     tab.add_init_script(CAPTURE_SOCKET)
     open_lesson(tab, url)
     tab.wait_for_function("!!Tenfold.lesson")
-    tab.wait_for_function("document.querySelector('#lesson .practice-why').textContent === '1 of 5'")
+    tab.wait_for_function("document.querySelector('#lesson .count').textContent === '1 of 5'")
     node = tab.evaluate("Tenfold.lesson.node.id")
     feed(tab, node, state="correct_pose")
     feed(tab, node, state="answer_correct", answer=42, first_try=True)
@@ -1173,7 +1175,7 @@ def test_a_dropped_socket_comes_back_by_itself(page):
 
     tab.evaluate("() => { window.__old = window.__socket; window.__socket.close(); }")
     tab.wait_for_function("window.__socket !== window.__old && window.__socket.readyState === 1", timeout=15000)
-    tab.wait_for_function("document.querySelector('#lesson .practice-why').textContent === '1 of 5'", timeout=15000)
+    tab.wait_for_function("document.querySelector('#lesson .count').textContent === '1 of 5'", timeout=15000)
     assert tab.get_attribute("#lesson .practice-video", "src") != before, "the stream was never re-requested"
     assert tab.evaluate("Tenfold.xp") == 15, "the answer already right is paid before the node restarts"
     assert tab.evaluate("Tenfold.lesson.correct") == 0
@@ -1251,7 +1253,7 @@ def test_the_tts_pair_is_sent_when_tally_is_muted(page):
     feed(tab, node, state="wrong_pose", tutor_line="Your right hand needs 7.")
     tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=10000)
     assert tab.evaluate("window.__spoken") == [], "muted says nothing"
-    assert tab.text_content("#lesson .tally-say") == "Your right hand needs 7."
+    assert tab.text_content("#lesson .say") == "Your right hand needs 7."
     assert [m["speaking"] for m in sent(tab, "tts")] == [True, False]
     assert errors == []
 
@@ -1272,7 +1274,7 @@ def test_the_tts_pair_is_sent_with_no_speech_synthesis_at_all(page):
     tab.evaluate("() => { window.__sent.length = 0; }")
     feed(tab, node, state="wrong_pose", tutor_line="Your right hand needs 7.")
     tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=10000)
-    assert tab.text_content("#lesson .tally-say") == "Your right hand needs 7."
+    assert tab.text_content("#lesson .say") == "Your right hand needs 7."
     assert [m["speaking"] for m in sent(tab, "tts")] == [True, False]
     assert errors == []
 
@@ -1332,12 +1334,12 @@ def test_the_tutor_line_is_spoken_once_and_shown_in_the_bubble(page):
              tutor_line="Your right hand needs 7, not 9.")
     tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
     tab.wait_for_timeout(200)
-    assert tab.text_content("#lesson .tally-say") == "Your right hand needs 7, not 9."
+    assert tab.text_content("#lesson .say") == "Your right hand needs 7, not 9."
     assert [u["text"] for u in tab.evaluate("window.__spoken")] == ["Your right hand needs 7, not 9."]
     # no tutor_line: the engine's phrase is the line, and it is spoken too, one beat later
     feed(tab, node, state="wrong_pose", tally="Move your right finger from 9 to 7.")
     tab.wait_for_function("window.__spoken.length === 2", timeout=10000)
-    assert tab.text_content("#lesson .tally-say") == "Move your right finger from 9 to 7."
+    assert tab.text_content("#lesson .say") == "Move your right finger from 9 to 7."
     assert [u["text"] for u in tab.evaluate("window.__spoken")] == [
         "Your right hand needs 7, not 9.", "Move your right finger from 9 to 7."]
     assert errors == []
@@ -1347,7 +1349,7 @@ VISUALS = [
     ({"kind": "pulse_finger", "hand": "right", "finger": 7}, ".practice-overlay .pulse"),
     ({"kind": "correction", "wrong_hand": "right", "expected_finger": 7}, ".practice-overlay .hand-box"),
     ({"kind": "ghost", "hand": "right", "from": 9, "to": 7}, ".practice-overlay .ghost"),
-    ({"kind": "rescue_card", "tens": 5, "units": 6, "total": 56}, ".practice-rescue span"),
+    ({"kind": "rescue_card", "tens": 5, "units": 6, "total": 56}, ".why span"),
     ({"kind": "placement_zones"}, ".practice-overlay .zone-box"),
     ({"kind": "finger_numbers"}, ".practice-overlay text.lit"),
 ]
@@ -1371,7 +1373,7 @@ def test_every_tutor_visual_renders(page):
     # the rescue card walks the whole method through, in three lines
     feed(tab, node, state="wrong_pose", exercise="8 x 7", fingers=TUTOR_FINGERS,
          tutor_visual={"kind": "rescue_card", "tens": 5, "units": 6, "total": 56})
-    assert tab.eval_on_selector_all("#lesson .practice-rescue span", "els => els.map((e) => e.textContent)") == [
+    assert tab.eval_on_selector_all("#lesson .why span", "els => els.map((e) => e.textContent)") == [
         "5 tens = 50", "2 x 3 = 6", "50 + 6 = 56"]
     # null: the finger circles and nothing else, and the card is gone
     feed(tab, node, state="wrong_pose", exercise="8 x 7", fingers=TUTOR_FINGERS, tutor_visual=None)
@@ -1379,7 +1381,7 @@ def test_every_tutor_visual_renders(page):
         "#lesson .practice-overlay .ring, #lesson .practice-overlay .zone-box, "
         "#lesson .practice-overlay .hand-box, #lesson .practice-overlay .dot",
         "els => els.length") == 0
-    assert tab.is_hidden("#lesson .practice-rescue")
+    assert tab.is_hidden("#lesson .why")
     assert errors == []
 
 
@@ -1396,15 +1398,71 @@ def test_the_ghost_follows_the_tutor_not_the_hint_level(page):
     assert errors == []
 
 
+# Where each visual has to land on the export's own overlay: the element that has to
+# exist inside #gh, and the landmark its centre has to sit on, if it sits on one.
+EXPORT_VISUALS = [
+    ({"kind": "pulse_finger", "hand": "right", "finger": 7}, "circle.ring.pulse", (0.70, 0.50)),
+    ({"kind": "correction", "wrong_hand": "right", "expected_finger": 7}, "circle.dot", (0.70, 0.50)),
+    ({"kind": "ghost", "hand": "right", "from": 9, "to": 7}, "circle.ghost", None),
+    ({"kind": "rescue_card", "tens": 5, "units": 6, "total": 56}, None, None),
+    ({"kind": "placement_zones"}, "rect.zone-box", None),
+    ({"kind": "finger_numbers"}, "text.num.lit", (0.70, 0.50)),
+]
+
+CENTRE = r"""
+(sel) => {
+  const gh = document.querySelector("#lesson #gh");
+  const el = gh.querySelector(sel);
+  if (!el) return null;
+  const box = gh.viewBox.baseVal;
+  const point = el.tagName === "text"
+    ? { x: Number(el.parentNode.getAttribute("transform").match(/-?[\d.]+/g)[0]),
+        y: Number(el.parentNode.getAttribute("transform").match(/-?[\d.]+/g)[1]) }
+    : { x: Number(el.getAttribute("cx")), y: Number(el.getAttribute("cy")) };
+  return { x: point.x / box.width, y: point.y / box.height };
+}
+"""
+
+
+def test_every_tutor_visual_is_drawn_on_the_export_markup(page):
+    """The six kinds again, this time on the export's own camera: each one is drawn
+    inside #gh, the svg exercise.html put over the picture, on the landmark it is
+    about, and none of them throws. The fingertips keep the export's structure, a
+    halo, a tip and a number inside one .fin group."""
+    context, url = page
+    tab, node, errors = tutor_page(context, url)
+    for visual, selector, landmark in EXPORT_VISUALS:
+        feed(tab, node, state="wrong_pose", exercise="8 x 7", fingers=TUTOR_FINGERS,
+             wrong=[{"hand": "right", "number": 9}], tutor_visual=visual)
+        # every fingertip is the export's group, drawn in the picture's own pixels
+        shape = tab.eval_on_selector_all(
+            "#lesson #gh g.fin",
+            "els => els.map((g) => [g.querySelectorAll('circle.halo').length,"
+            " g.querySelectorAll('circle.tip').length, g.querySelectorAll('text.num').length].join(''))")
+        assert shape == ["111"] * len(TUTOR_FINGERS), f"{visual['kind']} lost the export fingertips"
+        if selector is None:
+            # the rescue card is the one visual with no shape on the hands: it is the
+            # export's band of lines over the bottom of the picture
+            assert tab.eval_on_selector_all("#lesson .cam .why span", "els => els.length") == 3
+            continue
+        assert tab.eval_on_selector_all(f"#lesson #gh {selector}", "els => els.length") >= 1, \
+            f"{visual['kind']} drew nothing inside the export overlay"
+        if landmark:
+            at = tab.evaluate(CENTRE, selector)
+            assert at is not None and abs(at["x"] - landmark[0]) < 0.01 and abs(at["y"] - landmark[1]) < 0.01, \
+                f"{visual['kind']} is not on the landmark: {at}"
+    assert errors == []
+
+
 def test_a_tap_on_tally_asks_for_help(page):
     """No new button: Tally himself and his bubble are the ask. The server already
     accepts hint, and it is the only help that costs the first try bonus."""
     context, url = page
     tab, node, errors = tutor_page(context, url)
-    tab.click("#lesson .speaker .tally", force=True)
+    tab.click("#lesson .foot > .tally-art", force=True)
     tab.wait_for_timeout(100)
     assert [m["type"] for m in sent(tab, "hint")] == ["hint"]
-    tab.click("#lesson .speech", force=True)
+    tab.click("#lesson .say", force=True)
     tab.wait_for_timeout(100)
     assert len(sent(tab, "hint")) == 2, "the bubble asks too"
     assert errors == []
@@ -1414,7 +1472,7 @@ def test_a_tap_on_tally_asks_for_help(page):
 # screen with text in it and no voice behind it is the bug this list catches.
 # Tally's three bubbles, plus the one closing line he keeps on the finish card. The
 # titles, the XP count and the level names are read on screen and never spoken.
-BUBBLES = ["#check-say", "#u-say", "#lesson .tally-say", "#fn-1 .sub"]
+BUBBLES = ["#check-say", "#u-say", "#lesson .say", "#fn-1 .sub"]
 
 SILENT_BUBBLES = """
 (selectors) => {
@@ -1470,7 +1528,7 @@ def test_every_bubble_shown_is_spoken(page):
 
     # the lesson bubble: the line it opens on, then every line the tutor sends
     tab.click('[data-action="start"]', force=True)
-    tab.wait_for_selector("#lesson .practice-stage", timeout=10000)
+    tab.wait_for_selector("#lesson .cam", timeout=10000)
     node = running_lesson(tab)
     tab.wait_for_timeout(300)
     assert silent(tab) == []

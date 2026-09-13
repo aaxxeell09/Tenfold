@@ -627,7 +627,7 @@
     r.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const text = e.results[i][0].transcript.trim();
-        const heard = $(".heard");
+        const heard = $("#lesson .heard");
         if (heard) heard.textContent = text && voice.gate ? `heard: ${text}` : "";
         if (checkRun && checkRun.step === 3 && !checkRun.done) $("#check-miclabel").textContent = text || "Listening";
         if (e.results[i].isFinal) { sendSpeech(text); submitSpoken(text); }
@@ -648,11 +648,13 @@
   function micLabel() { return canHear() ? (voice.running ? "Listening" : "Mic off") : "Type it"; }
   // the live listening state, on the lesson's mic and on the check's pill
   function markMic() {
-    const mic = $(".mic");
+    const mic = $("#lesson .mic");
     if (mic) {
       mic.hidden = !voice.recognition;
       mic.classList.toggle("is-on", voice.running && !voice.denied);
       mic.classList.toggle("is-off", !voice.running || voice.denied);
+      // the export writes the quiet pill as .off; the app has said is-off since v1
+      mic.classList.toggle("off", !voice.running || voice.denied);
       mic.classList.toggle("is-denied", voice.denied);
       const label = $(".mic-label", mic);
       if (label) label.textContent = micLabel();
@@ -768,9 +770,9 @@
     link.trouble = Boolean(on);
     if (!link.trouble) return;
     if (lesson) {
-      const sub = $("#lesson .speech-sub");
-      if (sub) sub.textContent = "Trying again";
-      say(LINK_SAY, $("#lesson .tally-say"), $("#lesson .tally"));
+      // the export's bubble is the one place a line is said: there is no sub line
+      // under it any more, so the trouble is said the way everything else is
+      say(LINK_SAY, $("#lesson .say"), lessonTally());
     } else if (checkRun) {
       checkSay(LINK_SAY);
     }
@@ -824,7 +826,7 @@
     if (tutorLine && tutorLine !== lesson.said) {
       lesson.said = tutorLine;
       const turn = ++lesson.turn;
-      say(tutorLine, $("#lesson .tally-say"), $("#lesson .tally"), { still: () => Boolean(lesson) && lesson.turn === turn });
+      say(tutorLine, $("#lesson .say"), lessonTally(), { still: () => Boolean(lesson) && lesson.turn === turn });
     }
   }
   // --demo: the map opens as a showcase, first unit done, second current
@@ -879,46 +881,57 @@
     if (gain > 0) addXp(gain);
     return gain;
   }
+  // The screen is the export's exercise.html, which lives in index.html: the shell
+  // does not build it, it puts it back to the state a node opens on.
   function shellPractice() {
-    const s = lesson;
-    const hearts = s.hearts === null ? "" : `<div class="hearts" aria-label="${s.hearts} hearts">${use("icon-flame")}${s.hearts}</div>`;
-    $("#lesson").innerHTML = `
-      <div class="lesson-top">
-        <button class="backbtn2 lesson-back" data-action="quit" aria-label="Quit lesson"><img src="art/btn-back.png" alt=""></button>
-        <div class="bar lesson-bar"><i class="bar-fill" style="width:0%"></i></div>
-        ${hearts}<div class="lesson-count practice-why"></div>
-      </div>
-      <div class="cl-body">
-        <p class="cl-exercise practice-exercise">Getting ready</p>
-        <div class="cam cl-cam">
-          <div class="practice-stage" data-state="">
-            <img class="practice-video" alt="">
-            <svg class="practice-overlay" viewBox="0 0 1.333 1" preserveAspectRatio="none"></svg>
-          </div>
-          <span class="cam-tag">${use("icon-camera")}camera</span>
-          <div class="cam-veil">I cannot quite see your fingers<small>Hold them up, palms toward me</small></div>
-          <div class="reasons practice-reasoning"></div>
-          <div class="rescue practice-rescue" hidden></div>
-        </div>
-        <div class="cl-foot">
-          <!-- Tally and his bubble are the ask for help: a tap on either sends hint,
-               which is the only help that costs the first try bonus. No new button. -->
-          <div class="speaker" data-action="help" role="button" aria-label="Ask Tally for help">
-            <div class="tally" data-tally="ready"></div>
-            <div class="speech"><span class="tally-say"></span><small class="speech-sub">I am watching your fingers</small></div>
-          </div>
-          <div class="practice-answer">
-            <button class="mic" type="button" data-action="mic" hidden aria-label="say the answer">${use("icon-mic")}<span class="bars"><i></i><i></i><i></i></span><span class="mic-label">Listening</span></button>
-            <span class="typed"></span><span class="caret"></span>
-            <div class="heard"></div>
-          </div>
-        </div>
-      </div>`;
-    decorate($("#lesson"));
+    const root = $("#lesson");
+    const frame = $(".frame", root);
+    frame.className = "frame clean";
+    frame.dataset.state = "waiting";
+    $(".cam", root).dataset.state = "";
+    root.dataset.state = "";
+    root.dataset.reaction = "";
+    root.dataset.tutor = "WORKING";
+    root.dataset.level = "0";
+    root.dataset.mode = "normal";
+    const ex = $(".ex", root);
+    ex.textContent = "Getting ready"; ex.dataset.ex = "";
+    $(".count", root).textContent = "";
+    $(".hearts", root).dataset.hearts = "";
+    $(".bar i", root).style.width = "0%";
+    $(".say", root).textContent = "";
+    $(".typed", root).textContent = "";
+    $(".heard", root).textContent = "";
+    $(".gh", root).replaceChildren();
+    const band = $(".why", root);
+    band.replaceChildren(); band.classList.remove("is-on"); band.dataset.band = "";
+    const tally = $(".foot > .tally-art", root);
+    if (tally) tally.setAttribute("data-tally", "ready");
+    decorate(root);
+    renderHearts();
     // the first line of the lesson goes through the same door as every other line
-    say("Show me both hands.", $("#lesson .tally-say"), $("#lesson .tally"));
-    videoOn($(".practice-video", $("#lesson")));
+    say("Show me both hands.", $("#lesson .say"), lessonTally());
+    videoOn($(".practice-video", root));
     markMic();
+  }
+  // Tally is the render, mounted by tally.js in the export's box. The box is the
+  // direct child of the foot; the render tally.js builds inside it carries the
+  // same class, so the selector has to say which of the two it means.
+  function lessonTally() { return $("#lesson .foot > .tally-art"); }
+  // a boss carries hearts, a lesson does not. The export's top strip has no place
+  // for them, so they sit beside the counter, the way states.html puts its pills.
+  function renderHearts() {
+    const s = lesson, box = $("#lesson .hearts");
+    if (!box || !s) return;
+    box.hidden = s.hearts === null;
+    if (s.hearts === null) return;
+    if (box.dataset.hearts !== String(s.hearts)) {
+      box.dataset.hearts = String(s.hearts);
+      box.innerHTML = use("icon-flame") + s.hearts;
+      box.setAttribute("aria-label", `${s.hearts} hearts`);
+      decorate(box);
+    }
+    if (s.hit) { box.classList.add("is-hit"); setTimeout(() => box.classList.remove("is-hit"), 420); s.hit = false; }
   }
   // ---------- the camera stream ----------
   // /video is a response that never ends, so an <img> streams for exactly as long as
@@ -974,35 +987,63 @@
     overlay.style.cssText = `left:${video.offsetLeft + (W - w) / 2}px;top:${video.offsetTop + (H - h) / 2}px;width:${w}px;height:${h}px`;
     return ratio;
   }
+  // The four looks the export draws, from the state the server is in. The server's
+  // own state stays on the camera box and on the view, which is what the overlay
+  // and the tests read; this is only what the picture is dressed as.
+  function lessonLook(m) {
+    if (m.reaction === "cannot_see") return "blind";
+    if (m.state === "answer_correct") return "yes";
+    if (m.state === "wrong_pose" || m.state === "answer_wrong") return "almost";
+    return "waiting";
+  }
+  // "8 x 7" as the export writes it, with the sign in its own green span. A state
+  // message arrives on every camera frame, so nothing is rebuilt that has not changed.
+  function writeExercise(el, exercise) {
+    if (el.dataset.ex === String(exercise || "")) return;
+    el.dataset.ex = String(exercise || "");
+    const parts = String(exercise || "").split(/\s*x\s*/i);
+    if (parts.length !== 2) { el.textContent = "Getting ready"; return; }
+    const sign = document.createElement("span");
+    sign.className = "eq";
+    sign.textContent = "×";
+    el.replaceChildren(document.createTextNode(parts[0] + " "), sign, document.createTextNode(" " + parts[1]));
+  }
   function renderPractice(m) {
     const s = lesson, root = $("#lesson");
-    const bar = $(".bar-fill", root);
+    const frame = $(".frame", root), cam = $(".cam", root);
+    const bar = $(".bar i", root);
     if (bar) bar.style.width = `${Math.min(100, (s.done ? s.done - 1 : 0) / s.total * 100)}%`;
-    const hearts = $(".hearts", root);
-    if (hearts && s.hearts !== null) {
-      hearts.innerHTML = use("icon-flame") + s.hearts; decorate(hearts);
-      if (s.hit) { hearts.classList.add("is-hit"); setTimeout(() => hearts.classList.remove("is-hit"), 420); s.hit = false; }
-    }
-    $(".practice-exercise", root).textContent = (m.exercise || "").replace(" x ", " × ") || "Getting ready";
-    $(".practice-why", root).textContent = s.done ? `${Math.min(s.done, s.total)} of ${s.total}` : "";
-    // the bubble belongs to the voice: say() writes it when the line is spoken, so the
-    // words on screen are the words the child is hearing
-    $(".speech-sub", root).textContent = m.reaction === "cannot_see" ? "Palms toward the camera" : m.reason ? ({ retry: "One more try", review: "You have met this one", confidence: "An easy one", next_new: "Brand new", level_up: "Jumping ahead" }[m.reason] || "") : "I am watching your fingers";
-    setTally($(".tally", root), m.reaction === "cannot_see" ? "squint" : (MOOD[m.state] || "ready"));
+    renderHearts();
+    writeExercise($(".ex", root), m.exercise);
+    $(".count", root).textContent = s.done ? `${Math.min(s.done, s.total)} of ${s.total}` : "";
+    setTally(lessonTally(), m.reaction === "cannot_see" ? "squint" : (MOOD[m.state] || "ready"));
+    const kind = m.tutor_visual ? m.tutor_visual.kind : null;
+    const look = lessonLook(m);
+    frame.classList.toggle("detected", (m.fingers || []).length > 0);
+    frame.classList.toggle("yes", look === "yes");
+    // the export's guide, the arc and the ring drawn on the hands, is what a
+    // correction and a ghost are made of
+    frame.classList.toggle("coach", kind === "correction" || kind === "ghost");
+    if (look !== "yes") frame.classList.remove("is-cheer");
+    else if (frame.dataset.state !== "yes") { void frame.offsetWidth; frame.classList.add("is-cheer"); }
+    frame.dataset.state = look;
     root.dataset.state = m.state;
     root.dataset.reaction = m.reaction || "";
-    $(".practice-stage", root).dataset.state = m.state;
-    const band = $(".reasons", root);
-    const lines = m.reasoning || [];
-    root.classList.toggle("has-reasons", lines.length > 0);
-    band.innerHTML = lines.map((line) => `<span>${line}</span>`).join("");
-    renderRescue(m, root);
-    drawFingers(m, $(".practice-stage", root));
+    // the tutor's own state, its rung on the ladder and the mode are diagnostics in
+    // V0: nothing is drawn from them, they are here to be read off the page
+    root.dataset.tutor = m.tutor_state || "WORKING";
+    root.dataset.level = String(m.intervention_level || 0);
+    root.dataset.mode = m.mode || "normal";
+    cam.dataset.state = m.state;
+    renderBand(m, root);
+    drawFingers(m, cam);
   }
   // ---------- what the tutor draws ----------
-  // tutor_visual is null or one of six kinds. Everything here is an addition inside
-  // the camera view, in the language the page already draws in: the same fingertip
-  // circles, the same gold ghost, the same dashed zones as the start check.
+  // tutor_visual is null or one of six kinds. Every one of them is drawn inside the
+  // camera view, on the landmarks, in the treatment design/states.html gives it: the
+  // pulsing halo, the orange outline on the hand at fault, the ghost finger sliding
+  // to where it belongs, the dashed placement zones, the numbers lighting up, and
+  // the rescue card walked through over the bottom of the picture.
   function rescueLines(card, exercise) {
     const tens = Number(card.tens) || 0, units = Number(card.units) || 0;
     const up = String(exercise || "").split(/x/i).map((part) => Number(part.trim()));
@@ -1014,99 +1055,164 @@
     lines.push(`${tens * 10} + ${units} = ${Number(card.total) || tens * 10 + units}`);
     return lines;
   }
-  function renderRescue(m, root) {
-    const box = $(".practice-rescue", root);
+  // one band over the bottom of the picture, the export's .why: the rescue card
+  // when the tutor sends one, the engine's reasoning lines otherwise
+  function renderBand(m, root) {
+    const box = $(".why", root);
     if (!box) return;
     const visual = m.tutor_visual || null;
     const card = visual && visual.kind === "rescue_card" ? visual : null;
-    box.hidden = !card;
-    if (!card) { box.dataset.card = ""; box.replaceChildren(); return; }
-    const lines = rescueLines(card, m.exercise);
-    if (box.dataset.card === lines.join("|")) return;
-    box.dataset.card = lines.join("|");
+    const lines = card ? rescueLines(card, m.exercise) : (m.reasoning || []);
+    box.classList.toggle("is-on", lines.length > 0);
+    const key = (card ? "card|" : "why|") + lines.join("|");
+    if (box.dataset.band === key) return;
+    box.dataset.band = key;
     box.replaceChildren();
-    lines.forEach((line) => { const el = document.createElement("span"); el.textContent = line; box.appendChild(el); });
+    lines.forEach((line) => {
+      const el = document.createElement("span");
+      // a rescue line is the tutor's own text; a reasoning line is the engine's
+      // phrase, which carries the export's <b> around the number it is about
+      if (card) el.textContent = line; else el.innerHTML = line;
+      box.appendChild(el);
+    });
   }
-  // a ring carries a CSS animation, so one already pointing at the same finger is
-  // kept rather than rebuilt: a new element every frame would restart the animation
-  function ringAt(kept, kind, id, x, y) {
-    const tag = `${kind}:${id}`;
-    const ring = kept[tag] || document.createElementNS(NS, "circle");
-    ring.setAttribute("class", `ring ${kind}`);
-    ring.dataset.ring = tag;
-    ring.setAttribute("cx", x); ring.setAttribute("cy", y); ring.setAttribute("r", 0.055);
-    return ring;
+  function svgEl(tag, cls) {
+    const el = document.createElementNS(NS, tag);
+    if (cls) el.setAttribute("class", cls);
+    return el;
   }
-  // the two hand zones of SPEC section 9, in the dashed style of the start check
-  function placementZones(overlay, span) {
+  function dot(cls, x, y, r) {
+    const c = svgEl("circle", cls);
+    c.setAttribute("cx", x); c.setAttribute("cy", y); c.setAttribute("r", r);
+    return c;
+  }
+  // an aid carries a CSS or SMIL animation, so one already saying the same thing in
+  // the same place is kept rather than rebuilt: a new element every frame would
+  // restart the animation and nothing would ever move
+  function keeper(overlay) {
+    const kept = {};
+    $$("[data-keep]", overlay).forEach((el) => { kept[el.dataset.keep] = el; });
+    return (tag, build) => {
+      if (kept[tag]) return kept[tag];
+      const el = build();
+      el.dataset.keep = tag;
+      return el;
+    };
+  }
+  // a fingertip is close enough to where it was for an aid pointing at it to stay
+  const near = (p) => `${Math.round(p.x / 24)}:${Math.round(p.y / 24)}`;
+  // the two hand zones of SPEC section 9, in the dashed style states.html draws them
+  function placementZones(overlay, W, H) {
     [0.3, 0.7].forEach((centre) => {
-      const zone = document.createElementNS(NS, "rect");
-      zone.setAttribute("class", "zone-box");
-      zone.setAttribute("x", (centre - 0.15) * span); zone.setAttribute("y", 0.275);
-      zone.setAttribute("width", 0.3 * span); zone.setAttribute("height", 0.55);
-      zone.setAttribute("rx", 0.06);
+      const zone = svgEl("rect", "zone-box");
+      zone.setAttribute("x", (centre - 0.15) * W); zone.setAttribute("y", 0.18 * H);
+      zone.setAttribute("width", 0.3 * W); zone.setAttribute("height", 0.64 * H);
+      zone.setAttribute("rx", 0.055 * W);
       overlay.appendChild(zone);
     });
   }
-  // the wrong hand, outlined where it is. Nothing is drawn on the hand that is right.
-  function handOutline(overlay, fingers) {
-    if (!fingers.length) return;
-    const xs = fingers.map((f) => f.x), ys = fingers.map((f) => f.y), pad = 0.06;
-    const box = document.createElementNS(NS, "rect");
-    box.setAttribute("class", "hand-box");
+  // the hand at fault, outlined where it is. Nothing is drawn on the hand that is right.
+  function handOutline(overlay, points, W) {
+    if (!points.length) return;
+    const xs = points.map((p) => p.x), ys = points.map((p) => p.y), pad = 0.05 * W;
+    const box = svgEl("rect", "hand-box");
     box.setAttribute("x", Math.min.apply(null, xs) - pad); box.setAttribute("y", Math.min.apply(null, ys) - pad);
     box.setAttribute("width", Math.max.apply(null, xs) - Math.min.apply(null, xs) + pad * 2);
     box.setAttribute("height", Math.max.apply(null, ys) - Math.min.apply(null, ys) + pad * 2);
-    box.setAttribute("rx", 0.06);
+    box.setAttribute("rx", 0.05 * W);
     overlay.appendChild(box);
   }
+  // the export's guide: the arc crawling from the finger that is wrong to the one
+  // the exercise asks for, the arrow head at the end of it, and the ring waiting there
+  function guideArc(from, to) {
+    const g = svgEl("g", "guide");
+    const mx = (from.x + to.x) / 2, my = Math.min(from.y, to.y) - 128;
+    const angle = Math.atan2((to.y - 44) - my, to.x - mx) * 180 / Math.PI;
+    const arc = svgEl("path", "arc");
+    arc.setAttribute("d", `M ${from.x} ${from.y - 40} Q ${mx} ${my} ${to.x} ${to.y - 44}`);
+    const head = svgEl("polygon", "head");
+    head.setAttribute("points", "0,-15 30,0 0,15");
+    head.setAttribute("transform", `translate(${to.x},${to.y - 44}) rotate(${angle})`);
+    g.append(arc, head, dot("ring", to.x, to.y, 47));
+    return g;
+  }
+  // the ghost finger of states.html: a translucent tip that slides from where the
+  // finger is to where it belongs, over and over, with the target ringed
+  function ghostSlide(from, to) {
+    const g = svgEl("g", "guide");
+    const ghost = dot("ghost", 0, 0, 26);
+    const move = svgEl("animateTransform");
+    move.setAttribute("attributeName", "transform");
+    move.setAttribute("type", "translate");
+    move.setAttribute("values", `${from.x} ${from.y};${to.x} ${to.y};${to.x} ${to.y};${from.x} ${from.y}`);
+    move.setAttribute("keyTimes", "0;0.55;0.82;1");
+    move.setAttribute("dur", "2.8s");
+    move.setAttribute("repeatCount", "indefinite");
+    ghost.appendChild(move);
+    g.append(dot("ring", to.x, to.y, 42), ghost);
+    return g;
+  }
+  // The overlay is the export's .gh and it draws in the picture's own pixels: 1194
+  // across, as tall as the camera's ratio makes it. fitOverlay has already laid it
+  // over exactly the rendered video box, so a landmark, which is a frame fraction,
+  // multiplies straight through.
+  const VIEW_W = 1194;
   function drawFingers(m, stage) {
     const overlay = $(".practice-overlay", stage);
     if (!overlay) return;
-    const span = fitOverlay(stage);
-    const kept = {};
-    $$(".ring", overlay).forEach((el) => { kept[el.dataset.ring] = el; });
+    const ratio = fitOverlay(stage);
+    const W = VIEW_W, H = Math.round(VIEW_W / ratio);
+    overlay.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    const keep = keeper(overlay);
     overlay.replaceChildren();
-    const key = (f) => `${f.hand}:${f.number}`;
-    const wrong = new Set((m.wrong || []).map(key));
-    const match = new Set((m.match || []).map(key));
+    const id = (f) => `${f.hand}:${f.number}`;
+    const wrong = new Set((m.wrong || []).map(id));
+    const match = new Set((m.match || []).map(id));
     const visual = m.tutor_visual || null;
     const kind = visual ? visual.kind : null;
-    const ghost = kind === "ghost" && visual.hand && visual.to ? `${visual.hand}:${visual.to}` : null;
-    const pulse = kind === "pulse_finger" && visual.hand && visual.finger ? `${visual.hand}:${visual.finger}` : null;
-    const expect = kind === "correction" && visual.wrong_hand && visual.expected_finger ? `${visual.wrong_hand}:${visual.expected_finger}` : null;
     const fingers = m.fingers || [];
-    if (kind === "placement_zones") placementZones(overlay, span);
-    if (kind === "correction") {
-      handOutline(overlay, fingers.filter((f) => f.hand === visual.wrong_hand).map((f) => ({ x: f.x * span, y: f.y })));
-    }
+    const at = {};
+    fingers.forEach((f) => { at[id(f)] = { x: f.x * W, y: f.y * H }; });
+    const pulse = kind === "pulse_finger" ? `${visual.hand}:${visual.finger}` : null;
+    const expect = kind === "correction" ? `${visual.wrong_hand}:${visual.expected_finger}` : null;
+    const ghostTo = kind === "ghost" ? `${visual.hand}:${visual.to}` : null;
+    const ghostFrom = kind === "ghost" ? `${visual.hand}:${visual.from}` : null;
+    if (kind === "placement_zones") placementZones(overlay, W, H);
+    if (kind === "correction") handOutline(overlay, fingers.filter((f) => f.hand === visual.wrong_hand).map((f) => at[id(f)]), W);
     for (const finger of fingers) {
-      const id = key(finger);
-      const colour = wrong.has(id) ? "#f79433" : match.has(id) ? "#2fae82" : "#f4f6fd";
-      if (id === ghost) overlay.appendChild(ringAt(kept, "ghost", id, finger.x * span, finger.y));
-      if (id === pulse) overlay.appendChild(ringAt(kept, "pulse", id, finger.x * span, finger.y));
-      const c = document.createElementNS(NS, "circle");
-      c.setAttribute("cx", finger.x * span); c.setAttribute("cy", finger.y); c.setAttribute("r", 0.036);
-      c.setAttribute("fill", "rgba(42,48,80,0.78)"); c.setAttribute("stroke", colour); c.setAttribute("stroke-width", 0.006);
-      c.dataset.number = finger.number;
-      overlay.appendChild(c);
-      if (id === expect) {
-        const dot = document.createElementNS(NS, "circle");
-        dot.setAttribute("class", "dot");
-        dot.setAttribute("cx", finger.x * span); dot.setAttribute("cy", finger.y - 0.052); dot.setAttribute("r", 0.014);
-        overlay.appendChild(dot);
+      const tag = id(finger), p = at[tag];
+      const g = svgEl("g", "fin" + (match.has(tag) ? " want" : "") + (wrong.has(tag) ? " bad" : ""));
+      g.setAttribute("transform", `translate(${p.x},${p.y})`);
+      g.dataset.hand = finger.hand;
+      g.dataset.number = finger.number;
+      const num = svgEl("text", kind === "finger_numbers" ? "num lit" : "num");
+      num.setAttribute("y", 10);
+      num.dataset.number = finger.number;
+      num.textContent = finger.number;
+      g.append(dot("halo", 0, 0, 38), dot("tip", 0, 0, 32), num);
+      overlay.appendChild(g);
+    }
+    // the aids go over the fingertips, so none of them is hidden behind a circle
+    if (pulse && at[pulse]) {
+      overlay.appendChild(keep(`pulse:${pulse}:${near(at[pulse])}`, () => dot("ring pulse", at[pulse].x, at[pulse].y, 40)));
+    }
+    if (expect && at[expect]) {
+      const wrongOne = (m.wrong || []).map(id).find((tag) => tag.indexOf(visual.wrong_hand + ":") === 0);
+      if (wrongOne && at[wrongOne] && wrongOne !== expect) {
+        overlay.appendChild(keep(`arc:${wrongOne}:${expect}:${near(at[expect])}`, () => guideArc(at[wrongOne], at[expect])));
       }
-      const t = document.createElementNS(NS, "text");
-      t.setAttribute("x", finger.x * span); t.setAttribute("y", finger.y + 0.019); t.setAttribute("fill", colour);
-      if (kind === "finger_numbers") t.setAttribute("class", "lit");
-      t.dataset.number = finger.number; t.textContent = finger.number;
-      overlay.appendChild(t);
+      overlay.appendChild(dot("dot", at[expect].x, at[expect].y, 19));
+    }
+    if (ghostTo && at[ghostTo] && at[ghostFrom]) {
+      overlay.appendChild(keep(`ghost:${ghostFrom}:${ghostTo}:${near(at[ghostTo])}`, () => ghostSlide(at[ghostFrom], at[ghostTo])));
+    } else if (ghostTo && at[ghostTo]) {
+      overlay.appendChild(dot("ghost", at[ghostTo].x, at[ghostTo].y, 26));
     }
   }
   function setTyped(value) {
     if (!lesson && !checkRun) return;
     if (lesson) lesson.typed = value;
-    const el = $(".typed"); if (el) el.textContent = value;
+    const el = $("#lesson .typed"); if (el) el.textContent = value;
     if (checkRun && !lesson) {
       // the check has no answer field of its own: the pill carries the digits, and
       // it has to follow a Backspace back down to the label
@@ -1331,7 +1437,7 @@
   // the first click of the session is the gesture Chrome needs to open the mic
   document.addEventListener("click", armVoice, { capture: true });
   window.addEventListener("hashchange", route);
-  window.addEventListener("resize", () => { if (lesson) fitOverlay($("#lesson .practice-stage")); if (checkRun) fitOverlay($("#check-cam")); });
+  window.addEventListener("resize", () => { if (lesson) fitOverlay($("#lesson .cam")); if (checkRun) fitOverlay($("#check-cam")); });
 
   // ---------- boot ----------
   function watchCamera() {
@@ -1346,7 +1452,10 @@
     probe.alt = ""; probe.src = "/video";
   }
   if (params.get("dev") === "1") $$(".dev-reset").forEach((el) => { el.hidden = false; });
-  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); } };
+  // startLesson is on the surface so the camera lesson can be opened without the path
+  // screen: the two are wired by different hands, and a test of this screen should
+  // fail for this screen's own reasons.
+  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, startLesson, get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); } };
   route();
   markMute();
   watchCamera();

@@ -1088,3 +1088,44 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 #check .mic { display: none; }
 #check .frame[data-step="3"] .mic { display: flex !important; }
 #check .mic.is-off svg, #check .mic.is-off .bars i { color: rgba(244, 246, 253, .5); background: rgba(244, 246, 253, .5); animation: none; }
+/* ---------------------------------------------------------------------------
+   Lesson screen addition. The export's own exercise.html rules are above; these
+   are the things the live screen needs and the export page has no place for:
+   the camera image itself, the answer field, the hearts of a boss, Tally as a
+   [data-tally] host inside the export's box, and the six tutor visuals of
+   design/states.html drawn on the landmarks instead of on traced hands.
+   --------------------------------------------------------------------------- */
+/* the MJPEG stream fills the camera box; the overlay is laid over its rendered box */
+#lesson .practice-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; display: block; }
+
+/* Tally is the 3D render, mounted by tally.js inside the export's 92 by 96 box.
+   The box keeps the size and the bob; the render inside it just fills it. */
+#lesson [data-tally] .tally-art { width: 100%; height: 100%; animation: none; }
+
+/* the answer field: the digits the child types, then the export's mic pill */
+#lesson .answer { margin-left: auto; display: flex; align-items: center; gap: 10px; position: relative; }
+#lesson .answer .typed { font-size: 34px; font-weight: 900; color: var(--eel); font-variant-numeric: tabular-nums; }
+#lesson .answer .caret { width: 4px; height: 34px; border-radius: 2px; background: var(--green); animation: lx-caret 1s steps(1) infinite; }
+@keyframes lx-caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+#lesson .answer .heard { position: absolute; right: 0; bottom: 100%; margin-bottom: 6px; color: var(--hare); font-size: 13px; font-weight: 800; white-space: nowrap; }
+
+/* hearts on a boss, in the muted strip beside the counter, the way states.html
+   puts its pills there */
+#lesson .hearts { display: flex; align-items: center; gap: 5px; color: var(--red); font-size: 15px; font-weight: 900; }
+#lesson .hearts svg { width: 20px; height: 20px; }
+#lesson .hearts.is-hit { animation: lx-hit 400ms ease; }
+@keyframes lx-hit { 20% { transform: translateX(-5px); } 40% { transform: translateX(5px); } 60% { transform: translateX(-3px); } 80% { transform: translateX(3px); } }
+
+/* the rescue card and the reasoning lines share the export's .why band, so the
+   band has to be able to show outside the yes state */
+#lesson .why.is-on { display: flex; }
+
+/* the six tutor visuals, in the treatment design/states.html gives each one */
+#lesson .gh .ring.pulse { fill: rgba(47, 174, 130, 0.4); stroke: var(--green); stroke-width: 5; animation: lx-pulse 1.4s ease-in-out infinite; }
+@keyframes lx-pulse { 0%, 100% { r: 34px; opacity: 0.85; } 50% { r: 54px; opacity: 1; } }
+#lesson .gh .ghost { fill: rgba(255, 255, 255, 0.42); stroke: #fff; stroke-width: 4; stroke-dasharray: 9 8; }
+#lesson .gh .target { fill: none; stroke: var(--green); stroke-width: 6; stroke-dasharray: 12 10; }
+#lesson .gh .dot { fill: var(--green); stroke: #fff; stroke-width: 4; }
+#lesson .gh .zone-box { fill: rgba(255, 255, 255, 0.04); stroke: rgba(255, 255, 255, 0.5); stroke-width: 6; stroke-dasharray: 22 18; }
+#lesson .gh .hand-box { fill: rgba(247, 148, 51, 0.12); stroke: var(--orange); stroke-width: 9; }
+#lesson .gh text.num.lit { fill: #fff; }
