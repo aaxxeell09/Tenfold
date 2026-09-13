@@ -54,10 +54,9 @@ TENS = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty", 6: "sixty",
 def open_lesson(tab, url):
     """Land on the practice path and start the first node, where voice lives."""
     tab.goto(url + "#practice", wait_until="domcontentloaded")
-    tab.wait_for_selector('[data-action="node"]', timeout=10000)
-    tab.click('[data-action="node"]')
-    tab.wait_for_selector('[data-action="start"]', timeout=5000)
-    tab.click('[data-action="start"]')
+    # the Start bubble sits on the current node; tapping it opens the lesson
+    tab.wait_for_selector('[data-action="start"]', timeout=10000)
+    tab.click('[data-action="start"]', force=True)
     tab.wait_for_selector("#lesson .practice-stage", timeout=10000)
 
 

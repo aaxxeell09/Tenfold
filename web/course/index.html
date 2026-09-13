@@ -8,7 +8,7 @@
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body class="tablet" data-view="welcome">
 <div class="frame" id="frame">
@@ -18,7 +18,6 @@
     <div class="stack">
       <div class="tally" data-tally="happy" aria-hidden="true"></div>
       <h1>Hi! I am Tally. What is your name?</h1>
-      <p class="sub">I will remember it, and your stars too.</p>
       <form id="welcome-form" autocomplete="off">
         <input class="field" id="welcome-name" type="text" maxlength="14" placeholder="Your first name" aria-label="Your first name" style="text-align:center">
         <button class="btn btn-primary btn-wide btn-xl" type="submit">Let's go</button>
@@ -29,7 +28,10 @@
   <!-- home: two doors. Learn is a showcase, Practice is the real path -->
   <section class="hub view" id="home" hidden>
     <nav class="minibar" aria-label="More">
-      <a class="nav-item" href="#profile"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-unicorn"></use></svg></span><span>Profile</span></a>
+      <a class="levelbox" href="#profile" data-levelbox>
+        <div class="tally avatar" data-tally="happy" data-outfit></div>
+        <div class="lvl"><div class="lvl-top"><b data-level-name></b><span data-level-xp></span></div><div class="bar2 lvl-bar"><i data-level-fill style="width:0%"></i></div></div>
+      </a>
     </nav>
     <h1 id="greeting">Which door today?</h1>
     <div class="doors">
@@ -66,8 +68,11 @@
       <div id="showcase"></div>
     </main>
     <aside class="right">
-      <div class="stats" id="showcase-stats"></div>
-      <section class="panel" id="showcase-quest"></section>
+      <section class="panel levelcard">
+        <div class="tally" data-tally="happy" data-outfit></div>
+        <div class="lvl"><div class="lvl-top"><b data-level-name></b><span data-level-xp></span></div><div class="bar2 lvl-bar"><i data-level-fill style="width:0%"></i></div></div>
+        <p class="note" data-level-next></p>
+      </section>
       <section class="panel panel-hands">
         <div class="panel-hands-art"><svg viewBox="0 0 48 48" style="width:64px;height:64px;color:var(--green)"><use href="#icon-lesson"></use></svg></div>
         <div><h3>Four units</h3><p>Finger tricks from 6 to 20, one step at a time.</p></div>
@@ -75,34 +80,30 @@
     </aside>
   </div>
 
-  <!-- practice: the real path, from levels.js -->
-  <div class="app view" id="practice" hidden>
-    <aside class="side" aria-label="Main">
-      <a class="wordmark" href="#home">tenfold</a>
-      <nav class="side-nav">
-        <a class="nav-item" href="#home"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-home"></use></svg></span><span>Home</span></a>
-        <a class="nav-item" href="#learn"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-lesson"></use></svg></span><span>Learn</span></a>
-        <a class="nav-item is-active" href="#practice"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-camera"></use></svg></span><span>Practice</span></a>
-        <a class="nav-item" href="#profile"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-unicorn"></use></svg></span><span>Profile</span></a>
-      </nav>
-      <button class="dev-reset" data-action="reset" hidden>Reset progress</button>
-    </aside>
-    <main class="center">
-      <p class="path-hint">Practice path</p>
-      <div id="course"></div>
-    </main>
-    <aside class="right">
-      <div class="stats" id="stats"></div>
-      <section class="panel" id="quest"></section>
-      <section class="panel panel-hands panel-camera">
-        <div class="panel-hands-art panel-camera-art"><svg viewBox="0 0 48 48" style="width:64px;height:64px;color:var(--green)"><use href="#icon-lesson"></use></svg></div>
-        <div>
-          <h3>Use your real hands</h3>
-          <p>The camera checks your fingers while you count.</p>
+  <!-- practice: the real path from levels.js, one unit at a time -->
+  <section class="pp view" id="practice" hidden>
+    <div class="pp-top">
+      <a class="backbtn2" href="#home" aria-label="Back"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M 28 12 L 16 24 L 28 36" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
+      <div><p class="sub">Practice path</p><h1 id="crumb">Meet your fingers</h1></div>
+      <a class="levelbox" href="#profile" data-levelbox>
+        <div class="tally avatar" data-tally="happy" data-outfit></div>
+        <div class="lvl"><div class="lvl-top"><b data-level-name></b><span data-level-xp></span></div><div class="bar2 lvl-bar"><i data-level-fill style="width:0%"></i></div></div>
+      </a>
+    </div>
+    <div class="pp-body">
+      <section class="unitcard" id="unitcard">
+        <div class="head"><div class="kicker" id="u-kicker"></div><h2 id="u-name"></h2><p id="u-desc"></p></div>
+        <div class="mid">
+          <div class="metric"><span>Lessons done</span><b id="u-count"></b></div>
+          <div class="bar2"><i id="u-bar" style="width:0%"></i></div>
+          <div class="tallyspot"><div class="tally" id="u-tally" data-tally="happy" data-outfit></div><p class="line" id="u-say"></p></div>
         </div>
+        <div class="units" id="unit-switch"></div>
       </section>
-    </aside>
-  </div>
+      <section class="pathwrap" id="course"></section>
+    </div>
+    <button class="dev-reset" data-action="reset" hidden>Reset progress</button>
+  </section>
 
   <!-- check: three steps, driven by the camera, no buttons -->
   <section class="checkview view" id="check" hidden data-step="1">
@@ -129,63 +130,25 @@
     </div>
   </section>
 
-  <!-- castle: the board -->
-  <section class="castle view" id="board" hidden>
-    <header class="topbar">
-      <a class="brand" href="#home">Tenfold</a>
-      <div class="chips">
-        <a class="chip quiet" href="#home">Home</a>
-        <a class="chip quiet" href="#practice">Practice</a>
-        <div class="chip"><svg class="flame" viewBox="0 0 24 28" aria-hidden="true"><path d="M12 0 C18 8 22 13 12 28 C2 13 6 8 12 0 Z" fill="#c06214"></path></svg><span id="board-streak">0 days</span></div>
+  <!-- profile: Tally, the level and the ladder -->
+  <section class="pf view" id="profile" hidden>
+    <a class="backbtn2" href="#home" aria-label="Back"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M 28 12 L 16 24 L 28 36" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path></svg></a>
+    <section class="pf-left">
+      <div class="tally" id="pf-tally" data-tally="happy" data-outfit></div>
+      <p class="pf-who" id="pf-who"></p>
+      <p class="pf-sub">Level <span id="pf-level"></span> of 10</p>
+      <h1 class="pf-name" id="pf-name"></h1>
+      <div class="pf-xp">
+        <div class="pf-xprow"><span>XP to next level</span><b id="pf-xp"></b></div>
+        <div class="pf-track"><i id="pf-fill" style="width:0%"></i></div>
       </div>
-    </header>
-    <div class="castle-grid">
-      <div>
-        <h1 class="page" style="font-size:40px;margin-bottom:14px">My castle</h1>
-        <div class="map" id="castle-map"></div>
-      </div>
-      <div class="side">
-        <div>
-          <p class="h2">Tally's wardrobe</p>
-          <div class="wardrobe" id="wardrobe"></div>
-        </div>
-        <div>
-          <p class="h2">Badge shelf</p>
-          <div class="shelf" id="shelf"></div>
-        </div>
-        <p class="note">A clock means a room is ready for review. Locked doors open when you meet the room in a lesson.</p>
-      </div>
-    </div>
-  </section>
-
-  <!-- profile -->
-  <section class="profile view" id="profile" hidden>
-    <header class="topbar">
-      <a class="brand" href="#home">Tenfold</a>
-      <div class="chips">
-        <a class="chip quiet" href="#home">Home</a>
-        <a class="chip quiet" href="#board">Castle</a>
-      </div>
-    </header>
-    <div class="home-grid">
-      <div class="tally-stage"><div class="tally lg anim-wave" id="profile-tally" data-tally="happy"></div></div>
-      <div>
-        <h1 class="hero" id="profile-title">Your fingers can multiply.</h1>
-        <p class="lead" id="profile-lead"></p>
-        <form id="profile-form" autocomplete="off">
-          <p class="eyebrow" style="margin:0 0 10px">First name</p>
-          <div class="btnrow" style="margin-bottom:8px">
-            <input class="field" id="profile-name" type="text" maxlength="14" placeholder="Leo" aria-label="First name">
-            <button class="btn btn-ghost" type="submit">Save</button>
-          </div>
-        </form>
-        <div class="summary" id="profile-summary"></div>
-        <div class="btnrow" style="margin-top:30px">
-          <a class="btn btn-primary btn-lg" href="#practice">Practice</a>
-          <a class="btn btn-ghost btn-lg" href="#learn">Learn</a>
-        </div>
-      </div>
-    </div>
+      <p class="pf-next" id="pf-next"></p>
+    </section>
+    <section class="pf-right">
+      <h2>Tally's levels</h2>
+      <p class="hint">Every second level he gets something new to wear.</p>
+      <div class="pf-list" id="pf-list"></div>
+    </section>
   </section>
 
   <!-- the camera lesson and the finish screen, over everything -->
@@ -195,8 +158,8 @@
 
 </div>
 
-<script src="levels.js?v=4"></script>
-<script src="tally.js?v=4"></script>
-<script src="app.js?v=4"></script>
+<script src="levels.js?v=5"></script>
+<script src="tally.js?v=5"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

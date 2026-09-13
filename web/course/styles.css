@@ -878,3 +878,138 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 .finish .tally { width: 170px; margin-bottom: 6px; }
 .finish h1 { color: var(--gold); }
 .toast { z-index: 9; }
+
+/* ---------- XP and levels: the level box in every top bar ---------- */
+.levelbox {
+  margin-left: auto; display: flex; align-items: center; gap: 14px; height: 64px; padding: 0 20px 0 12px;
+  border: 2px solid var(--swan); border-radius: 20px; background: var(--snow); text-decoration: none; color: inherit;
+}
+.levelbox .avatar { width: 46px; flex: none; }
+.levelbox .lvl { min-width: 216px; }
+.lvl-top { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 7px; }
+.lvl-top b { font-size: 18px; font-weight: 900; color: var(--eel); }
+.lvl-top span { font-size: 14px; font-weight: 800; color: var(--hare); }
+.bar2 { position: relative; height: 16px; border-radius: 8px; background: var(--swan); overflow: hidden; }
+.bar2 i { position: absolute; inset: 0 auto 0 0; border-radius: 8px; background: var(--unit, var(--green)); transition: width .6s cubic-bezier(.3, .7, .3, 1); }
+.lvl-bar { height: 12px; }
+.lvl-bar i { background: var(--green); }
+.backbtn2 {
+  width: 60px; height: 60px; flex: none; border: 2px solid var(--swan); border-radius: 20px; background: var(--snow);
+  box-shadow: 0 4px 0 var(--swan); color: var(--wolf); display: flex; align-items: center; justify-content: center;
+  text-decoration: none; transition: transform 60ms ease, box-shadow 60ms ease;
+}
+.backbtn2 svg { width: 28px; height: 28px; }
+.backbtn2:active { transform: translateY(4px); box-shadow: 0 0 0 var(--swan); }
+.pp-top { display: flex; align-items: center; gap: 18px; flex: none; }
+.pp-top h1 { margin: 0; font-size: 26px; font-weight: 900; color: var(--eel); }
+.pp-top .sub { margin: 2px 0 0; font-size: 15px; font-weight: 800; color: var(--hare); letter-spacing: .6px; text-transform: uppercase; }
+.hub .minibar .levelbox { height: 56px; }
+.hub .minibar .levelbox .lvl { min-width: 190px; }
+
+/* ---------- the practice path: unit card and winding path ---------- */
+.pp { position: absolute; inset: 0; display: flex; flex-direction: column; padding: 26px 34px 24px; gap: 20px; background: var(--snow); }
+.pp-body { flex: 1; display: grid; grid-template-columns: 352px minmax(0, 1fr); gap: 30px; min-height: 0; }
+.unitcard { display: flex; flex-direction: column; gap: 0; border-radius: 26px; overflow: hidden; background: var(--snow); box-shadow: 0 0 0 2px var(--swan) inset; }
+.unitcard .head { background: var(--unit); color: var(--snow); padding: 22px 24px 24px; box-shadow: 0 4px 0 var(--unit-lip); }
+.unitcard .kicker { font-size: 13px; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; opacity: .9; }
+.unitcard h2 { margin: 3px 0 4px; font-size: 29px; font-weight: 900; line-height: 1.1; }
+.unitcard .head p { margin: 0; font-size: 16px; font-weight: 700; opacity: .92; }
+.unitcard .mid { padding: 22px 24px; display: flex; flex-direction: column; gap: 16px; flex: 1; }
+.metric { display: flex; align-items: center; justify-content: space-between; font-size: 16px; font-weight: 800; color: var(--wolf); }
+.metric b { color: var(--eel); font-size: 19px; }
+.units { display: flex; gap: 10px; padding: 0 24px 22px; }
+.units button { flex: 1; height: 44px; border: 2px solid var(--swan); border-radius: 14px; background: var(--snow); font-family: var(--font); font-size: 15px; font-weight: 900; color: var(--hare); cursor: pointer; }
+.units button.on { border-color: var(--unit); background: var(--unit); color: var(--snow); box-shadow: 0 3px 0 var(--unit-lip); }
+.tallyspot { display: flex; align-items: flex-end; gap: 14px; margin-top: 6px; }
+.tallyspot .tally { width: 82px; flex: none; }
+.tallyspot .line { position: relative; margin: 0 0 12px; flex: 1; padding: 13px 16px; border-radius: 16px; border: 2px solid var(--swan); background: var(--snow); color: var(--eel); font-size: 15px; font-weight: 800; line-height: 1.25; }
+.tallyspot .line::after { content: ""; position: absolute; left: -8px; bottom: 14px; width: 13px; height: 13px; background: var(--snow); border-left: 2px solid var(--swan); border-bottom: 2px solid var(--swan); transform: rotate(45deg); }
+.pathwrap { position: relative; border-radius: 26px; background: var(--polar); overflow: hidden; }
+.pathwrap .track { position: absolute; inset: 0; width: 100%; height: 100%; }
+.pathwrap .track path { fill: none; stroke: #dcdcdc; stroke-width: 8; stroke-linecap: round; stroke-dasharray: 1 18; vector-effect: non-scaling-stroke; }
+.pathwrap .node {
+  position: absolute; width: 96px; height: 96px; margin: -48px 0 0 -48px; padding: 0; border: 0; border-radius: 50%;
+  background: var(--unit); box-shadow: 0 7px 0 var(--unit-lip); color: var(--snow); cursor: pointer;
+  display: flex; align-items: center; justify-content: center; transition: transform 70ms ease, box-shadow 70ms ease; transform: none;
+}
+.pathwrap .node svg { width: 52px; height: 52px; color: currentColor; }
+.pathwrap .node:active { transform: translateY(7px); box-shadow: 0 0 0 var(--unit-lip); }
+.pathwrap .node.is-locked { background: var(--swan); box-shadow: 0 7px 0 #cfcfcf; color: #a9a9a9; cursor: default; }
+.pathwrap .node.is-locked:active { transform: none; box-shadow: 0 7px 0 #cfcfcf; }
+.pathwrap .node.node-chest svg { width: 62px; height: 56px; }
+.pathwrap .node.node-boss { width: 116px; height: 116px; margin: -58px 0 0 -58px; }
+.pathwrap .node.node-boss svg { width: 64px; height: 64px; }
+.pathwrap .ring { position: absolute; width: 132px; height: 132px; margin: -66px 0 0 -66px; pointer-events: none; }
+.pathwrap .ring circle { fill: none; stroke: #e8e8e8; stroke-width: 7; }
+.pathwrap .ring .arc { stroke: var(--unit); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.pathwrap .bubble {
+  position: absolute; bottom: auto; transform: translate(-50%, -100%); padding: 10px 18px; border-radius: 14px; border: 2px solid var(--swan);
+  background: var(--snow); color: var(--unit-lip); font: inherit; font-size: 15px; font-weight: 900; letter-spacing: .8px; text-transform: uppercase;
+  white-space: nowrap; z-index: 3; animation: hop 1.6s ease-in-out infinite; cursor: pointer;
+}
+.pathwrap .bubble::after { content: ""; position: absolute; left: 50%; top: auto; bottom: -9px; width: 14px; height: 14px; margin: 0 0 0 -7px; background: var(--snow); border-right: 2px solid var(--swan); border-bottom: 2px solid var(--swan); transform: rotate(45deg); }
+@keyframes hop { 0%, 100% { transform: translate(-50%, -100%); } 50% { transform: translate(-50%, calc(-100% - 7px)); } }
+.pathwrap .mini-stars { position: absolute; transform: translate(-50%, 58px); display: flex; gap: 2px; }
+.pathwrap .mini-stars svg { width: 18px; height: 18px; }
+
+/* ---------- finish: XP counts up, then the level up card ---------- */
+.fn-pane { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 48px; text-align: center; transition: opacity .45s ease, transform .45s cubic-bezier(.3, .7, .3, 1); }
+.fn-pane.out { opacity: 0; transform: translateY(-28px); pointer-events: none; }
+.fn-pane.in { opacity: 0; transform: translateY(28px); pointer-events: none; }
+.fn-pane.in.show { opacity: 1; transform: none; pointer-events: auto; }
+.fn-pane h1 { margin: 0; font-size: 46px; font-weight: 900; color: var(--eel); }
+.fn-pane .sub { margin: 0; font-size: 21px; font-weight: 700; color: var(--wolf); }
+.fn-gain { display: flex; align-items: center; gap: 14px; font-size: 78px; font-weight: 900; color: var(--green-lip); }
+.fn-gain svg { width: 62px; height: 62px; color: var(--yellow); }
+.fn-lvl { width: 560px; }
+.fn-lvlhead { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.fn-lvlhead b { font-size: 22px; font-weight: 900; color: var(--eel); }
+.fn-lvlhead span { font-size: 18px; font-weight: 800; color: var(--hare); }
+.fn-track { position: relative; height: 26px; border-radius: 13px; background: var(--swan); overflow: hidden; }
+.fn-track i { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: 13px; background: var(--green); transition: width .9s cubic-bezier(.3, .7, .3, 1); }
+.fn-pane .tally { width: 180px; }
+.fn-pane.in .tally { width: 300px; }
+.fn-stars { display: flex; gap: 10px; }
+.fn-stars svg { width: 64px; height: 64px; }
+.btn-row { display: flex; gap: 16px; margin-top: 8px; }
+.btn2 { min-height: 64px; padding: 0 40px; border: 0; border-radius: 18px; background: var(--green); color: var(--snow); box-shadow: 0 5px 0 var(--green-lip); font-family: var(--font); font-size: 20px; font-weight: 900; letter-spacing: .6px; text-transform: uppercase; text-decoration: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: transform 70ms ease, box-shadow 70ms ease; }
+.btn2:active { transform: translateY(5px); box-shadow: 0 0 0 var(--green-lip); }
+.btn2.ghost { background: var(--snow); color: var(--wolf); box-shadow: 0 0 0 2px var(--swan) inset; }
+.btn2.red { background: var(--red); box-shadow: 0 5px 0 var(--red-lip); }
+.newlevel { padding: 10px 24px; border-radius: 16px; background: var(--green-soft); color: var(--green-lip); font-size: 19px; font-weight: 900; letter-spacing: 1px; text-transform: uppercase; }
+.earned { display: flex; align-items: center; gap: 12px; margin: 0; font-size: 20px; font-weight: 800; color: var(--wolf); }
+.earned b { color: var(--eel); }
+.finish.is-fail .fn-pane h1 { color: var(--eel); }
+
+/* ---------- profile: Tally, level and the ladder ---------- */
+.pf { position: absolute; inset: 0; display: grid; grid-template-columns: 512px minmax(0, 1fr); background: var(--snow); }
+.pf .backbtn2 { position: absolute; top: 24px; left: 24px; z-index: 3; }
+.pf-left { background: var(--polar); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 22px; padding: 70px 48px 48px; text-align: center; }
+.pf-left .tally { width: 300px; }
+.pf-name { margin: 0; font-size: 38px; font-weight: 900; color: var(--eel); }
+.pf-sub { margin: 0; font-size: 17px; font-weight: 800; color: var(--hare); letter-spacing: .8px; text-transform: uppercase; }
+.pf-xp { width: 100%; max-width: 360px; }
+.pf-xprow { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 9px; font-size: 16px; font-weight: 800; color: var(--wolf); }
+.pf-track { position: relative; height: 20px; border-radius: 10px; background: var(--swan); overflow: hidden; }
+.pf-track i { position: absolute; inset: 0 auto 0 0; border-radius: 10px; background: var(--green); }
+.pf-next { margin: 0; font-size: 16px; font-weight: 700; color: var(--wolf); }
+.pf-who { margin: 0; font-size: 20px; font-weight: 800; color: var(--wolf); }
+.pf-right { padding: 74px 52px 34px; display: flex; flex-direction: column; min-height: 0; }
+.pf-right h2 { margin: 0 0 3px; font-size: 26px; font-weight: 900; color: var(--eel); }
+.pf-right .hint { margin: 0 0 14px; font-size: 15px; font-weight: 700; color: var(--wolf); }
+.pf-list { display: flex; flex-direction: column; gap: 7px; }
+.pf-row { display: flex; align-items: center; gap: 14px; padding: 9px 16px; border-radius: 14px; border: 2px solid var(--swan); background: var(--snow); }
+.pf-row .no { width: 32px; height: 32px; flex: none; border-radius: 50%; background: var(--swan); color: #9a9a9a; display: flex; align-items: center; justify-content: center; font-size: 15px; font-weight: 900; }
+.pf-row .nm { font-size: 18px; font-weight: 800; color: #a9a9a9; }
+.pf-row .tag { margin-left: auto; font-size: 14px; font-weight: 800; color: #b5b5b5; }
+.pf-row.got { border-color: var(--green); background: var(--green-soft); }
+.pf-row.got .no { background: var(--green); color: var(--snow); }
+.pf-row.got .nm, .pf-row.got .tag { color: var(--green-lip); }
+.pf-row.now { border-color: var(--green); background: var(--snow); box-shadow: 0 4px 0 var(--green); }
+.pf-row.now .no { background: var(--green); color: var(--snow); }
+.pf-row.now .nm { color: var(--eel); }
+.pf-row.now .tag { color: var(--green-lip); }
+
+/* the showcase keeps the shell map; its right column is the level card only */
+#learn .right .levelcard { display: flex; flex-direction: column; gap: 12px; }
+#learn .right .levelcard .tally { width: 120px; align-self: center; }

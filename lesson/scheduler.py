@@ -205,6 +205,9 @@ class LearnerState:
     learner_id: str = ""
     display_name: str | None = None
     created_at: str = ""
+    # XP is the page's gamification and is never lost. It is carried here so
+    # the learner record is the one profile, and so the server can log it.
+    xp: int = 0
     sessions: int = 0
     last_session_at: str | None = None
     pose: dict[str, Record] = field(default_factory=dict)
@@ -228,6 +231,7 @@ class LearnerState:
             "learner_id": self.learner_id,
             "display_name": self.display_name,
             "created_at": self.created_at,
+            "xp": self.xp,
             "sessions": self.sessions,
             "last_session_at": self.last_session_at,
             "pose": {k: v.to_dict() for k, v in self.pose.items()},
@@ -249,6 +253,7 @@ class LearnerState:
             learner_id=str(raw["learner_id"]),
             display_name=raw.get("display_name"),
             created_at=str(raw.get("created_at", "")),
+            xp=max(0, int(raw.get("xp", 0) or 0)),
             sessions=int(raw.get("sessions", 0)),
             last_session_at=raw.get("last_session_at"),
             pose={k: Record.from_dict(v) for k, v in (raw.get("pose") or {}).items()},

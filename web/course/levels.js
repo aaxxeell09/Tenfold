@@ -5,6 +5,10 @@
  * A course is a list of units; a unit is a list of nodes. A node is a lesson, a chest or a boss.
  * Nodes unlock strictly in order: a node is "current" when every node before it is done.
  * A lesson or boss is done with at least one star; a chest is done once opened.
+ *
+ * The only gamification is XP and Tally's ten levels. XP is never lost: 10 per correct
+ * exercise, 15 when it was right first try, 25 for finishing a lesson, 100 for a boss.
+ * XP lives in the learner profile, not here; this module only computes it.
  */
 (function (root, factory) {
   const api = factory();
@@ -16,7 +20,6 @@
   const UNITS = [
     {
       id: "u1", title: "Meet your fingers", subtitle: "Thumbs are 6, pinkies are 10",
-      color: "#58CC02", lip: "#58A700",
       nodes: [
         { id: "u1-l1", kind: "lesson", title: "Doubles", pairs: [[6, 6], [7, 7]] },
         { id: "u1-l2", kind: "lesson", title: "Six and seven", pairs: [[6, 7], [7, 6]] },
@@ -26,7 +29,6 @@
     },
     {
       id: "u2", title: "Count the tens", subtitle: "Touching fingers and the ones below",
-      color: "#1CB0F6", lip: "#1899D6",
       nodes: [
         { id: "u2-l1", kind: "lesson", title: "Hello eight", pairs: [[6, 8], [8, 6], [7, 8]] },
         { id: "u2-l2", kind: "lesson", title: "Eights", pairs: [[8, 7], [8, 8]] },
@@ -36,7 +38,6 @@
     },
     {
       id: "u3", title: "Big numbers", subtitle: "Nines, tens and the boss",
-      color: "#CE82FF", lip: "#A568CC",
       nodes: [
         { id: "u3-l1", kind: "lesson", title: "Nines", pairs: [[9, 6], [9, 7], [9, 8], [9, 9]] },
         { id: "u3-l2", kind: "lesson", title: "Tens", pairs: [[10, 6], [10, 8], [10, 9], [10, 10]] },
@@ -45,14 +46,72 @@
     },
   ];
 
-  // horizontal offset of each node on the winding path, in px, repeating
-  const OFFSETS = [0, 44, 70, 44, 0, -44, -70, -44];
   const LESSON_QUESTIONS = 5;
   const BOSS_QUESTIONS = 8;
-  const XP_PER_CORRECT = 10;
-  const CHEST_XP = 25;
-  const DAILY_GOAL = 30;
 
+  // ---------- XP and levels ----------
+  const XP_CORRECT = 10;
+  const XP_FIRST_TRY = 15;
+  const XP_LESSON = 25;
+  const XP_BOSS = 100;
+
+  // cumulative thresholds: a level is reached once total XP passes its "at"
+  const LEVELS = [
+    { name: "Thumb Buddy", at: 0 },
+    { name: "Finger Counter", at: 100 },
+    { name: "Tip Toucher", at: 250 },
+    { name: "Ten Maker", at: 450 },
+    { name: "Sixes Master", at: 700 },
+    { name: "Sevens Tamer", at: 1000 },
+    { name: "Eights Rider", at: 1400 },
+    { name: "Nines Wizard", at: 1900 },
+    { name: "Tens Champion", at: 2500 },
+    { name: "Tenfold Hero", at: 3200 },
+  ];
+  const ACCESSORIES = { 2: "glasses", 4: "headband", 6: "hat", 8: "cape", 10: "crown" };
+  const ACCESSORY_NAMES = { glasses: "glasses", headband: "headband", hat: "wizard hat", cape: "cape", crown: "crown" };
+
+  function xpForNode(kind, correct, firstTry, finished) {
+    const first = Math.max(0, Math.min(correct || 0, firstTry || 0));
+    const rest = Math.max(0, (correct || 0) - first);
+    let xp = first * XP_FIRST_TRY + rest * XP_CORRECT;
+    if (finished) xp += kind === "boss" ? XP_BOSS : XP_LESSON;
+    return xp;
+  }
+
+  function levelFor(xp) {
+    let level = 1;
+    for (let i = 0; i < LEVELS.length; i++) if ((xp || 0) >= LEVELS[i].at) level = i + 1;
+    return level;
+  }
+
+  function levelInfo(xp) {
+    const total = Math.max(0, Math.floor(xp || 0));
+    const level = levelFor(total);
+    const floor = LEVELS[level - 1].at;
+    const top = level >= LEVELS.length;
+    const ceiling = top ? null : LEVELS[level].at;
+    const span = top ? LEVELS[level - 1].at - LEVELS[level - 2].at : ceiling - floor;
+    const inLevel = top ? span : total - floor;
+    return {
+      xp: total, level, name: LEVELS[level - 1].name, floor, ceiling, span, inLevel,
+      percent: Math.round(inLevel / span * 100),
+      next: top ? null : LEVELS[level].name,
+      toNext: top ? 0 : ceiling - total,
+      accessories: accessoriesFor(level),
+    };
+  }
+
+  function accessoriesFor(level) {
+    return Object.keys(ACCESSORIES).map(Number).filter((k) => k <= level).sort((a, b) => a - b)
+      .map((k) => ACCESSORIES[k]).join(" ");
+  }
+
+  function earnedAt(level) {
+    return ACCESSORIES[level] || null;
+  }
+
+  // ---------- nodes and progress ----------
   function allNodes() {
     const out = [];
     UNITS.forEach((unit, unitIndex) => {
@@ -70,11 +129,12 @@
   }
 
   function emptyProgress() {
-    return { stars: {}, chests: {}, xp: 0, streak: 0, lastDay: null, xpByDay: {} };
+    return { stars: {}, chests: {} };
   }
 
   function clone(p) {
-    return JSON.parse(JSON.stringify(Object.assign(emptyProgress(), p)));
+    const q = Object.assign(emptyProgress(), p || {});
+    return { stars: Object.assign({}, q.stars), chests: Object.assign({}, q.chests) };
   }
 
   function isDone(p, node) {
@@ -104,23 +164,12 @@
     return 0;
   }
 
-  function addDays(day, n) {
-    const [y, m, d] = day.split("-").map(Number);
-    return new Date(Date.UTC(y, m - 1, d + n)).toISOString().slice(0, 10);
-  }
-
-  function bumpStreak(q, today) {
-    if (q.lastDay === today) return;
-    q.streak = q.lastDay === addDays(today, -1) ? q.streak + 1 : 1;
-    q.lastDay = today;
-  }
-
   function nextId(node) {
     const nodes = allNodes();
     return nodes[node.index + 1] ? nodes[node.index + 1].id : null;
   }
 
-  function recordLesson(p, id, correct, total, today) {
+  function recordLesson(p, id, correct, total) {
     const node = findNode(id);
     if (node.kind === "chest") throw new Error("use claimChest for chests");
     if (nodeState(p, id) === "locked") return { progress: p, error: "locked" };
@@ -128,64 +177,23 @@
     const stars = starsFor(correct, total);
     const before = q.stars[id] || 0;
     q.stars[id] = Math.max(before, stars);
-    const xpGained = correct * XP_PER_CORRECT;
-    q.xp += xpGained;
-    q.xpByDay[today] = (q.xpByDay[today] || 0) + xpGained;
-    const streakBefore = q.streak;
-    bumpStreak(q, today);
     const unlocked = before < 1 && q.stars[id] >= 1 ? nextId(node) : null;
-    return { progress: q, stars, best: q.stars[id], xpGained, streak: q.streak, streakUp: q.streak > streakBefore, unlocked };
+    return { progress: q, stars, best: q.stars[id], unlocked };
   }
 
-  function claimChest(p, id, today) {
+  function claimChest(p, id) {
     const node = findNode(id);
     if (node.kind !== "chest") throw new Error("not a chest");
     if (nodeState(p, id) !== "current") return { progress: p, error: nodeState(p, id) };
     const q = clone(p);
     q.chests[id] = true;
-    q.xp += CHEST_XP;
-    q.xpByDay[today] = (q.xpByDay[today] || 0) + CHEST_XP;
-    return { progress: q, xpGained: CHEST_XP, unlocked: nextId(node) };
+    return { progress: q, unlocked: nextId(node) };
   }
 
   function totals(p) {
     const scored = allNodes().filter((n) => n.kind !== "chest");
     const stars = scored.reduce((s, n) => s + ((p.stars && p.stars[n.id]) || 0), 0);
     return { stars, maxStars: scored.length * 3, done: allNodes().filter((n) => isDone(p, n)).length, nodes: allNodes().length };
-  }
-
-  function dailyQuest(p, today) {
-    return { goal: DAILY_GOAL, value: Math.min(DAILY_GOAL, (p.xpByDay && p.xpByDay[today]) || 0) };
-  }
-
-  // ---------- questions ----------
-
-  function hash(str) {
-    let h = 2166136261;
-    for (let i = 0; i < str.length; i++) {
-      h ^= str.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return h >>> 0;
-  }
-
-  function rng(seed) {
-    let t = seed >>> 0;
-    return function () {
-      t = (t + 0x6d2b79f5) >>> 0;
-      let r = Math.imul(t ^ (t >>> 15), 1 | t);
-      r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
-      return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
-    };
-  }
-
-  function shuffle(list, rand) {
-    const a = list.slice();
-    for (let i = a.length - 1; i > 0; i--) {
-      const j = Math.floor(rand() * (i + 1));
-      [a[i], a[j]] = [a[j], a[i]];
-    }
-    return a;
   }
 
   function tensOf(a, b) {
@@ -196,43 +204,11 @@
     return (10 - a) * (10 - b);
   }
 
-  function productDistractors(a, b) {
-    const answer = a * b;
-    const pool = new Set([answer + 1, answer - 1, answer + 10, answer - 10, (a + 1) * b, a * (b + 1), (a - 1) * b, a * (b - 1), tensOf(a, b) * 10 + onesOf(a, b) + 10]);
-    return Array.from(pool).filter((v) => v > 0 && v !== answer);
-  }
-
-  function tensDistractors(answer) {
-    const out = [];
-    for (let d = -3; d <= 3; d++) {
-      const v = answer + d;
-      if (d !== 0 && v >= 0 && v <= 10) out.push(v);
-    }
-    return out;
-  }
-
-  function questions(node, seed) {
-    const n = node.kind === "boss" ? BOSS_QUESTIONS : LESSON_QUESTIONS;
-    const rand = rng(hash(node.id) + (seed >>> 0));
-    const out = [];
-    for (let i = 0; i < n; i++) {
-      const [a, b] = node.pairs[i % node.pairs.length];
-      const type = i % 3 === 1 ? "tens" : "product";
-      const answer = type === "product" ? a * b : tensOf(a, b);
-      const pool = type === "product" ? productDistractors(a, b) : tensDistractors(answer);
-      const options = shuffle([answer].concat(shuffle(pool, rand).slice(0, 3)), rand);
-      out.push({
-        id: `${node.id}-${i}`, type, a, b, answer, options,
-        prompt: type === "product" ? `${a} × ${b} = ?` : `How many tens in ${a} × ${b}?`,
-        hint: type === "product" ? `${tensOf(a, b)} tens and ${onesOf(a, b)} ones` : "Touching fingers and every finger below them",
-      });
-    }
-    return out;
-  }
-
   return {
-    UNITS, OFFSETS, LESSON_QUESTIONS, BOSS_QUESTIONS, XP_PER_CORRECT, CHEST_XP, DAILY_GOAL,
+    UNITS, LESSON_QUESTIONS, BOSS_QUESTIONS,
+    XP_CORRECT, XP_FIRST_TRY, XP_LESSON, XP_BOSS, LEVELS, ACCESSORIES, ACCESSORY_NAMES,
+    xpForNode, levelFor, levelInfo, accessoriesFor, earnedAt,
     allNodes, findNode, emptyProgress, nodeState, currentNode, starsFor, recordLesson, claimChest,
-    totals, dailyQuest, questions, tensOf, onesOf, addDays,
+    totals, tensOf, onesOf,
   };
 });

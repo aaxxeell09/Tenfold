@@ -646,3 +646,13 @@ def test_a_due_review_from_another_node_may_be_inserted():
         facts.append(pick.fact)
         engine.record(answered(pick), now=T0)
     assert "10x10" in facts, facts
+
+
+def test_xp_rides_along_on_the_learner_record():
+    """XP is the page's business. The record carries it, never below zero."""
+    state = learner(sessions=2)
+    state.xp = 340
+    back = LearnerState.from_dict(json.loads(json.dumps(state.to_dict())))
+    assert back.xp == 340
+    assert LearnerState.from_dict({"learner_id": "x", "xp": -5}).xp == 0
+    assert LearnerState.from_dict({"learner_id": "x"}).xp == 0

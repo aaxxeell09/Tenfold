@@ -1,12 +1,13 @@
 /*
  * Tenfold, the tablet app. One page, several views: welcome, home, the learn
- * showcase, the practice path, the start check, the camera lesson, finish,
- * castle, profile.
+ * showcase, the practice path, the start check, the camera lesson, finish, profile.
  *
- * Structure and progress come from levels.js and nothing else. The camera lesson
- * is driven by app/server.py over the websocket, scoped to a node's pairs by
- * lesson/scheduler.py; this file renders, counts and stores. Tally is drawn from
- * tally.svg through tally.js, the node icons from icons.svg. No em dashes anywhere.
+ * Structure and progress come from levels.js and nothing else. The only reward is
+ * XP and Tally's ten levels: XP lives in the learner profile (tenfold.learner), the
+ * same record lesson/scheduler.py round trips, so one profile carries everything.
+ * The camera lesson is driven by app/server.py over the websocket, scoped to a
+ * node's pairs by the scheduler; this file renders, counts and stores. Tally is
+ * drawn from tally.svg through tally.js, the node icons from icons.svg.
  */
 (function () {
   "use strict";
@@ -20,10 +21,6 @@
   const NS = "http://www.w3.org/2000/svg";
 
   // ---------- storage ----------
-  function today() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
-  }
   function read(key, fallback) {
     try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
     catch (e) { return fallback; }
@@ -33,11 +30,30 @@
   }
   function load() { return Object.assign(L.emptyProgress(), read(KEY, {})); }
   function save() { write(KEY, progress); }
-  function name() { try { return localStorage.getItem(KEY_NAME) || ""; } catch (e) { return ""; } }
+  // the learner record is the profile: the scheduler's memory plus display_name and xp
   function learner() { return read(KEY_LEARNER, null); }
+  function saveLearner(state) { write(KEY_LEARNER, state); }
+  function name() {
+    const me = learner();
+    if (me && me.display_name) return String(me.display_name);
+    try { return localStorage.getItem(KEY_NAME) || ""; } catch (e) { return ""; }
+  }
+  function setName(value) {
+    const me = learner() || {};
+    me.display_name = value;
+    saveLearner(me);
+    write(KEY_NAME, value);
+  }
+  function xp() { const me = learner(); return me ? Math.max(0, Math.floor(Number(me.xp) || 0)) : 0; }
+  function addXp(gain) {
+    const me = learner() || {};
+    me.xp = xp() + Math.max(0, Math.floor(gain || 0));
+    saveLearner(me);
+    return me.xp;
+  }
 
   let progress = load();
-  let openNode = null;
+  let unitAt = null;
   let lesson = null;
   let justUnlocked = null;
   let checkRun = null;
@@ -47,8 +63,19 @@
   const use = (id, box) => `<svg viewBox="${box || "0 0 48 48"}" aria-hidden="true"><use href="#${id}"></use></svg>`;
   function starSvg(on) { return `<svg viewBox="0 0 48 48" class="${on ? "" : "off"}" style="color:${on ? "var(--gold)" : "var(--line)"}"><use href="#icon-star"></use></svg>`; }
   function decorate(root) {
-    if (window.Icons) window.Icons.expand(root || document);
-    if (window.Tally) window.Tally.mount(root || document);
+    const scope = root || document;
+    const info = L.levelInfo(xp());
+    $$("[data-outfit]", scope).forEach((el) => el.setAttribute("data-accessories", info.accessories));
+    if (window.Icons) window.Icons.expand(scope);
+    if (window.Tally) window.Tally.mount(scope);
+    renderLevelBoxes(scope, info);
+  }
+  function levelLabel(info) { return info.next ? `${info.inLevel} / ${info.span} XP` : `${info.xp} XP`; }
+  function renderLevelBoxes(scope, info) {
+    $$("[data-level-name]", scope).forEach((el) => { el.textContent = info.name; });
+    $$("[data-level-xp]", scope).forEach((el) => { el.textContent = levelLabel(info); });
+    $$("[data-level-fill]", scope).forEach((el) => { el.style.width = `${info.percent}%`; });
+    $$("[data-level-next]", scope).forEach((el) => { el.textContent = info.next ? `${info.toNext} XP to ${info.next}` : "Top level reached"; });
   }
   function setTally(host, expr) {
     if (!host) return;
@@ -57,7 +84,7 @@
   }
 
   // ---------- router ----------
-  const VIEWS = ["welcome", "home", "learn", "practice", "check", "board", "profile"];
+  const VIEWS = ["welcome", "home", "learn", "practice", "check", "profile"];
   let view = "welcome";
   function show(name) {
     view = name;
@@ -68,8 +95,7 @@
     if (name !== "check") stopCheck();
     if (name === "home") renderHome();
     if (name === "learn") renderShowcase();
-    if (name === "practice") renderAll();
-    if (name === "board") renderBoard();
+    if (name === "practice") renderCourse();
     if (name === "profile") renderProfile();
     if (name === "check") startCheck();
   }
@@ -88,7 +114,7 @@
     e.preventDefault();
     const value = ($("#welcome-name").value || "").trim();
     if (!value) return;
-    write(KEY_NAME, value);
+    setName(value);
     go("home");
   });
 
@@ -141,8 +167,6 @@
       html += `</div></section>`;
     });
     $("#showcase").innerHTML = html;
-    $("#showcase-stats").innerHTML = `<div class="stat stat-streak">${use("icon-flame")}6</div><div class="stat stat-xp">${use("icon-xp")}240</div><div class="stat stat-stars">${use("icon-star")}22</div>`;
-    $("#showcase-quest").innerHTML = `<div class="quest-head"><h3>Daily quest</h3><span>1 of 3</span></div><div class="quest-row">${use("icon-xp")}<div style="flex:1"><div class="quest-title">Earn 30 XP</div><div class="bar"><i class="bar-fill" style="width:80%"></i><span class="bar-label">24 / 30</span></div></div></div>`;
     decorate($("#learn"));
   }
 
@@ -159,62 +183,56 @@
     if (!n) return `<div class="mini-stars"></div>`;
     return `<div class="mini-stars">${[0, 1, 2].map((i) => starSvg(i < n)).join("")}</div>`;
   }
-  function popover(node, state) {
-    if (state === "locked") return `<div class="popover is-locked"><h4>${node.kind === "boss" ? "Boss" : node.title}</h4><p>Finish everything above to unlock this.</p></div>`;
-    if (node.kind === "chest") return `<div class="popover"><h4>Treasure chest</h4><p>A reward for getting this far.</p><button class="btn btn-primary btn-wide" data-action="chest" data-node="${node.id}">Open +${L.CHEST_XP} XP</button></div>`;
-    const count = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
-    const facts = node.pairs.slice(0, 4).map(([a, b]) => `${a} × ${b}`).join(" · ");
-    const best = progress.stars[node.id] || 0;
-    const label = state === "done" ? (best < 3 ? "Practice +XP" : "Replay") : `Start +${count * L.XP_PER_CORRECT} XP`;
-    return `<div class="popover"><h4>${node.kind === "boss" ? "Boss fight" : node.title}</h4><p>${node.kind === "boss" ? `${count} exercises, three hearts` : facts}</p><button class="btn btn-primary btn-wide" data-action="start" data-node="${node.id}">${label}</button></div>`;
-  }
-  function nodeHtml(node, state, i, roadmap) {
-    const box = node.kind === "chest" ? "0 0 88 80" : "0 0 48 48";
-    const cls = "node" + (node.kind === "boss" ? " node-boss" : node.kind === "chest" ? " node-chest" : "") +
-      (state === "locked" ? " is-locked" : state === "done" ? " is-done" : " is-current");
-    const ring = state === "current" ? `<svg class="ring" viewBox="0 0 102 102"><circle cx="51" cy="51" r="44"></circle><circle class="ring-arc" cx="51" cy="51" r="44" stroke-dasharray="276" stroke-dashoffset="186"></circle></svg>` : "";
-    const open = !roadmap && openNode === node.id;
-    const bubble = state === "current" && !open ? `<div class="bubble">Start</div>` : "";
-    const stars = node.kind === "chest" ? `<div class="mini-stars"></div>` : miniStars(progress.stars[node.id] || 0);
-    const button = roadmap
-      ? `<button class="${cls}" type="button" data-status="locked" disabled>${use(iconFor(node.kind, "locked"), box)}</button>`
-      : `<button class="${cls}" type="button" data-action="node" data-node="${node.id}" data-status="${state}" aria-label="${node.title}">${use(iconFor(node.kind, state), box)}</button>`;
-    return `<div class="row${open ? " is-open" : ""}"><div class="node-wrap" style="--x:${OFFSETS[i % OFFSETS.length]}px">${bubble}${button}${ring}${stars}${open ? popover(node, state) : ""}</div></div>`;
+  // one unit on screen at a time, the current one unless the learner switched
+  const SPOTS = [[20, 18], [47, 31], [71, 47], [48, 63], [20, 75], [44, 90]];
+  function unitIndex() {
+    if (unitAt !== null) return unitAt;
+    const cur = L.currentNode(progress);
+    return cur ? cur.unitIndex : L.UNITS.length - 1;
   }
   function renderCourse() {
-    const nodes = L.allNodes();
-    let html = "";
-    L.UNITS.forEach((unit, ui) => {
-      const unitNodes = nodes.filter((n) => n.unitId === unit.id);
-      const scored = unitNodes.filter((n) => n.kind !== "chest");
-      const got = scored.reduce((s, n) => s + (progress.stars[n.id] || 0), 0);
-      const tone = TONES[ui % TONES.length];
-      html += `<section class="unit" style="--unit:${tone[0]};--unit-lip:${tone[1]}"><div class="unit-banner"><div><div class="unit-kicker">Unit ${ui + 1}</div><h2>${unit.title}</h2><p>${unit.subtitle}</p></div><div class="unit-count">${use("icon-star")}${got}/${scored.length * 3}</div></div><div class="path">`;
-      unitNodes.forEach((n, i) => { html += nodeHtml(n, L.nodeState(progress, n.id), i, false); });
-      if (ui < 2) html += `<div class="row"><div class="mascot mascot-${ui ? "left" : "right"}"><div class="tally" data-tally="${ui ? "ready" : "happy"}"></div></div></div>`;
-      html += `</div></section>`;
+    const ui = unitIndex();
+    const unit = L.UNITS[ui];
+    const tone = TONES[ui % TONES.length];
+    const root = $("#practice");
+    root.style.setProperty("--unit", tone[0]);
+    root.style.setProperty("--unit-lip", tone[1]);
+    const nodes = L.allNodes().filter((n) => n.unitId === unit.id);
+    const scored = nodes.filter((n) => n.kind !== "chest");
+    const done = scored.filter((n) => (progress.stars[n.id] || 0) >= 1).length;
+    const cur = L.currentNode(progress);
+    const here = cur && cur.unitId === unit.id;
+    $("#crumb").textContent = unit.title;
+    $("#u-kicker").textContent = `Unit ${ui + 1}`;
+    $("#u-name").textContent = unit.title;
+    $("#u-desc").textContent = unit.subtitle;
+    $("#u-count").textContent = `${done} / ${scored.length}`;
+    $("#u-bar").style.width = `${scored.length ? (done / scored.length) * 100 : 0}%`;
+    $("#u-say").textContent = here
+      ? (cur.kind === "chest" ? "A chest! Open it." : cur.kind === "boss" ? "The boss. Eight questions, three hearts." : `Next up: ${cur.title}.`)
+      : done === scored.length ? "All done here. Replay for three stars." : "Finish the unit before this one first.";
+    setTally($("#u-tally"), here ? "ready" : "happy");
+    $("#unit-switch").innerHTML = L.UNITS.map((u, i) => `<button type="button" class="${i === ui ? "on" : ""}" data-action="unit" data-u="${i}">Unit ${i + 1}</button>`).join("");
+    const pts = nodes.map((n, i) => SPOTS[i % SPOTS.length]);
+    const d = pts.map(([x, y], i) => `${i ? "L" : "M"} ${x} ${y}`).join(" ");
+    let html = `<svg class="track" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${d}"></path></svg>`;
+    nodes.forEach((n, i) => {
+      const [x, y] = pts[i];
+      const state = L.nodeState(progress, n.id);
+      const box = n.kind === "chest" ? "0 0 88 80" : "0 0 48 48";
+      const cls = "node" + (n.kind === "boss" ? " node-boss" : n.kind === "chest" ? " node-chest" : "") +
+        (state === "locked" ? " is-locked" : state === "done" ? " is-done" : " is-current");
+      const pos = `left:${x}%;top:${y}%`;
+      if (state === "current") {
+        html += `<svg class="ring" viewBox="0 0 102 102" style="${pos}"><circle cx="51" cy="51" r="44"></circle><circle class="arc" cx="51" cy="51" r="44" stroke-dasharray="276" stroke-dashoffset="${n.kind === "chest" ? 0 : 186}"></circle></svg>`;
+        html += `<button class="bubble" type="button" data-action="${n.kind === "chest" ? "chest" : "start"}" data-node="${n.id}" style="left:${x}%;top:calc(${y}% - ${n.kind === "boss" ? 76 : 66}px)">${n.kind === "chest" ? "Open" : "Start"}</button>`;
+      }
+      html += `<button class="${cls}" type="button" data-action="node" data-node="${n.id}" data-status="${state}" aria-label="${n.title}" style="${pos}">${use(iconFor(n.kind, state), box)}</button>`;
+      if (n.kind !== "chest" && progress.stars[n.id]) html += `<div class="mini-stars" style="${pos}">${[0, 1, 2].map((k) => starSvg(k < progress.stars[n.id])).join("")}</div>`;
     });
     $("#course").innerHTML = html;
-    decorate($("#course"));
+    decorate(root);
   }
-  function toggleNode(id) {
-    openNode = openNode === id ? null : id;
-    renderCourse();
-  }
-  function renderStats() {
-    const t = L.totals(progress);
-    const q = L.dailyQuest(progress, today());
-    $("#stats").innerHTML = `
-      <div class="stat stat-streak">${use("icon-flame")}${progress.streak}</div>
-      <div class="stat stat-xp">${use("icon-xp")}${progress.xp}</div>
-      <div class="stat stat-stars">${use("icon-star")}${t.stars}</div>`;
-    $("#quest").innerHTML = `
-      <div class="quest-head"><h3>Daily quest</h3><span>${q.value >= q.goal ? "done" : "today"}</span></div>
-      <div class="quest-row">${use("icon-xp")}<div style="flex:1"><div class="quest-title">Earn ${q.goal} XP</div>
-        <div class="bar"><i class="bar-fill" style="width:${(q.value / q.goal) * 100}%"></i><span class="bar-label">${q.value} / ${q.goal}</span></div></div></div>`;
-    decorate($("#practice .right"));
-  }
-  function renderAll() { renderStats(); renderCourse(); }
   // the Practice door: the start check once per visit, then the path
   function checked() { try { return sessionStorage.getItem("tenfold.checked") === "1"; } catch (e) { return false; } }
 
@@ -404,21 +422,33 @@
   function onServerMessage(m) {
     if (m.demo && !demoSeeded) seedShowcase();
     if (m.type === "node_end") {
-      if (m.state) write(KEY_LEARNER, m.state);
+      // the server hands the learner back; xp and the name are the page's, keep the higher xp
+      if (m.state) {
+        const mine = learner() || {};
+        m.state.xp = Math.max(Number(mine.xp) || 0, Number(m.state.xp) || 0);
+        if (!m.state.display_name && mine.display_name) m.state.display_name = mine.display_name;
+        saveLearner(m.state);
+      }
       if (checkRun && m.node_id === "check") return checkEnd();
       if (!lesson || (m.node_id && m.node_id !== lesson.node.id)) return;
-      lesson.correct = m.correct; lesson.total = m.total || lesson.total; lesson.endTally = m.tally;
+      lesson.serverCorrect = m.correct; lesson.total = m.total || lesson.total; lesson.endTally = m.tally;
       return finish(false);
     }
     if (m.type !== "state") return;
     if (checkRun && m.node === "check") return checkMessage(m);
     if (!lesson || m.node !== lesson.node.id) return;
     const fresh = m.state !== lesson.last;
-    if (fresh && m.state === "answer_wrong" && lesson.hearts !== null) {
-      lesson.hearts -= 1; lesson.hit = true;
-      if (lesson.hearts <= 0) { sendLesson({ type: "quit" }); return finish(true); }
+    // a new fact: a clean first try again
+    if (fresh && m.fact && m.fact !== lesson.fact) { lesson.fact = m.fact; lesson.done += 1; lesson.slipped = false; }
+    if (m.hint_level > 0) lesson.slipped = true;
+    if (fresh && m.state === "answer_wrong") {
+      lesson.slipped = true;
+      if (lesson.hearts !== null) {
+        lesson.hearts -= 1; lesson.hit = true;
+        if (lesson.hearts <= 0) { sendLesson({ type: "quit" }); return finish(true); }
+      }
     }
-    if (fresh && m.fact && m.fact !== lesson.fact) { lesson.fact = m.fact; lesson.done += 1; }
+    if (fresh && m.state === "answer_correct") { lesson.correct += 1; if (!lesson.slipped) lesson.firstTry += 1; }
     lesson.last = m.state;
     renderPractice(m);
     listenWhile(m.state);
@@ -427,12 +457,14 @@
   // --demo: the map opens as a showcase, first unit done, second current
   function seedShowcase() {
     demoSeeded = true;
-    if (Object.keys(progress.stars).length) return;
-    const nodes = L.allNodes().filter((n) => n.unitId === L.UNITS[0].id);
-    nodes.forEach((n) => { if (n.kind === "chest") progress.chests[n.id] = true; else progress.stars[n.id] = 3; });
-    progress.xp = 150; progress.streak = 5; progress.lastDay = today();
-    save();
-    if (view === "practice") renderAll();
+    if (!xp()) addXp(210);
+    if (!Object.keys(progress.stars).length) {
+      const nodes = L.allNodes().filter((n) => n.unitId === L.UNITS[0].id);
+      nodes.forEach((n) => { if (n.kind === "chest") progress.chests[n.id] = true; else progress.stars[n.id] = 3; });
+      save();
+    }
+    unitAt = null;
+    if (view === "practice") renderCourse(); else decorate(document);
   }
 
   // ---------- the camera lesson ----------
@@ -440,8 +472,8 @@
   function startLesson(id) {
     const node = L.findNode(id);
     const total = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
-    lesson = { node, total, correct: 0, done: 0, fact: null, last: null, said: null, hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", t0: Date.now() };
-    openNode = null;
+    lesson = { node, total, correct: 0, firstTry: 0, slipped: false, serverCorrect: null, done: 0, fact: null, last: null, said: null,
+      hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", t0: Date.now() };
     stopCheck();
     VIEWS.forEach((v) => { $("#" + v).hidden = true; });
     $("#finish").hidden = true;
@@ -560,39 +592,76 @@
     const s = lesson;
     stopVoice();
     const total = s.total;
-    const res = L.recordLesson(progress, s.node.id, s.correct, total, today());
+    const correct = s.serverCorrect === null || s.serverCorrect === undefined ? s.correct : s.serverCorrect;
+    const res = L.recordLesson(progress, s.node.id, correct, total);
     progress = res.progress; save();
     justUnlocked = res.unlocked;
-    const secs = Math.round((Date.now() - s.t0) / 1000);
-    const time = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
-    const acc = Math.round((s.correct / total) * 100);
+    const gain = L.xpForNode(s.node.kind, correct, s.firstTry, !outOfHearts);
+    const before = L.levelInfo(xp());
+    addXp(gain);
+    const after = L.levelInfo(xp());
+    const earned = after.level > before.level ? L.earnedAt(after.level) : null;
     const fail = outOfHearts || res.stars === 0;
     const title = outOfHearts ? "Out of hearts" : fail ? "Almost there" : s.node.kind === "boss" ? "Boss defeated!" : res.stars === 3 ? "Perfect lesson!" : "Lesson complete!";
     const need = Math.ceil(total * 0.6);
-    const sub = fail ? `Get ${need} of ${total} right to earn a star and unlock the next level.` : s.endTally || (res.unlocked ? "A new level is waiting for you." : "Keep going for all three stars.");
+    const sub = fail ? `Get ${need} of ${total} right to earn a star and open the next lesson.` : s.endTally || (res.unlocked ? "The next lesson is open." : "Come back for all three stars.");
     $("#finish").className = `finish${fail ? " is-fail" : ""}`;
     $("#finish").innerHTML = `
-      ${fail ? "" : confetti()}
-      <div class="finish-inner">
-        <div class="tally tally-cheer" data-tally="${fail ? "almost" : "happy"}" data-accessories="${fail ? "" : "headband"}"></div>
+      <div class="fn-pane" id="fn-1">
+        <div class="tally" data-tally="${fail ? "almost" : "happy"}" data-accessories="${before.accessories}"></div>
         <h1>${title}</h1>
-        <p class="finish-sub">${sub}</p>
-        <div class="big-stars">${[0, 1, 2].map((i) => starSvg(i < res.stars)).join("")}</div>
-        <div class="cards">
-          <div class="card"><div class="card-label">Total XP</div><div class="card-value">${use("icon-xp")}${res.xpGained}</div></div>
-          <div class="card card-green"><div class="card-label">${acc >= 80 ? "Amazing" : "Accuracy"}</div><div class="card-value">${use("icon-check")}${acc}%</div></div>
-          <div class="card card-blue"><div class="card-label">Speedy</div><div class="card-value">${use("icon-flame")}${time}</div></div>
+        <p class="sub">${sub}</p>
+        <div class="fn-stars">${[0, 1, 2].map((i) => starSvg(i < res.stars)).join("")}</div>
+        <div class="fn-gain">${use("icon-xp")}<span id="fn-gain">+0</span></div>
+        <div class="fn-lvl">
+          <div class="fn-lvlhead"><b id="fn-n1">${before.name}</b><span id="fn-x1">${levelLabel(before)}</span></div>
+          <div class="fn-track"><i id="fn-f1" style="width:${before.percent}%;transition:none"></i></div>
         </div>
-        <button class="btn btn-primary btn-xl" data-action="${fail ? "retry" : "home"}" data-node="${s.node.id}">${fail ? "Try again" : "Continue"}</button>
-        ${fail ? `<button class="finish-alt" data-action="home">Back to the map</button>` : ""}
+        <div class="btn-row">${fail
+          ? `<button class="btn2 red" data-action="retry" data-node="${s.node.id}">Try again</button><button class="btn2 ghost" data-action="home">Back to the path</button>`
+          : `<button class="btn2" data-action="home">Continue</button>`}</div>
+      </div>
+      <div class="fn-pane in" id="fn-2">
+        ${confetti()}
+        <div class="tally" data-tally="happy" data-accessories="${after.accessories}"></div>
+        <div class="newlevel">Level ${after.level}</div>
+        <h1>${after.name}</h1>
+        ${earned ? `<p class="earned">Tally got a <b>${L.ACCESSORY_NAMES[earned]}</b></p>` : `<p class="sub">Tally is proud of you.</p>`}
+        <div class="fn-lvl">
+          <div class="fn-lvlhead"><b>${after.name}</b><span>${levelLabel(after)}</span></div>
+          <div class="fn-track"><i id="fn-f2" style="width:0%"></i></div>
+        </div>
+        <div class="btn-row"><button class="btn2" data-action="home">Continue</button><button class="btn2 ghost" data-action="profile">See Tally</button></div>
       </div>`;
     $("#lesson").hidden = true;
     $("#finish").hidden = false;
     document.body.dataset.view = "finish";
-    $("#finish").scrollTop = 0;
     decorate($("#finish"));
-    speak(sub, $("#finish .tally"));
-    if (res.streakUp) setTimeout(() => toast(`${use("icon-flame")}${res.streak} day streak`), 1500);
+    speak(sub, $("#fn-1 .tally"));
+    countUp(gain, before, after);
+  }
+  // the XP counts up over a second, the bar and the level name follow; then the level up card
+  function countUp(gain, before, after) {
+    const el = $("#fn-gain"), fill = $("#fn-f1"), nameEl = $("#fn-n1"), xpEl = $("#fn-x1");
+    const t0 = performance.now(), dur = 1100;
+    function tick(now) {
+      if (!el || !el.isConnected) return;
+      const k = Math.min(1, (now - t0) / dur);
+      const shown = Math.round(gain * (1 - Math.pow(1 - k, 3)));
+      const info = L.levelInfo(before.xp + shown);
+      el.textContent = `+${shown}`;
+      nameEl.textContent = info.name; xpEl.textContent = levelLabel(info); fill.style.width = `${info.percent}%`;
+      if (k < 1) requestAnimationFrame(tick);
+      else if (after.level > before.level) setTimeout(levelUp, 1000);
+    }
+    requestAnimationFrame(tick);
+  }
+  function levelUp() {
+    const a = $("#fn-1"), b = $("#fn-2");
+    if (!a || !b || $("#finish").hidden) return;
+    a.classList.add("out"); b.classList.add("show");
+    setTimeout(() => { const f = $("#fn-f2"); if (f) f.style.width = `${L.levelInfo(xp()).percent}%`; }, 500);
+    speak(`Level up! ${$("#fn-2 h1").textContent}.`, $("#fn-2 .tally"));
   }
   function confetti() {
     const colors = ["#3f7d2a", "#2f6f6a", "#d9a227", "#c06214", "#8a6fb3"];
@@ -609,133 +678,71 @@
     clearTimeout(toast.timer);
     toast.timer = setTimeout(() => t.classList.remove("is-on"), 2600);
   }
-  function backToMap() {
+  function leaveLesson() {
     if (lesson) sendLesson({ type: "quit" });
     stopVoice();
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     lesson = null;
+  }
+  function backToMap() {
+    leaveLesson();
+    // land on the unit that just opened, or wherever the learner is
+    unitAt = justUnlocked ? L.findNode(justUnlocked).unitIndex : null;
     go("practice");
-    const target = justUnlocked && $(`[data-node="${justUnlocked}"]`);
-    if (target) target.scrollIntoView({ behavior: "smooth", block: "center" });
     setTimeout(() => { justUnlocked = null; }, 900);
-  }
-
-  // ---------- castle, the board ----------
-  function masteryStars(m) { return m >= 5 ? 3 : m >= 3 ? 2 : m >= 1 ? 1 : 0; }
-  function renderBoard() {
-    const state = learner() || { math: {} };
-    const nums = [6, 7, 8, 9, 10];
-    const map = $("#castle-map");
-    map.innerHTML = "";
-    const cell = (cls, text) => { const d = document.createElement("div"); d.className = cls; d.textContent = text; return d; };
-    map.appendChild(cell("axis", ""));
-    nums.forEach((n) => map.appendChild(cell("axis", String(n))));
-    const session = state.sessions || 0;
-    nums.forEach((a) => {
-      map.appendChild(cell("axis", String(a)));
-      nums.forEach((b) => {
-        const key = `${Math.min(a, b)}x${Math.max(a, b)}`;
-        const rec = (state.math || {})[key];
-        const seen = rec && rec.attempts && rec.attempts.length;
-        const room = document.createElement("div");
-        room.className = "room" + (seen ? "" : " locked");
-        if (!seen) { room.innerHTML = `<span>${a} × ${b}</span><i class="lock"></i>`; }
-        else {
-          const stars = masteryStars(rec.mastery || 0);
-          const due = (rec.due_session !== null && rec.due_session !== undefined && rec.due_session <= session + 1) ||
-                      (rec.due_at && new Date(rec.due_at) <= new Date());
-          room.innerHTML = `<span>${a} × ${b}</span><div class="pips">${[0, 1, 2].map((i) => `<i class="star${i < stars ? "" : " off"}"></i>`).join("")}</div>${due ? `<i class="clock"></i>` : ""}`;
-        }
-        map.appendChild(room);
-      });
-    });
-    $("#board-streak").textContent = `${progress.streak} day${progress.streak === 1 ? "" : "s"}`;
-    renderWardrobe($("#wardrobe"));
-    renderShelf($("#shelf"));
-    decorate($("#board"));
-  }
-  function unlocks() {
-    const t = L.totals(progress);
-    const state = learner() || { math: {} };
-    const mastered = Object.values(state.math || {}).filter((r) => (r.mastery || 0) >= 4).length;
-    return {
-      glasses: { on: true, req: "Unlocked" },
-      headband: { on: t.stars >= 3, req: "Earn 3 stars" },
-      hat: { on: mastered >= 5, req: "Master 5 facts" },
-      cape: { on: progress.streak >= 10, req: "Streak of 10 days" },
-      stars: t.stars, mastered,
-    };
-  }
-  function renderWardrobe(host) {
-    const u = unlocks();
-    const items = [["glasses", "Glasses", "ready"], ["headband", "Headband", "happy"], ["hat", "Wizard hat", "ready"], ["cape", "Cape", "ready"]];
-    host.innerHTML = items.map(([id, label, face]) => `
-      <div class="item"><div class="tally${u[id].on ? "" : " is-locked"}" style="width:88px" data-tally="${face}" data-accessories="${id}"></div>
-      <span class="name">${label}</span><span class="req">${u[id].on ? "Unlocked" : `<i class="lock"></i>${u[id].req}`}</span></div>`).join("");
-  }
-  function renderShelf(host) {
-    const u = unlocks();
-    const state = learner() || { math: {} };
-    const anyPerfect = Object.values(progress.stars).some((s) => s === 3);
-    const badges = [
-      ["First lesson", Object.keys(progress.stars).length > 0], ["Perfect lesson", anyPerfect],
-      ["Streak 5", progress.streak >= 5], ["Both hands", !!(state.sessions)],
-      ["Five stars", u.stars >= 5], ["Ten stars", u.stars >= 10], ["Boss", !!progress.stars["u3-b1"]], ["Ten Master", u.mastered >= 10],
-    ];
-    host.innerHTML = badges.map(([label, on]) => `<div class="badge${on ? " on" : ""}"><div class="medal"><i class="star"></i></div><span>${label}</span></div>`).join("");
   }
 
   // ---------- profile ----------
   function renderProfile() {
+    const info = L.levelInfo(xp());
     const who = name();
-    const t = L.totals(progress);
-    const state = learner();
-    $("#profile-title").textContent = who ? `Hi ${who}.` : "Your fingers can multiply.";
-    $("#profile-lead").textContent = t.stars ? `${t.stars} stars so far. ${progress.streak} day streak.` : "Start a lesson and Tally will remember your stars.";
-    $("#profile-name").value = who;
-    $("#profile-summary").innerHTML = `
-      <div class="stat"><span class="k">${t.stars}</span><span class="v">stars of ${t.maxStars}</span></div>
-      <div class="stat"><span class="k">${progress.xp}</span><span class="v">xp</span></div>
-      <div class="stat"><span class="k">${progress.streak}</span><span class="v">day streak</span></div>
-      <div class="stat"><span class="k">${state ? state.sessions || 0 : 0}</span><span class="v">sessions</span></div>`;
-    const u = unlocks();
-    const host = $("#profile-tally");
-    host.setAttribute("data-accessories", u.cape.on ? "cape" : u.hat.on ? "hat" : u.headband.on ? "headband" : "");
+    $("#pf-who").textContent = who ? `${who} and Tally` : "You and Tally";
+    $("#pf-level").textContent = info.level;
+    $("#pf-name").textContent = info.name;
+    $("#pf-xp").textContent = info.next ? `${info.inLevel} / ${info.span}` : `${info.xp} XP`;
+    $("#pf-fill").style.width = `${info.percent}%`;
+    $("#pf-next").textContent = info.next ? `${info.toNext} XP to ${info.next}` : "Top level. Tally has everything.";
+    $("#pf-list").innerHTML = L.LEVELS.map((lv, i) => {
+      const n = i + 1;
+      const acc = L.earnedAt(n);
+      const wear = acc ? L.ACCESSORY_NAMES[acc] : "";
+      const cls = n < info.level ? " got" : n === info.level ? " now" : "";
+      const tag = n === info.level ? "You are here" : n < info.level ? (wear || "Done") : (wear ? `${wear} at ${lv.at} XP` : `${lv.at} XP`);
+      return `<div class="pf-row${cls}"><span class="no">${n}</span><span class="nm">${lv.name}</span><span class="tag">${tag}</span></div>`;
+    }).join("");
     decorate($("#profile"));
   }
-  $("#profile-form").addEventListener("submit", (e) => {
-    e.preventDefault();
-    const value = ($("#profile-name").value || "").trim();
-    if (value) write(KEY_NAME, value);
-    renderProfile();
-    toast("Saved");
-  });
 
   // ---------- events ----------
   document.addEventListener("click", (e) => {
     const el = e.target.closest("[data-action]");
-    if (!el) { if (openNode && !e.target.closest(".popover")) { openNode = null; renderCourse(); } return; }
+    if (!el) return;
     const action = el.dataset.action, id = el.dataset.node;
-    if (action === "node") toggleNode(id);
-    else if (action === "start") startLesson(id);
-    else if (action === "chest") {
-      const res = L.claimChest(progress, id, today());
-      if (res.error) return;
-      progress = res.progress; save(); openNode = null; justUnlocked = res.unlocked;
-      renderAll(); toast(`${use("icon-chest", "0 0 88 80")}+${res.xpGained} XP from the chest`);
-      setTimeout(() => { justUnlocked = null; }, 900);
+    if (action === "node") {
+      if (el.dataset.status === "locked") return;
+      if (L.findNode(id).kind === "chest") openChest(id); else startLesson(id);
     }
+    else if (action === "start") startLesson(id);
+    else if (action === "chest") openChest(id);
+    else if (action === "unit") { unitAt = Number(el.dataset.u); renderCourse(); }
+    else if (action === "profile") { leaveLesson(); go("profile"); }
     else if (action === "mic") { voice.wanted = !voice.wanted; if (voice.wanted) startVoice(); else stopVoice(); }
     else if (action === "quit" || action === "home") backToMap();
     else if (action === "retry") startLesson(id);
-    else if (action === "reset") { progress = L.emptyProgress(); openNode = null; save(); try { localStorage.removeItem(KEY_LEARNER); } catch (err) { /* fine */ } renderAll(); toast("Progress reset"); }
+    else if (action === "reset") { progress = L.emptyProgress(); unitAt = null; save(); try { localStorage.removeItem(KEY_LEARNER); } catch (err) { /* fine */ } renderCourse(); toast("Progress reset"); }
   });
+  function openChest(id) {
+    const res = L.claimChest(progress, id);
+    if (res.error) return;
+    progress = res.progress; save(); justUnlocked = res.unlocked;
+    renderCourse(); toast(`${use("icon-chest", "0 0 88 80")}Chest opened, the next lesson is yours`);
+    setTimeout(() => { justUnlocked = null; }, 900);
+  }
   document.addEventListener("keydown", (e) => {
     const inField = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
     const answering = (lesson && !$("#lesson").hidden) || (checkRun && checkRun.step === 3);
     if (!answering) {
-      if (e.key === "Escape" && openNode) { openNode = null; renderCourse(); }
-      if (e.key === "Enter" && !$("#finish").hidden) { const btn = $("#finish .btn"); if (btn) btn.click(); }
+      if (e.key === "Enter" && !$("#finish").hidden) { const btn = $("#finish .fn-pane:not(.out) .btn2"); if (btn) btn.click(); }
       return;
     }
     if (inField) return;
@@ -762,7 +769,7 @@
     probe.alt = ""; probe.src = "/video";
   }
   if (params.get("dev") === "1") $$(".dev-reset").forEach((el) => { el.hidden = false; });
-  window.Tenfold = { parseNumber, voice, get lesson() { return lesson; } };
+  window.Tenfold = { parseNumber, voice, get lesson() { return lesson; }, get xp() { return xp(); } };
   route();
   watchCamera();
   decorate(document);
