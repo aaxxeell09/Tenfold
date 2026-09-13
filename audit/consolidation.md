@@ -311,18 +311,39 @@ nothing else, which is how the second wording of that moment stopped existing."
 Confirmed in the re-run: the doubled line is gone, and where both ladders land on
 the same key the page's own `tutorLine !== lesson.said` swallows the repeat.
 
-**What is left is the structure, not the wording.** The two ladders still fire on
-two clocks, and where they do not happen to share a key the child hears both:
+**What is left is the structure, and at dd3ae9e it got worse rather than better.**
+The visual ladder pass made the tutor deliberately silent on its first two rungs.
+`_ladder_line` at `app/tutor.py:1649`:
 
-| Moment | Server ladder | Tutor ladder |
+```python
+        if level < 3 and not asked:
+            # L1 and L2 are shown, not said.
+            return None
+```
+
+Its docstring states the policy plainly: "Tally shows before he speaks. L1 puts
+the numbers on the fingertips and L2 colours the two fingers that matter, both
+without a word."
+
+**The server ladder talks straight through that silence.** It is on its own
+clock, it knows nothing about the tutor's level, and it produces a spoken
+`reaction` at 5, 10 and 20 seconds regardless:
+
+| Moment | Server ladder says | Tutor ladder does |
 |---|---|---|
-| ~5 s idle | `hint_1`, "Look at your hands. One finger needs to move." | `hesitation_1`, "Take your time. I'm watching your hands." |
-| ~10 s | `hint_2` to `show` | `show` at L3, or `wrong_left` / `wrong_right` at L2 |
-| ~20 s | `hint_3`, "Watch me do it, then copy me." | `rescue`, gated by `rescue_delay` at 14 s |
+| 5 s | `hint_1`, "Look at your hands. One finger needs to move." | L1: shows the numbers, says nothing |
+| 10 s | `hint_2`, mapped to `show`, "Move this finger here." | L2: colours the two fingers, says nothing |
+| 14 s | nothing | L3: the first rung with a voice |
+| 20 s | `hint_3`, "Watch me do it, then copy me." | L4 available from `rescue_delay` |
 
-The dedupe is now load-bearing on two ladders landing on the same key at the
-same moment, which nothing enforces and no test covers. `hint_1` and
-`hesitation_1` already do not, at the same five seconds.
+Because `tutor_line` is null while the tutor is silent, `m.tutor_line || m.tally`
+falls through to the tally line every time, so what the child actually hears on
+the first two rungs is the server's ladder. The pass that decided Tally should
+show before he speaks is defeated by a ladder in another file that nobody
+switched off.
+
+The dedupe that saved the doubled counting line does not help here: these are
+different keys at different moments, so there is nothing to deduplicate.
 
 `hint_level` and `hint_auto` are still computed, latched and sent, and read by
 nobody but the server's own `first_try`. **DECISION NEEDED**: one ladder owns the
@@ -369,7 +390,7 @@ values. No other kinds exist", which is now false. Fixed there.
 the only one about delivery rather than pedagogy". `app/server.py:193-195`
 carries it. `web/course/app.js` never reads it (0 refs).
 
-What the page reads instead, at `app.js:50-52`:
+What the page reads instead, at `app.js:50-52` (unchanged through dd3ae9e):
 
 ```js
 const INTERRUPT_FIELDS = ["interrupt", "can_interrupt", "interrupts", "interruptible",
@@ -379,7 +400,7 @@ function interrupts(m) { return INTERRUPT_FIELDS.some((name) => Boolean(m && m[n
 
 Seven guessed spellings, and the one the server actually sends is not among
 them. `interrupts(m)` therefore returns false on every message ever sent, in
-both `onServerMessage` (`app.js:1078`) and `checkMessage` (`app.js:455`). The
+both `onServerMessage` (`app.js:1314`) and `checkMessage` (`app.js:560`). The
 comment above it is honest about what happened: "The mark is being added on the
 server side and may not be on the message at all: every spelling it could arrive
 under is read." The page was written against a field that did not exist yet, by
@@ -423,12 +444,12 @@ DROP_REASONS = (DROP_REPLACED, DROP_QUEUE_FULL, DROP_INTERRUPTED, DROP_UNKNOWN)
 
 | Sent | Where | Lands as |
 |---|---|---|
-| `"replaced_by_newer_of_same_kind"` | `app.js:646` | `unknown` |
-| `"queue_full"` | `app.js:653` | `queue_full` |
-| `"no_longer_true"` | `app.js:701` | `unknown` |
+| `"replaced_by_newer_of_same_kind"` | `app.js:819`, `enqueue` | `unknown` |
+| `"queue_full"` | `app.js:826`, `enqueue` | `queue_full` |
+| `"no_longer_true"` | `app.js:874`, `pump` | `unknown` |
 
 `"replaced"` and `"interrupted"` are never sent by anything. `"interrupted"` in
-particular is unreachable: `cutLine()` (`app.js:757`) cuts the line in flight and
+particular is unreachable: `cutLine()` cuts the line in flight and
 calls `closeItem`, but never `reportDrop`, so the one drop reason the interrupt
 policy exists to measure is never reported at all.
 
@@ -547,7 +568,7 @@ thing from the engine's latch and `pose_confirm_ms` belongs to the engine alone.
 
 ### 2.11 CLEANUP. Fields on the state message nobody renders
 
-Counted by name against `web/course/app.js` at c9e8224.
+Counted by name against `web/course/app.js` at dd3ae9e.
 
 | Field | Refs in the page | Note |
 |---|---|---|
@@ -586,11 +607,9 @@ The page sends `start_node`, `check`, `hint`, `line_drop`, `next`, `quit`,
   `lesson/tally.py` PHRASES) has **no producer anywhere**. `moment_of` in
   `app/server.py` maps engine state through `STATE_MOMENT`, which has no such
   key, and no engine event or scheduler reaction produces it.
-- The `no_contact` ladder wording never escalates: `_ladder_line`
-  (`app/tutor.py`) returns `"not_touching"` for `SIT_NO_CONTACT` **before** the
-  level checks, so L1, L2 and L3 all say the same sentence while the level
-  counter climbs and the budget is spent. Probably intended; worth a comment if
-  so.
+- (The `no_contact` wording repeating at L1, L2 and L3, reported from the
+  earlier tree, is **fixed**: `_ladder_line` now returns None below L3, so
+  `not_touching` is said once and only at L3.)
 
 ### 2.14 CLEANUP. `early_stage == "mastered_fact"` is named for the opposite of what triggers it
 
@@ -775,9 +794,14 @@ Ordered by cost if nobody touches it.
    drops, and the camera check's threshold is both never fixed and thrown away
    per node. Decide whether the measurement is meant to survive a node at all; if
    it is, it cannot live on an object rebuilt per node. Axel and Ilan.
-5. **Which ladder speaks** (2.5). The server's `hint_1..3` or the tutor's L1..L4.
-   The contract says the tutor. Keeping both in step by hoping they land on the
-   same line key is not a structure. Axel and Ilan.
+5. **Which ladder speaks** (2.5). This is now the second most expensive one
+   after the gate. The visual ladder pass decided Tally shows before he speaks
+   and made L1 and L2 silent; the server's `hint_1..3` ladder speaks at 5 s and
+   10 s on its own clock and fills that silence, because `tutor_line` is null
+   there and the page falls through to `tally`. The pass did not land. The
+   contract says the tutor owns the voice, so the server ladder should stop
+   producing `reaction` lines and keep only what `Outcome.hint_level` records.
+   Axel and Ilan.
 6. **`tutor_line_cuts`** (2.6). The page reads it, or it comes off the wire.
    Right now the page guesses seven other names and gets the behaviour by
    accident through `lineKind`.
