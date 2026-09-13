@@ -123,9 +123,46 @@ def _parse(text: str | None) -> datetime | None:
         return None
     try:
         moment = datetime.fromisoformat(text)
-    except ValueError:
+    except (TypeError, ValueError):
         return None
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+# The record arrives from a browser's localStorage, where anything can have been
+# written or half written. Every field below is read through one of these, so a
+# malformed value falls back to its default instead of raising.
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return default if number != number else number      # NaN is not a duration
+
+
+def _as_text(value: Any, default: str = "") -> str:
+    return value if isinstance(value, str) else default
+
+
+def _as_optional_text(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _as_optional_int(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # --- state -------------------------------------------------------------------
@@ -140,13 +177,16 @@ class Attempt:
     session: int
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "Attempt":
+    def from_dict(cls, raw: Any) -> "Attempt":
+        """Never raises: a malformed field falls back to its default."""
+        if not isinstance(raw, dict):
+            raw = {}
         return cls(
-            at=str(raw.get("at", "")),
+            at=_as_text(raw.get("at", "")),
             correct=bool(raw.get("correct", False)),
             hinted=bool(raw.get("hinted", False)),
-            response_time=float(raw.get("response_time", 0.0)),
-            session=int(raw.get("session", 0)),
+            response_time=max(0.0, _as_float(raw.get("response_time", 0.0))),
+            session=max(0, _as_int(raw.get("session", 0))),
         )
 
 
@@ -159,10 +199,17 @@ class Record:
     due_at: str | None = None
     due_session: int | None = None
     last_increase_session: int | None = None
+    # How many attempts have been logged in all, not just the five kept. The
+    # orientation alternation counts serves, and len(attempts) stops at five,
+    # which froze the alternation from the sixth attempt of a session on. Not
+    # stored: a reloaded record restarts this count from the attempts it carries,
+    # which is what the stored shape can say.
+    logged: int = 0
 
     def log(self, attempt: Attempt) -> None:
         self.attempts.append(attempt)
         del self.attempts[:-5]
+        self.logged += 1
 
     @property
     def seen(self) -> bool:
@@ -184,18 +231,39 @@ class Record:
         }
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "Record":
+    def from_dict(cls, raw: Any) -> "Record":
+        """Never raises: a malformed record reads as an empty one, and a
+        malformed attempt inside a sound record is dropped."""
+        if not isinstance(raw, dict):
+            return cls()
+        listed = raw.get("attempts")
+        attempts = [Attempt.from_dict(a) for a in listed
+                    if isinstance(a, dict)][-5:] if isinstance(listed, list) else []
         return cls(
-            mastery=max(0, min(MAX_MASTERY, int(raw.get("mastery", 0)))),
-            attempts=[Attempt.from_dict(a) for a in raw.get("attempts", [])][-5:],
-            due_at=raw.get("due_at"),
-            due_session=raw.get("due_session"),
-            last_increase_session=raw.get("last_increase_session"),
+            mastery=max(0, min(MAX_MASTERY, _as_int(raw.get("mastery", 0)))),
+            attempts=attempts,
+            due_at=_as_optional_text(raw.get("due_at")),
+            due_session=_as_optional_int(raw.get("due_session")),
+            last_increase_session=_as_optional_int(raw.get("last_increase_session")),
+            logged=len(attempts),
         )
 
 
 ERROR_KINDS = ("wrong_left", "wrong_right", "no_contact", "tens_error",
                "units_error", "hint_level_needed")
+
+# Which hand was actually misplaced, as the caller names it. The engine's own
+# event names are accepted too, so a caller can pass straight through what
+# lesson/engine.py emitted.
+POSE_ERROR_KINDS: dict[str, str] = {
+    "left": "wrong_left",
+    "wrong_left": "wrong_left",
+    "wrong_left_finger": "wrong_left",
+    "right": "wrong_right",
+    "wrong_right": "wrong_right",
+    "wrong_right_finger": "wrong_right",
+    "no_contact": "no_contact",
+}
 
 
 @dataclass
@@ -246,20 +314,31 @@ class LearnerState:
         if not isinstance(raw, dict) or not raw.get("learner_id"):
             return cls.new(now or now_utc())
         profile = {kind: 0 for kind in ERROR_KINDS}
-        for kind, count in (raw.get("error_profile") or {}).items():
-            if kind in profile:
-                profile[kind] = int(count)
+        listed = raw.get("error_profile")
+        if isinstance(listed, dict):
+            for kind, count in listed.items():
+                if kind in profile:
+                    profile[kind] = max(0, _as_int(count))
         return cls(
             learner_id=str(raw["learner_id"]),
-            display_name=raw.get("display_name"),
-            created_at=str(raw.get("created_at", "")),
-            xp=max(0, int(raw.get("xp", 0) or 0)),
-            sessions=int(raw.get("sessions", 0)),
-            last_session_at=raw.get("last_session_at"),
-            pose={k: Record.from_dict(v) for k, v in (raw.get("pose") or {}).items()},
-            math={k: Record.from_dict(v) for k, v in (raw.get("math") or {}).items()},
+            display_name=_as_optional_text(raw.get("display_name")),
+            created_at=_as_text(raw.get("created_at", "")),
+            xp=max(0, _as_int(raw.get("xp", 0))),
+            sessions=max(0, _as_int(raw.get("sessions", 0))),
+            last_session_at=_as_optional_text(raw.get("last_session_at")),
+            pose=cls._records(raw.get("pose")),
+            math=cls._records(raw.get("math")),
             error_profile=profile,
         )
+
+    @staticmethod
+    def _records(raw: Any) -> dict[str, Record]:
+        """One half of the memory. A key that is not a string, or an entry that
+        is not a record, is dropped rather than raising."""
+        if not isinstance(raw, dict):
+            return {}
+        return {key: Record.from_dict(value) for key, value in raw.items()
+                if isinstance(key, str) and isinstance(value, dict)}
 
 
 # --- what the scheduler hands back -------------------------------------------
@@ -301,6 +380,9 @@ class Outcome:
     pose_error: bool = False
     math_error: bool = False
     given: int | None = None
+    # Which hand the engine said was misplaced: left, right or no_contact. The
+    # exercise itself cannot say, so without it a pose error is not attributed.
+    wrong_hand: str | None = None
 
 
 @dataclass
@@ -476,7 +558,8 @@ class Scheduler:
         another_day = last is not None and last.date() < moment.date()
         if self.session >= 2 and another_day:
             self.plan = list(NEXT_DAY_PLAN)
-            self.opening_fact = self._most_fragile(self.session - 1)
+            self.opening_fact = self._most_fragile(self.session - 1,
+                                                   in_scope_only=True)
         else:
             self.plan = []
             self.opening_fact = None
@@ -517,11 +600,17 @@ class Scheduler:
             if any(a.session == session and not a.correct for a in record.attempts)
         }
 
-    def _most_fragile(self, session: int) -> str | None:
-        """Lowest mastery among the facts touched last time, then most missed."""
+    def _most_fragile(self, session: int, in_scope_only: bool = False) -> str | None:
+        """Lowest mastery among the facts touched last time, then most missed.
+
+        The opening exercise of a session asks for the in scope answer only: a
+        lesson named after two facts has to open on one of those two facts, and
+        the one exercise start check has to ask the fact it is checking.
+        """
         touched = [
             key for key, record in self.state.math.items()
             if any(a.session == session for a in record.attempts)
+            and (not in_scope_only or self._in_scope(key))
         ]
         if not touched:
             return None
@@ -593,8 +682,10 @@ class Scheduler:
             for key in self._mastered_facts():
                 yield key, REACTION_CONFIDENCE, False
 
-        # The session opens on the most fragile fact of the previous session.
-        if index == 0 and self.opening_fact:
+        # The session opens on the most fragile fact of the previous session,
+        # and only ever on one that is in scope, so the opening exercise is
+        # about the node the child chose and never spends its outside review.
+        if index == 0 and self.opening_fact and self._in_scope(self.opening_fact):
             yield self.opening_fact, REACTION_REVIEW, False
 
         # 1. a fact queued for retry, served two exercises after the error
@@ -645,8 +736,11 @@ class Scheduler:
         return record.attempts[-1].at if record and record.attempts else ""
 
     def _mastered_facts(self) -> list[str]:
+        """Solid facts, in scope only: a confidence exercise from another unit
+        would spend the node's single outside review, or exceed it."""
         return [key for key in fact_order(self.state)
-                if self.state.math.get(key, Record()).mastery >= MASTERED_FROM]
+                if self._in_scope(key)
+                and self.state.math.get(key, Record()).mastery >= MASTERED_FROM]
 
     def _facts_at_mastery(self, low: int, high: int) -> list[str]:
         return [key for key in fact_order(self.state)
@@ -701,14 +795,13 @@ class Scheduler:
         A course node names its orientations explicitly, for example [6, 8] and
         [8, 6], so when one is in scope its list wins over the default pair.
         """
+        seen = self.state.math.get(key, Record()).logged
         listed = self.orientations.get(key)
         if listed:
-            seen = len(self.state.math.get(key, Record()).attempts)
             return listed[seen % len(listed)]
         low, high = factors_of(key)
         if low == high:
             return low, high
-        seen = len(self.state.math.get(key, Record()).attempts)
         return (low, high) if seen % 2 == 0 else (high, low)
 
     def _allowed(self, key: str) -> bool:
@@ -784,7 +877,9 @@ class Scheduler:
         if outcome.hint_level:
             profile["hint_level_needed"] += outcome.hint_level
         if outcome.pose_error:
-            profile["wrong_left" if outcome.left != outcome.right else "wrong_right"] += 1
+            kind = POSE_ERROR_KINDS.get(outcome.wrong_hand or "")
+            if kind is not None:
+                profile[kind] += 1
         if outcome.math_error and outcome.given is not None:
             reaction = answer_reaction(outcome.left * outcome.right, outcome.given)
             if reaction == REACTION_RECOUNT_TENS:
@@ -821,7 +916,8 @@ class Scheduler:
             return REACTION_END_TIRED
         if self.plan and done >= len(self.plan):
             return REACTION_END_SUCCESS
-        return REACTION_END_SUCCESS
+        # Past the minimum and still going well: keep playing up to the maximum.
+        return None
 
     def _slowing_down(self) -> bool:
         times = [o.response_time for o in self.outcomes if o.response_time > 0]

@@ -67,6 +67,15 @@ DROP_S = 0.5
 KEEP_S = 1.0
 STEP_S = PREP_S + DROP_S + KEEP_S
 
+# G2: a camera can open and then stop delivering frames (unplugged, taken by
+# another app, a virtual camera that dies). The wait loop sleeps between failed
+# reads instead of spinning, and gives up after about two seconds of silence.
+READ_FAIL_SLEEP_S: float = 0.05
+MAX_READ_FAILURES: int = 40
+
+# G3: the shell convention for a run stopped by Ctrl-C.
+EXIT_INTERRUPTED: int = 130
+
 ANGLES = ("front", "top", "side")
 DISTANCES = ("near", "far")
 # One block is one camera angle at one distance, named angle_distance.
@@ -366,6 +375,7 @@ def run_capture(session: str, person: str, schedule: list[Item], writer: SampleW
     normalizer = Normalizer()
     transition_seen = 0
 
+    interrupted = False
     try:
         for angle, distance in (blocks if blocks is not None else list(ALL_BLOCKS)):
             if not _wait_for_block(camera, angle, distance):
@@ -386,13 +396,19 @@ def run_capture(session: str, person: str, schedule: list[Item], writer: SampleW
                     break
             if quit_requested:
                 break
+    except KeyboardInterrupt:
+        # Ctrl-C is a normal way to end a session: say what was captured
+        # instead of showing a traceback. Every window is already flushed.
+        interrupted = True
     finally:
         detector.close()
         camera.release()
         cv2.destroyAllWindows()
 
+    if interrupted:
+        print("\ncapture: interrupted, camera released")
     print(f"capture: wrote {writer.written} {writer.split} windows to {writer.path}")
-    return 0
+    return EXIT_INTERRUPTED if interrupted else 0
 
 
 def _wait_for_block(camera: Any, angle: str, distance: str) -> bool:
@@ -401,10 +417,23 @@ def _wait_for_block(camera: Any, angle: str, distance: str) -> bool:
 
     banner = f"Set the camera: angle {angle}, distance {distance}"
     print(f"\n=== {banner} ===  space to start, q to quit")
+    failures = 0
     while True:
         ok, frame = camera.read()
         if not ok:
+            # No frame means no window update, so keep the keyboard alive here
+            # rather than spinning with q unreachable.
+            failures += 1
+            if failures >= MAX_READ_FAILURES:
+                print(f"capture: the camera stopped delivering frames "
+                      f"({failures} failed reads in a row), giving up",
+                      file=sys.stderr)
+                return False
+            if (cv2.waitKey(1) & 0xFF) == ord("q"):
+                return False
+            time.sleep(READ_FAIL_SLEEP_S)
             continue
+        failures = 0
         frame = cv2.flip(frame, 1)
         _draw_banner(frame, [banner, "space to start", "q to quit"], BANNER_TEXT)
         cv2.imshow("tenfold capture", frame)
@@ -532,7 +561,13 @@ def main(argv: list[str] | None = None) -> int:
 
     schedule = build_schedule()
     if args.dry_run:
-        run_dry(schedule, blocks)
+        # The dry run sleeps through the whole schedule, so Ctrl-C is the
+        # normal way out of it and must not end in a traceback.
+        try:
+            run_dry(schedule, blocks)
+        except KeyboardInterrupt:
+            print("\ncapture: dry run interrupted")
+            return EXIT_INTERRUPTED
         return 0
 
     # F3: the held out set is recorded by someone who is not the dataset author,
@@ -545,6 +580,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return run_capture(args.session, args.person or args.session, schedule, writer,
                            args.resume, blocks, args.camera)
+    except KeyboardInterrupt:
+        # run_capture handles its own Ctrl-C; this covers the setup around it.
+        print("\ncapture: interrupted")
+        return EXIT_INTERRUPTED
     finally:
         writer.close()
 

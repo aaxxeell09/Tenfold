@@ -656,3 +656,280 @@ def test_xp_rides_along_on_the_learner_record():
     assert back.xp == 340
     assert LearnerState.from_dict({"learner_id": "x", "xp": -5}).xp == 0
     assert LearnerState.from_dict({"learner_id": "x"}).xp == 0
+
+
+# --- the opening exercise and the node scope ---------------------------------
+
+
+def test_the_start_check_asks_the_fact_it_is_checking():
+    """A returning learner used to open on the most fragile fact of the whole
+    record, so the one exercise check scoped to 6 x 6 served something else and
+    could never be passed."""
+    state = learner(sessions=1)
+    for key in ("9x9", "9x8"):
+        record = state.fact(key)
+        record.attempts = [sch.Attempt(at=(T0 - timedelta(days=1)).isoformat(),
+                                       correct=False, hinted=False, response_time=9.0,
+                                       session=1)]
+    state.last_session_at = (T0 - timedelta(days=1)).isoformat()
+    engine = Scheduler(state, now=T0)
+    started = engine.start_session(T0, pairs=[[6, 6]], length=1)
+
+    assert started["allowed"] == ["6x6"]
+    assert started["opening_fact"] in (None, "6x6")
+    pick = engine.next_exercise(T0)
+    assert pick is not None and pick.fact == "6x6" and (pick.left, pick.right) == (6, 6)
+    assert engine.outside_reviews == 0
+
+
+def test_the_opening_exercise_is_the_fragile_fact_of_the_node_and_costs_nothing():
+    state = learner(sessions=1)
+    for key, mastery in (("6x6", 0), ("7x7", 2), ("10x10", 0)):
+        record = state.fact(key)
+        record.mastery = mastery
+        record.attempts = [sch.Attempt(at=(T0 - timedelta(days=1)).isoformat(),
+                                       correct=mastery > 0, hinted=False,
+                                       response_time=4.0, session=1)]
+        sch.schedule_next(record, T0 - timedelta(days=1), 1)
+    state.last_session_at = (T0 - timedelta(days=1)).isoformat()
+    engine = Scheduler(state, now=T0)
+    started = engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+
+    assert started["opening_fact"] == "6x6", "the fragile fact of the node, not of the record"
+    pick = engine.next_exercise(T0)
+    assert pick.fact == "6x6" and pick.reason == sch.REACTION_REVIEW
+    assert engine.outside_reviews == 0, "an opening in scope spends no outside review"
+
+
+def test_a_node_never_serves_more_than_one_fact_from_outside_itself():
+    """Even with mastered facts and due facts waiting outside, and even when
+    every answer is wrong, which is what buys a confidence exercise."""
+    state = learner(sessions=3, **{"10x10": 5, "6x10": 5, "9x9": 4, "7x10": 1})
+    state.fact("7x10").due_session = 4
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    facts = []
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        facts.append(pick.fact)
+        engine.record(answered(pick, correct=False), now=T0)
+
+    # One fact from outside may be slipped in, and it may come back as its own
+    # retry. A second outside fact may not.
+    outside = {key for key in facts if key not in {"6x6", "7x7"}}
+    assert len(outside) <= sch.MAX_OUTSIDE_REVIEWS, facts
+
+
+def test_the_confidence_exercise_after_two_errors_stays_in_the_node():
+    state = learner(sessions=3, **{"10x10": 5, "6x10": 5, "6x6": 1, "7x7": 5})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    for _ in range(2):
+        pick = engine.next_exercise(T0)
+        engine.record(answered(pick, correct=False), now=T0)
+    pick = engine.next_exercise(T0)
+    assert pick.fact in {"6x6", "7x7"}, "a mastered fact from another unit is out of scope"
+
+
+def test_mastered_facts_are_only_the_ones_in_scope():
+    state = learner(sessions=3, **{"10x10": 5, "7x7": 4, "6x6": 1})
+    engine = Scheduler(state, now=T0)
+    assert "10x10" in engine._mastered_facts()
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    assert engine._mastered_facts() == ["7x7"]
+
+
+# --- the orientation keeps alternating ---------------------------------------
+
+
+def test_the_orientation_keeps_alternating_past_five_attempts():
+    """Only the last five attempts are kept, so the alternation used to freeze
+    on the sixth and the child only ever saw one hand order after that."""
+    state = learner(sessions=3, **{"7x8": 2})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0)
+    seen = []
+    for _ in range(10):
+        seen.append(engine._orientation("7x8"))
+        state.fact("7x8").log(sch.Attempt(at=T0.isoformat(), correct=True, hinted=False,
+                                          response_time=2.0, session=3))
+    assert len(set(seen)) == 2
+    assert seen[0::2] == [seen[0]] * 5 and seen[1::2] == [seen[1]] * 5
+
+
+def test_a_node_orientation_keeps_alternating_over_a_long_session():
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 8], [8, 6]], length=10)
+    seen = []
+    for _ in range(10):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        seen.append((pick.left, pick.right))
+        engine.record(answered(pick), now=T0)
+    assert seen.count((6, 8)) == 5 and seen.count((8, 6)) == 5
+
+
+# --- the error profile names the hand ----------------------------------------
+
+
+POSE_HAND_CASES = [
+    ("left", "wrong_left"),
+    ("right", "wrong_right"),
+    ("wrong_left_finger", "wrong_left"),
+    ("wrong_right_finger", "wrong_right"),
+    ("no_contact", "no_contact"),
+]
+
+
+@pytest.mark.parametrize("hand,kind", POSE_HAND_CASES, ids=[c[0] for c in POSE_HAND_CASES])
+def test_a_pose_error_is_filed_against_the_hand_that_was_wrong(hand, kind):
+    state = learner(sessions=3, **{"7x8": 2})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0)
+    engine.record(Outcome(fact="7x8", left=8, right=7, correct=False, pose_error=True,
+                          wrong_hand=hand), now=T0)
+    assert state.error_profile[kind] == 1
+    counted = sum(state.error_profile[k] for k in ("wrong_left", "wrong_right", "no_contact"))
+    assert counted == 1, "one pose error is one count, on one kind"
+
+
+def test_a_pose_error_on_a_double_is_filed_by_the_hand_not_by_the_symmetry():
+    """6x6, 7x7, 8x8, 9x9 and 10x10 used to file every pose error as the right
+    hand, and every other fact as the left."""
+    state = learner(sessions=3, **{"9x9": 2})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0)
+    engine.record(Outcome(fact="9x9", left=9, right=9, correct=False, pose_error=True,
+                          wrong_hand="left"), now=T0)
+    assert state.error_profile["wrong_left"] == 1
+    assert state.error_profile["wrong_right"] == 0
+
+
+def test_a_pose_error_with_no_hand_named_is_filed_against_neither():
+    state = learner(sessions=3, **{"7x8": 2})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0)
+    engine.record(Outcome(fact="7x8", left=8, right=7, correct=False, pose_error=True),
+                  now=T0)
+    assert state.error_profile["wrong_left"] == 0
+    assert state.error_profile["wrong_right"] == 0
+    assert state.error_profile["no_contact"] == 0
+
+
+# --- the shape of an open session --------------------------------------------
+
+
+def _steady_learner(same_day: bool) -> LearnerState:
+    """Every fact known and due, so nothing but the session shape stops it."""
+    state = learner(sessions=3, **{k.replace("x", "_"): 3 for k in DIFFICULTY_ORDER})
+    state.last_session_at = (T0 if same_day else T0 - timedelta(days=1)).isoformat()
+    return state
+
+
+def _play(engine: Scheduler, seconds=lambda n: 3.0, limit: int = 30) -> int:
+    now = T0
+    count = 0
+    while count < limit:
+        pick = engine.next_exercise(now)
+        if pick is None:
+            break
+        count += 1
+        engine.record(answered(pick, seconds=seconds(count)), now=now)
+        now += timedelta(seconds=10)
+    return count
+
+
+def test_an_open_session_runs_to_the_maximum_when_it_is_going_well():
+    engine = Scheduler(_steady_learner(same_day=True), now=T0)
+    started = engine.start_session(T0)
+    assert started["plan"] == []
+    assert _play(engine) == sch.SESSION_MAX_EXERCISES
+
+
+def test_a_next_day_session_stops_once_its_plan_is_played():
+    engine = Scheduler(_steady_learner(same_day=False), now=T0)
+    started = engine.start_session(T0)
+    assert started["plan"] == list(sch.NEXT_DAY_PLAN)
+    count = _play(engine)
+    assert sch.SESSION_MIN_EXERCISES <= count < sch.SESSION_MAX_EXERCISES
+
+
+def test_an_open_session_that_slows_down_stops_before_the_maximum():
+    engine = Scheduler(_steady_learner(same_day=True), now=T0)
+    engine.start_session(T0)
+    count = _play(engine, seconds=lambda n: 2.0 if n <= 3 else 12.0)
+    assert count == sch.SESSION_MIN_EXERCISES
+    assert engine.end_session(T0 + timedelta(minutes=2)).reason == sch.REACTION_END_TIRED
+
+
+def test_a_node_keeps_its_own_length_whatever_the_open_shape_says():
+    engine = Scheduler(_steady_learner(same_day=True), now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    assert _play(engine) == 5
+
+
+# --- a malformed record from localStorage ------------------------------------
+
+
+MALFORMED_CASES = [
+    ("a session count that is not a number", {"learner_id": "a", "sessions": "many"}),
+    ("a pose map that is not a map", {"learner_id": "a", "pose": ["x"]}),
+    ("a record that is not a record", {"learner_id": "a", "math": {"6x7": 3}}),
+    ("a mastery that is not a number", {"learner_id": "a", "math": {"6x7": {"mastery": "high"}}}),
+    ("an attempt list that is not a list", {"learner_id": "a", "math": {"6x7": {"attempts": 5}}}),
+    ("an error count that is not a number",
+     {"learner_id": "a", "error_profile": {"tens_error": "x"}}),
+    ("a due date that is not a date",
+     {"learner_id": "a", "math": {"6x7": {"due_at": {"bad": 1}, "due_session": "soon",
+                                          "last_increase_session": []}}}),
+    ("an attempt that is not an attempt",
+     {"learner_id": "a", "math": {"6x7": {"attempts": [7, {"correct": "yes", "at": 3,
+                                                           "session": None,
+                                                           "response_time": "slow"}]}}}),
+    ("names and counters of the wrong type",
+     {"learner_id": "a", "xp": "lots", "display_name": {"n": 1}, "created_at": 4,
+      "last_session_at": 7, "error_profile": "none"}),
+]
+
+
+@pytest.mark.parametrize("name,raw", MALFORMED_CASES, ids=[c[0] for c in MALFORMED_CASES])
+def test_a_malformed_record_never_raises_and_still_runs_a_lesson(name, raw):
+    """The docstring of from_dict promises this: the record comes from a
+    browser's localStorage and a bad field must never break a lesson."""
+    state = LearnerState.from_dict(raw, now=T0)
+    assert state.learner_id
+    assert state.sessions >= 0 and state.xp >= 0
+    assert all(isinstance(record, Record) for record in state.math.values())
+    assert all(isinstance(record, Record) for record in state.pose.values())
+    assert set(state.error_profile) == set(sch.ERROR_KINDS)
+
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6]], length=1)
+    pick = engine.next_exercise(T0)
+    assert pick is not None and pick.fact == "6x6"
+    engine.record(answered(pick), now=T0)
+    assert engine.next_exercise(T0) is None
+    json.dumps(state.to_dict())                 # and it still round trips
+
+
+def test_a_malformed_attempt_is_dropped_and_the_sound_ones_are_kept():
+    record = Record.from_dict({"attempts": ["rubbish", None,
+                                            {"at": "x", "correct": True, "hinted": False,
+                                             "response_time": 2.0, "session": 3}]})
+    assert len(record.attempts) == 1
+    assert record.attempts[0].session == 3 and record.logged == 1
+
+
+def test_a_malformed_due_date_reads_as_no_due_date():
+    record = Record.from_dict({"mastery": 3, "due_at": {"bad": 1}, "due_session": "soon",
+                               "attempts": [{"at": T0.isoformat(), "correct": True}]})
+    assert record.due_at is None and record.due_session is None
+    assert sch.is_due(record, T0 + timedelta(days=30), session=9) is False
+
+
+def test_xp_survives_a_malformed_neighbour():
+    state = LearnerState.from_dict({"learner_id": "a", "xp": 210, "sessions": "many"})
+    assert state.xp == 210 and state.sessions == 0
+    assert LearnerState.from_dict({"learner_id": "a", "xp": "lots"}).xp == 0
