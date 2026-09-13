@@ -24,11 +24,13 @@
   const NS = "http://www.w3.org/2000/svg";
 
   // ---------- what the server is allowed to slow down ----------
-  // The page validates on the event. The only two waits it still knows about are these
-  // parameters, both zero unless a state message sets them, so a server that says
-  // nothing about them means no wait at all: the step turns and the answer goes the
-  // moment each is true.
-  const PARAMS = { check_step_min_ms: 0, answer_first_number_ms: 0 };
+  // The page validates on the event. The waits it knows about are these parameters, all
+  // zero unless a state message sets them, so a server that says nothing about them
+  // means no wait at all: the step turns and the answer goes the moment each is true.
+  // The gate's two are read from lesson/tutor_params.json as well, so the gate paces
+  // itself on the policy file whatever the wire carries.
+  const PARAMS = { check_step_min_ms: 0, answer_first_number_ms: 0,
+    gate_step_pause_ms: 0, gate_ready_button_s: 0 };
   // One event, one thing on screen. The lesson's answer field is the export's pill and
   // nothing else: the digits typed and the number heard are shown in the pill itself,
   // the big number beside it and the "heard:" line above it are gone. That line was a
@@ -38,18 +40,24 @@
   let heardTimer = null;
   function readParams(m) {
     const from = (m && m.params) || m || {};
-    ["check_step_min_ms", "answer_first_number_ms"].forEach((name) => {
+    Object.keys(PARAMS).forEach((name) => {
       const value = Number(from[name]);
       if (Number.isFinite(value) && value >= 0) PARAMS[name] = value;
     });
   }
   // The one line allowed to cut another is the acknowledgement, and the server is what
-  // marks it. The mark is being added on the server side and may not be on the message
-  // at all: every spelling it could arrive under is read, and a message carrying none
-  // of them means nothing cuts, which is the rhythm the dialogue has today.
+  // marks it. tutor_line_cuts is the server's own word for it, so it is the answer
+  // whenever the message carries it, true or false alike. The names below are what the
+  // field was called while it was being added, and are read only when the server's word
+  // is absent; a message with none of them cuts nothing, which is the rhythm the
+  // dialogue has with no tutor behind it.
+  const CUT_FIELD = "tutor_line_cuts";
   const INTERRUPT_FIELDS = ["interrupt", "can_interrupt", "interrupts", "interruptible",
     "tally_interrupt", "tally_interrupts", "barge_in"];
-  function interrupts(m) { return INTERRUPT_FIELDS.some((name) => Boolean(m && m[name])); }
+  function interrupts(m) {
+    if (m && Object.prototype.hasOwnProperty.call(m, CUT_FIELD)) return Boolean(m[CUT_FIELD]);
+    return INTERRUPT_FIELDS.some((name) => Boolean(m && m[name]));
+  }
 
   // ---------- storage ----------
   function read(key, fallback) {
@@ -463,6 +471,13 @@
   // other hands: until the key is in it, the step opens without a line rather than with
   // a sentence invented here.
   const READY_LINE_KEY = "gate_ready";
+  // a timing of the gate: what the wire said if it said anything, then what
+  // lesson/tutor_params.json says, then the constant written beside its key here
+  function gateTiming(key, fallback) {
+    const wire = Number(PARAMS[key]);
+    if (isFinite(wire) && wire > 0) return wire;
+    return timing(key, fallback);
+  }
   function poseMet() { return readText(slot(KEY_POSE)) === "1"; }
   function markPoseMet() { write(slot(KEY_POSE), "1"); }
   // Proof, for this session only, that the camera and the microphone both work: the
@@ -539,7 +554,7 @@
   // with no timer between the child being right and the screen saying so. The number
   // sweep keeps its own timers, it is decoration and not the step.
   function turnStep(run, fn) {
-    const least = Math.max(PARAMS.check_step_min_ms, timing(GATE_PAUSE_KEY, GATE_PAUSE_MS));
+    const least = Math.max(PARAMS.check_step_min_ms, gateTiming(GATE_PAUSE_KEY, GATE_PAUSE_MS));
     const wait = least - (Date.now() - (run.stepAt || 0));
     const turn = () => { if (checkRun !== run) return; run.stepAt = Date.now(); run.turning = false; fn(); };
     if (!(wait > 0)) { turn(); return; }
@@ -656,7 +671,7 @@
   // work it waits the policy timing out first, so the word stays the way through.
   function armReadyButton(run) {
     if (!canHear()) { showReadyButton(run); return; }
-    const wait = Math.round(timing(READY_BUTTON_KEY, READY_BUTTON_S) * 1000);
+    const wait = Math.round(gateTiming(READY_BUTTON_KEY, READY_BUTTON_S) * 1000);
     later(wait, () => { if (checkRun === run && !run.done) showReadyButton(run); });
   }
   function showReadyButton(run) {
@@ -2115,7 +2130,7 @@
   // startLesson is on the surface so the camera lesson can be opened without the path
   // screen, and the child helpers so a test can switch child: the screens are wired by
   // different hands and each one's test should fail for its own reasons.
-  window.Tenfold = { parseNumber, numbersIn, heardReady, tallyLine, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, timing: PARAMS,
+  window.Tenfold = { parseNumber, numbersIn, heardReady, tallyLine, gateTiming, interrupts, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, timing: PARAMS,
     startLesson, runGate, addXp, setChild, roster,
     get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); },
     get gate() { return checkRun; }, get gateProved() { return gateProved(); },
