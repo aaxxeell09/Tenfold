@@ -1,7 +1,7 @@
 PY ?= .venv/bin/python
 N ?= 1
 
-.PHONY: install doctor test run demo eval eval-local eval-heldout tutor-eval knn split retro-validate loop dry-run nightly watch dashboard snapshot rehearse rehearse-mock
+.PHONY: install doctor test run demo eval eval-local eval-heldout tutor-eval tutor-quality knn split retro-validate loop dry-run nightly watch dashboard snapshot rehearse rehearse-mock
 
 install:
 	uv venv -p 3.11 .venv && uv pip install -p .venv/bin/python -r requirements.txt
@@ -29,6 +29,9 @@ eval-heldout:   ## uses WANDB_API_KEY_HELDOUT, project tenfold-heldout
 
 tutor-eval:     ## which W&B Inference model speaks for Tally: one Weave Evaluation per model and a Leaderboard
 	$(PY) eval/tutor_eval.py
+
+tutor-quality:  ## read the tutor's published evaluations and scored lines from Weave into data/tutor_quality.json, no model call
+	$(PY) eval/tutor_quality.py
 
 knn:
 	$(PY) eval/baseline_knn.py --split heldout

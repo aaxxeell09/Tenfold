@@ -113,6 +113,26 @@
 .tf-judge-icon.tf-dark { background: var(--tf-ink); color: #fff; }
 .tf-judge-count { margin-left: auto; }
 .tf-steps { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 14px; color: var(--tf-ink-2); }
+.tf-part { margin: 80px 0 0; padding-top: 14px; border-top: 3px solid var(--tf-ink); font: 600 12px/1.3 var(--marimo-text-font);
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--tf-ink); }
+.tf-tq-scroll { overflow-x: auto; border: 1px solid var(--tf-line); border-radius: 12px; background: #fff; }
+.tf-tq-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tf-tq-table th { text-align: left; font-weight: 500; color: var(--tf-muted); padding: 8px 10px; border-bottom: 1px solid var(--tf-line);
+  white-space: nowrap; }
+.tf-tq-table td { padding: 8px 10px; border-bottom: 1px solid var(--tf-hair); font-family: var(--tf-mono); white-space: nowrap; }
+.tf-tq-table td:first-child { font-family: var(--marimo-text-font); }
+.tf-tq-table tr:last-child td { border-bottom: 0; }
+.tf-tq-group { color: var(--tf-faint) !important; }
+.tf-tq-list { border: 1px solid var(--tf-line); border-radius: 14px; overflow: hidden; background: #fff; }
+.tf-tq-list details { border-top: 1px solid var(--tf-hair); }
+.tf-tq-list details:first-child { border-top: 0; }
+.tf-tq-list summary { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 11px 16px; cursor: pointer;
+  font-size: 14px; list-style: none; }
+.tf-tq-list summary::-webkit-details-marker { display: none; }
+.tf-tq-list summary .tf-log-right { margin-left: auto; }
+.tf-tq-body { padding: 2px 16px 16px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.tf-tq-line { font-size: 15px; color: var(--tf-ink); }
+.tf-tq-body .tf-tq-table td { white-space: normal; }
 .tf-step { display: inline-flex; align-items: center; gap: 8px; }
 .tf-step b { width: 22px; height: 22px; border-radius: 50%; background: var(--tf-accent); color: #fff; display: grid;
   place-items: center; font: 600 12px var(--tf-mono); }

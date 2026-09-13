@@ -875,6 +875,216 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, gate_since, icon, inform
 
 
 @app.cell
+def _(Path, json, mo, os, urllib):
+    # Part 2 reads its own small file, written by eval/tutor_quality.py from Weave; reading it calls no model
+    RAW_TUTOR_QUALITY = "https://raw.githubusercontent.com/aaxxeell09/Tenfold/main/data/tutor_quality.json"
+
+    def _tq_load():
+        _chosen = os.environ.get("TENFOLD_TUTOR_QUALITY")
+        _paths = [(Path(_chosen), "TENFOLD_TUTOR_QUALITY")] if _chosen else []
+        if not _chosen:
+            try:
+                _dir = mo.notebook_dir()
+                if _dir:
+                    _paths.append((Path(_dir).parent / "data" / "tutor_quality.json", "this repository"))
+            except Exception:
+                pass
+            _paths.append((Path.cwd() / "data" / "tutor_quality.json", "working directory"))
+        for _path, _kind in _paths:
+            if _path.exists():
+                try:
+                    _data = json.loads(_path.read_text())
+                    return (_data if isinstance(_data, dict) else {}), f"{_path.name} ({_kind})", None
+                except (OSError, json.JSONDecodeError):
+                    return {}, f"{_path.name} ({_kind})", "The tutor quality file is unreadable, maybe still being written."
+            if _chosen:
+                return {}, f"{_path.name} ({_kind})", "The tutor quality file was not found."
+        try:
+            with urllib.request.urlopen(RAW_TUTOR_QUALITY, timeout=10) as _r:
+                return json.loads(_r.read().decode()), "tutor_quality.json (GitHub main)", None
+        except Exception:
+            return {}, "none", "No tutor quality file was found here or on GitHub."
+
+    tq, tq_source, tq_problem = _tq_load()
+    return tq, tq_problem, tq_source
+
+
+@app.cell
+def _(mo, pill, section, tq, tq_problem, tq_source, when):
+    _flow = ('<div class="tf-flow">' + '<span class="tf-flow-arrow">→</span>'.join(
+        pill(step, "good" if k == 3 else "neutral") for k, step in
+        enumerate(("Prepared teaching moments", "Model evaluation", "Line in a lesson", "Score on the Weave trace"))) + "</div>")
+    _error = tq.get("last_refresh_error") or {}
+    _fresh = ((f"Updated {when(tq['generated_at'])} UTC from Weave" if tq.get("generated_at") else "Not updated yet")
+              + (f". The last refresh failed at {when(_error.get('at'))} UTC ({_error.get('error')}), so this is the previous data"
+                 if _error else "")
+              + ". Not real time: run <code>make tutor-quality</code>, then reload this page.")
+    mo.vstack([
+        mo.Html('<div class="tf tf-part">Part 2 · The tutor</div>'),
+        section("tutor", 5, "Tutor quality: evaluation and live monitoring", "Is the tutor <em>saying the right thing</em>?",
+                "We evaluate the tutor on prepared teaching moments, then check its new lines during lessons."),
+        mo.Html(f'<div class="tf">{_flow}<div class="tf-measure" style="margin-top:0"><span>These checks measure the quality of '
+                "the tutor's lines, not children's learning. Scoring measures the lines; it does not change the model or its "
+                f'prompt.</span></div><div class="tf-quiet" style="margin-top:6px">{_fresh} Source: {tq_source}.</div></div>'),
+        mo.callout(mo.md(tq_problem), kind="warn") if tq_problem else mo.md(""),
+    ], gap=1)
+    return
+
+
+@app.cell
+def _(html, mo, pill, tq, when):
+    RULE_LABELS = {"non_empty": "Says something", "concise": "20 words max", "safe_words": "No harsh words",
+                   "no_spoiler": "No spoiler", "correction_consistency": "Right correction",
+                   "keeps_numbers": "Keeps Tally's numbers", "in_time": "On time", "short": "Short (v1)"}
+    _off = tq.get("offline") or {}
+    if _off.get("status") != "ok":
+        _link = f' <a href="{html.escape(tq["weave_url"])}" target="_blank" rel="noopener">Open Weave</a>' if tq.get("weave_url") else ""
+        _view = mo.Html(f'<div class="tf tf-card"><span class="tf-label">Offline evaluation</span>'
+                        f'<div class="tf-card-text">Not available in this file.{_link}</div></div>')
+    else:
+        _runs = _off.get("runs") or []
+        _live_model = next((r.get("model") for r in ((tq.get("live") or {}).get("rows") or []) if r.get("model")), None)
+        _order = ["non_empty", "concise", "safe_words", "no_spoiler", "correction_consistency", "keeps_numbers"]
+        _seen = {rule for r in _runs for rule in (r.get("rules") or {})}
+        _quality = [k for k in _order if k in _seen] + sorted(k for k in _seen if k not in _order and k != "in_time")
+
+        def _cell(rule_value):
+            if not isinstance(rule_value, dict) or rule_value.get("pass_fraction") is None:
+                return '<td title="no pass or fail recorded">n/a</td>'
+            _count, _decided = rule_value.get("pass_count"), rule_value.get("decided")
+            _tip = f"{_count} of {_decided} passed" if _decided else f"{_count} passed"
+            return f'<td title="{_tip}">{rule_value["pass_fraction"] * 100:.0f}%</td>'
+
+        def _num(value, digits=2):
+            return "n/a" if value is None else f"{value:.{digits}f}"
+
+        _head = ("<tr><th>Model</th>" + "".join(f"<th>{RULE_LABELS.get(k, k)}</th>" for k in _quality)
+                 + "<th>Warmth /5</th><th>Clarity /5</th><th class='tf-tq-group'>Speed · On time</th><th class='tf-tq-group'>Speed · mean</th><th></th></tr>")
+        _body = ""
+        for _r in _runs:
+            _model = str(_r.get("model") or "unknown")
+            _in_use = bool(_live_model and str(_live_model).endswith(_model))
+            _body += (f"<tr><td>{html.escape(_model)} {pill('used live', 'accent') if _in_use else ''}</td>"
+                      + "".join(_cell((_r.get("rules") or {}).get(k)) for k in _quality)
+                      + f"<td>{_num(_r.get('warmth'))}</td><td>{_num(_r.get('clarity'))}</td>"
+                      + _cell((_r.get("rules") or {}).get("in_time"))
+                      + f"<td>{'n/a' if _r.get('latency_ms_mean') is None else str(round(_r['latency_ms_mean'])) + ' ms'}</td>"
+                      + (f'<td><a href="{html.escape(_r["url"])}" target="_blank" rel="noopener">Evaluation</a></td>' if _r.get("url") else "<td></td>")
+                      + "</tr>")
+        _versions = _off.get("rules_versions") or []
+        _mixed = pill("rules versions differ in this table: not comparable", "warn") if len(_versions) > 1 else ""
+        _older = "; ".join(f"{o['evaluation']} (rules {o['rules_version']}, {o['runs']} runs)" for o in _off.get("other_versions") or [])
+        _board = (f'<a href="{html.escape(_off["leaderboard_url"])}" target="_blank" rel="noopener">Open the leaderboard in Weave</a>'
+                  if _off.get("leaderboard_url") else "no leaderboard link found")
+        _view = mo.Html(
+            f'<div class="tf"><div class="tf-card" style="gap:10px"><div class="tf-kicker"><span class="tf-kicker-title">Offline evaluation</span>'
+            f'<span class="tf-quiet">{_board}</span></div>'
+            f'<div class="tf-card-text">{_off.get("moments") or "An unknown number of"} prepared moments · rules '
+            f'{", ".join(_versions) or "unknown"} ({html.escape(str(_off.get("evaluation")))}) · published {when(_off.get("published_at"))} UTC '
+            f'{_mixed}</div><div class="tf-tq-scroll"><table class="tf-tq-table">{_head}{_body}</table></div>'
+            '<div class="tf-quiet">A rule percentage is pass among pass or fail; not applicable and not verifiable are left out. '
+            "Warmth and clarity come from a judge model. Speed is shown apart from quality."
+            + (f" Older runs, not comparable and not shown: {html.escape(_older)}." if _older else "") + "</div></div></div>")
+    _view
+    return (RULE_LABELS,)
+
+
+@app.cell
+def _(RULE_LABELS, html, mo, pill, tq, when):
+    STATE = {"scored": ("Scored", "good"), "pending": ("Scoring pending", "accent"), "score_missing": ("Score missing", "warn")}
+    ORIGIN = {"synthetic_check": ("Synthetic check", "neutral"), "not_identified": ("Origin not identified", "neutral"),
+              "lesson": ("Lesson", "accent")}
+    CHECK = {"pass": ("Pass", "good"), "fail": ("Fail", "bad"), "not_applicable": ("Not applicable", "neutral"),
+             "not_verifiable": ("Not verifiable", "warn")}
+    DELIVERY = {"handed_to_server": "handed to the page for display; not confirmed as spoken",
+                "handed_to_callback": "handed over; not confirmed as spoken",
+                "late_held": "too late for its moment, held for later",
+                "moment_ended_unserved": "the moment ended before the line was ready (obsolete)",
+                "dropped_late": "too late, dropped",
+                "generation_failed": "the model failed; Tally's fixed line was used instead",
+                "generation_empty": "the model said nothing; Tally's fixed line was used instead"}
+    _live = tq.get("live") or {}
+    if _live.get("status") != "ok":
+        _view = mo.Html('<div class="tf tf-card"><span class="tf-label">Latest evaluated lines</span>'
+                        '<div class="tf-card-text">Live scores are not available in this file.</div></div>')
+    else:
+        _s = _live.get("lesson_summary") or {}
+        _states, _origins = _live.get("states") or {}, _live.get("scored_by_origin") or {}
+        if _s.get("lines"):
+            _fails = "".join(f"<li>{html.escape(str(f['reason']))} · {f['count']}</li>" for f in _s.get("top_failures") or []) or "<li>none</li>"
+            _summary = (
+                '<div class="tf-kpis" style="margin-top:0">'
+                f'<div class="tf-kpi"><span class="tf-kpi-label">Lesson lines scored</span><div class="tf-kpi-value">{_s["lines"]}</div>'
+                f'<div class="tf-kpi-foot">scored, marked as a lesson, not cancelled · {_s.get("cancelled_excluded", 0)} cancelled left out</div></div>'
+                f'<div class="tf-kpi"><span class="tf-kpi-label">Quality checks passed</span><div class="tf-kpi-value">{_s["checks_passed"]} '
+                f'<span class="tf-unit">of {_s["checks_decided"]}</span></div><div class="tf-kpi-foot">pass among pass or fail; not applicable, '
+                f'not verifiable and on-time left out · rules {", ".join(_s.get("rules_versions") or []) or "unknown"}</div></div>'
+                f'<div class="tf-kpi"><span class="tf-kpi-label">Main failure reasons</span><ul class="tf-list" style="font-size:13px">{_fails}</ul></div>'
+                f'<div class="tf-kpi"><span class="tf-kpi-label">Speed, apart from quality</span><div class="tf-kpi-value">'
+                f'{"n/a" if _s.get("median_latency_ms") is None else str(round(_s["median_latency_ms"])) + "<span class=tf-unit>ms median</span>"}'
+                '</div></div></div>')
+        else:
+            _scored = _states.get("scored", 0)
+            _summary = (f'<div class="tf-card"><span class="tf-label">Lessons</span><div class="tf-card-title">No lesson line has been scored yet</div>'
+                        f'<div class="tf-card-text">{_scored} scored line{"s" if _scored != 1 else ""} so far: '
+                        f'{_origins.get("synthetic_check", 0)} synthetic check{"s" if _origins.get("synthetic_check", 0) != 1 else ""}, '
+                        f'{_origins.get("not_identified", 0)} whose trace does not say it came from a lesson. '
+                        "None of them is counted as a lesson result.</div></div>")
+        _notes = []
+        if _states.get("before_scoring"):
+            _notes.append(f"{_states['before_scoring']} older lines were traced before live scoring existed and have no score")
+        if _states.get("pending"):
+            _notes.append(f"{_states['pending']} lines are waiting for their score")
+        if _states.get("score_missing"):
+            _notes.append(f"{_states['score_missing']} lines have no score and are no longer expected to get one")
+        if _live.get("read_limit_reached"):
+            _notes.append(f"only the latest {_live.get('calls_read')} traced lines were read")
+
+        def _check_row(rule, check):
+            _label, _tone = CHECK.get(check.get("status"), (str(check.get("status")), "neutral"))
+            return (f"<tr><td>{RULE_LABELS.get(rule, rule)}</td><td>{pill(_label, _tone)}</td>"
+                    f"<td class='tf-quiet'>{html.escape(str(check.get('reason') or ''))}</td></tr>")
+
+        _items = ""
+        for _r in _live.get("rows") or []:
+            _state, _state_tone = STATE.get(_r.get("state"), (str(_r.get("state")), "neutral"))
+            _origin, _origin_tone = ORIGIN.get(_r.get("origin"), (str(_r.get("origin")), "neutral"))
+            _checks = _r.get("checks") or {}
+            _quality = {k: v for k, v in _checks.items() if k != "in_time"}
+            _tally = " · ".join(f"{n} {CHECK[s][0].lower()}" for s in ("fail", "not_verifiable", "pass", "not_applicable")
+                                if (n := sum(1 for v in _quality.values() if v.get("status") == s)))
+            _hint = _r.get("hint") or {}
+            _expected = (f" · expected: {_hint.get('hand')} hand, {_hint.get('move_from')} → {_hint.get('move_to')}"
+                         if _hint.get("hand") else "")
+            _latency = "no latency" if _r.get("latency_ms") is None else f"{_r['latency_ms']} ms"
+            _timing = _checks.get("in_time")
+            _link = (f'<a href="{html.escape(_r["url"])}" target="_blank" rel="noopener">View the trace in Weave</a>'
+                     if _r.get("url") else "<span class='tf-quiet'>no trace link</span>")
+            _delivery = "; ".join(DELIVERY.get(d, d) for d in _r.get("delivery") or []) or "no delivery note"
+            _items += (
+                f'<details><summary><span class="tf-log-time">{when(_r.get("started_at"))}</span>{pill(_state, _state_tone)}'
+                f'{pill(_origin, _origin_tone)}<span>{html.escape(str(_r.get("event") or "").replace("_", " "))}</span>'
+                f'<span class="tf-quiet">{html.escape(str(_r.get("exercise") or ""))}</span>'
+                f'<span class="tf-quiet">{_tally or "no checks yet"}</span><span class="tf-log-right">{_latency}</span></summary>'
+                f'<div class="tf-tq-body"><div class="tf-tq-line">Generated line: “{html.escape(str(_r.get("text") or ""))}”</div>'
+                f'<div class="tf-quiet">Model {html.escape(str(_r.get("model") or "unknown"))}{html.escape(_expected)} · delivery: {html.escape(_delivery)}'
+                f'{" · rules " + html.escape(str(_r["rules_version"])) if _r.get("rules_version") else ""}</div>'
+                + (f'<table class="tf-tq-table">{"".join(_check_row(k, v) for k, v in _quality.items())}</table>' if _quality else "")
+                + f'<div class="tf-quiet">Speed, apart from quality: {_latency}'
+                + (f' · on time: {CHECK.get(_timing.get("status"), ("?", ""))[0].lower()}' if _timing else "") + f'</div><div>{_link}</div></div></details>')
+        _list = (f'<div class="tf-tq-list">{_items}</div>' if _items
+                 else '<div class="tf-card"><div class="tf-card-text">No scored or pending line yet.</div></div>')
+        _view = mo.Html(
+            f'<div class="tf" style="display:flex;flex-direction:column;gap:12px"><div class="tf-kicker"><span class="tf-kicker-title">'
+            f'Latest evaluated lines</span><span class="tf-quiet">read {when(tq.get("generated_at"))} UTC</span></div>{_summary}'
+            f'{"<div class=tf-quiet>" + html.escape("; ".join(_notes)) + ".</div>" if _notes else ""}{_list}'
+            '<div class="tf-quiet">A generated line is not a heard line: no delivery status confirms that a line was spoken. '
+            "A missing score is shown as missing, never as zero or as a pass.</div></div>")
+    _view
+    return
+
+
+@app.cell
 def _(REPO_URL, WEAVE_URL, checks, explorer, icon, informed, mo, snap, snap_source):
     _train = next((v.get("train") for v in reversed(informed) if v.get("train")), None) or {}
     _retro = snap.get("retrospective_validation") or {}
