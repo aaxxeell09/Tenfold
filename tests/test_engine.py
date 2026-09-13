@@ -131,6 +131,111 @@ def test_the_same_wrong_finger_moved_elsewhere_is_named_again():
     assert update.hint == {"hand": "right", "move_from": 10, "move_to": 7}
 
 
+def test_the_pose_is_confirmed_on_the_third_frame_when_frames_are_fast():
+    """15 to 30 fps: three frames land well inside 250 ms, so the frame count wins."""
+    e = fresh()
+    correct = g(8, 7, True)
+    assert e.observe(correct, 0.0) is None
+    assert e.observe(correct, 0.02) is None
+    update = e.observe(correct, 0.04)
+    assert update is not None, "the third matching frame has to confirm"
+    assert update.state == eng.STATE_CORRECT_POSE
+    assert update.event == eng.EVENT_CORRECT_POSE
+
+
+def test_the_pose_is_confirmed_at_250_ms_when_frames_are_slow():
+    """Frames too slow to reach three inside the window: the clock wins instead."""
+    e = fresh()
+    correct = g(8, 7, True)
+    assert e.observe(correct, 1.0) is None
+    update = e.observe(correct, 1.0 + eng.POSE_CONFIRM_MS / 1000.0)
+    assert update is not None, "250 ms is the longest wait there is"
+    assert update.state == eng.STATE_CORRECT_POSE
+    assert update.event == eng.EVENT_CORRECT_POSE
+
+
+def test_the_pose_is_never_confirmed_on_one_frame():
+    e = fresh()
+    assert e.observe(g(8, 7, True), 0.0) is None
+    assert not e.latched
+    # However late the first frame of a match arrives, it is still one frame.
+    assert fresh().observe(g(8, 7, True), 99.0) is None
+
+
+def test_a_flicker_through_the_correct_pose_restarts_the_window():
+    """One matching frame between two wrong ones must not validate anything."""
+    e = fresh()
+    wrong = g(8, 9, False)
+    correct = g(8, 7, True)
+    assert e.observe(wrong, 0.0) is None
+    assert e.observe(correct, 0.03) is None
+    assert e.observe(wrong, 0.06) is None
+    assert e.observe(correct, 0.09) is None
+    assert not e.latched
+
+
+def test_the_confirmation_window_comes_from_the_parameters():
+    e = Engine([EXERCISE], params={"pose_confirm_frames": 2, "pose_confirm_ms": 120})
+    e.start()
+    assert (e.pose_confirm_frames, e.pose_confirm_ms) == (2, 120.0)
+    correct = g(8, 7, True)
+    assert e.observe(correct, 0.0) is None
+    assert e.observe(correct, 0.01) is not None, "two frames is the tuned window"
+
+
+def test_the_slow_frame_path_uses_the_parameter_too():
+    """Six frames asked for, so only the clock can confirm this one."""
+    e = Engine([EXERCISE], params={"pose_confirm_frames": 6, "pose_confirm_ms": 600})
+    e.start()
+    correct = g(8, 7, True)
+    assert e.observe(correct, 0.0) is None
+    assert e.observe(correct, 0.3) is None, "the tuned window is 600 ms now"
+    assert e.observe(correct, 0.6) is not None
+
+
+def test_a_missing_parameter_falls_back_to_the_default():
+    e = Engine([EXERCISE], params={"fps": 15})
+    assert e.pose_confirm_frames == eng.POSE_CONFIRM_FRAMES
+    assert e.pose_confirm_ms == eng.POSE_CONFIRM_MS
+
+
+def test_the_setter_retunes_a_running_engine():
+    e = fresh()
+    e.set_pose_confirm({"pose_confirm_frames": 4, "pose_confirm_ms": 400})
+    assert (e.pose_confirm_frames, e.pose_confirm_ms) == (4, 400.0)
+    e.set_pose_confirm()
+    assert (e.pose_confirm_frames, e.pose_confirm_ms) == (eng.POSE_CONFIRM_FRAMES,
+                                                          eng.POSE_CONFIRM_MS)
+
+
+@pytest.mark.parametrize("params", [
+    {"pose_confirm_frames": 1},
+    {"pose_confirm_frames": 7},
+    {"pose_confirm_ms": 100},
+    {"pose_confirm_ms": 601},
+    {"pose_confirm_ms": "fast"},
+    {"pose_confirm_frames": True},
+])
+def test_a_parameter_outside_its_bounds_is_refused(params):
+    """Never a silent clamp: a window nobody chose is worse than a startup error."""
+    with pytest.raises(ValueError):
+        Engine([EXERCISE], params=params)
+
+
+def test_the_wrong_pose_window_is_untouched_by_the_faster_confirmation():
+    """Three fast frames confirm a correct pose, never a correction."""
+    e = fresh()
+    wrong = g(8, 9, False)
+    assert e.observe(wrong, 0.0) is None
+    assert e.observe(wrong, 0.02) is None
+    assert e.observe(wrong, 0.04) is None, "three frames is not a wrong pose"
+    assert e.observe(wrong, eng.POSE_CONFIRM_MS / 1000.0) is None
+    assert e.observe(wrong, eng.DEBOUNCE_S - 0.01) is None
+    update = e.observe(wrong, eng.DEBOUNCE_S)
+    assert update is not None, "the wrong pose still settles at 300 ms"
+    assert update.event == eng.EVENT_WRONG_RIGHT
+
+
 def test_correct_pose_clears_the_wrong_fingers_and_shows_the_reasoning():
     update = settle(fresh(), g(8, 7, True))
     assert update.wrong == ()

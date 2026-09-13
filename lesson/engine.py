@@ -15,16 +15,32 @@ An event is only emitted once its condition has held for the debounce window, so
 one flickering frame never moves the lesson. What has to hold is what the screen
 shows, the condition together with the fingers it names: two different wrong
 poses are both "wrong", and the advice for the first one is stale on the second.
+
+The correct pose is the exception, because that window is the wait the child
+feels: a pose that already matches is confirmed after pose_confirm_frames
+consecutive matching frames or pose_confirm_ms, whichever comes first, and never
+later than that. One frame alone is never enough, so a flicker still cannot
+validate a wrong pose. Everything else, wrong fingers included, keeps the 300 ms
+debounce: a correction that appears too fast is read as nagging, and the 4 s
+grace before a wrong pose is scored is a different clock, in app/server.py.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from classifier.schema import GestureState
 
 DEBOUNCE_S = 0.3
+
+# The correct pose confirmation window, SPEC.md section 8. Policy, so the live
+# values come from lesson/tutor_params.json under these exact names and these
+# are only the fallback when the caller passes nothing.
+POSE_CONFIRM_FRAMES = 3
+POSE_CONFIRM_FRAMES_BOUNDS = (2, 6)
+POSE_CONFIRM_MS = 250.0
+POSE_CONFIRM_MS_BOUNDS = (120.0, 600.0)
 
 STATE_INTRO = "intro"
 STATE_EXERCISE_SHOWN = "exercise_shown"
@@ -169,11 +185,32 @@ def _view(gesture: GestureState, exercise: Exercise,
     return wrong, match, hint
 
 
+def _policy(params: Mapping[str, object] | None, key: str, default: float,
+            bounds: tuple[float, float]) -> float:
+    """One policy number off the parameter mapping, or its fallback.
+
+    A value outside its bounds is refused, never clamped: app/tutor.py treats a
+    parameter file that way too, and a silently clamped file is a policy nobody
+    chose.
+    """
+    if params is None or key not in params:
+        return float(default)
+    raw = params[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"{key}: expected a number, got {raw!r}")
+    value = float(raw)
+    low, high = bounds
+    if not low <= value <= high:
+        raise ValueError(f"{key} = {value} is outside its bounds [{low}, {high}]")
+    return value
+
+
 class Engine:
     """One lesson. Feed it gestures, ask it for the next exercise, check answers."""
 
     def __init__(self, exercises: Sequence[Exercise] | None = None,
-                 debounce_s: float = DEBOUNCE_S) -> None:
+                 debounce_s: float = DEBOUNCE_S,
+                 params: Mapping[str, object] | None = None) -> None:
         # None means "use the standard lesson". An empty list is a caller mistake,
         # not a request for the default, so it is refused rather than replaced.
         self.exercises: list[Exercise] = (
@@ -182,6 +219,9 @@ class Engine:
         if not self.exercises:
             raise ValueError("a lesson needs at least one exercise")
         self.debounce_s = debounce_s
+        self.pose_confirm_frames: int = POSE_CONFIRM_FRAMES
+        self.pose_confirm_ms: float = POSE_CONFIRM_MS
+        self.set_pose_confirm(params)
         self._index = 0
         self._state = STATE_INTRO
         self._answer: int | None = None
@@ -194,7 +234,22 @@ class Engine:
         self._committed: tuple | None = None
         self._pending: tuple | None = None
         self._pending_since = 0.0
+        self._pending_frames = 0
         self._latched = False
+
+    def set_pose_confirm(self, params: Mapping[str, object] | None = None) -> None:
+        """Set the correct pose confirmation window from the tutor parameters.
+
+        Reads pose_confirm_frames and pose_confirm_ms, each falling back to its
+        default when the mapping does not carry it. Raises ValueError on a value
+        outside its bounds, so a bad parameter file stops the lesson at startup
+        rather than teaching with a window nobody chose.
+        """
+        self.pose_confirm_frames = int(round(_policy(
+            params, "pose_confirm_frames", POSE_CONFIRM_FRAMES,
+            POSE_CONFIRM_FRAMES_BOUNDS)))
+        self.pose_confirm_ms = _policy(
+            params, "pose_confirm_ms", POSE_CONFIRM_MS, POSE_CONFIRM_MS_BOUNDS)
 
     @property
     def exercise(self) -> Exercise:
@@ -223,6 +278,21 @@ class Engine:
         self._event = None
         return self.snapshot()
 
+    def _confirmed(self, condition: str, now: float) -> bool:
+        """Has the pending condition held long enough to be shown?
+
+        A matching pose is what the child is waiting on, so it is confirmed as
+        soon as either counter is reached, whichever comes first: never later
+        than pose_confirm_ms, never on a single frame since the window opens on
+        the first frame at zero elapsed and the bounds keep both numbers above
+        one frame. Every other condition keeps the 300 ms debounce.
+        """
+        held = now - self._pending_since
+        if condition == COND_CORRECT:
+            return (self._pending_frames >= self.pose_confirm_frames
+                    or held >= self.pose_confirm_ms / 1000.0)
+        return held >= self.debounce_s
+
     def observe(self, gesture: GestureState, now: float) -> Update | None:
         """Consume one classified frame. None when nothing the UI shows changed."""
         if self._latched:
@@ -237,7 +307,10 @@ class Engine:
         if key != self._pending:
             self._pending = key
             self._pending_since = now
-        if now - self._pending_since < self.debounce_s:
+            self._pending_frames = 1
+        else:
+            self._pending_frames += 1
+        if not self._confirmed(condition, now):
             return None
         if key == self._committed:
             return None
@@ -312,5 +385,6 @@ class Engine:
         self._committed = None
         self._pending = None
         self._pending_since = 0.0
+        self._pending_frames = 0
         self._latched = False
         return self.snapshot()
