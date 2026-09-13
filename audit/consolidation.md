@@ -33,34 +33,60 @@ its owner. `docs/tutor_contract.md` is fixed in place, section 3.
 
 ## 1. The suite
 
-`python -m pytest -q` on 554dc0d, plus the affected files re-run on their own.
+`python -m pytest -q`, run four times as main moved, the last of them at dd3ae9e
+with nothing else on the machine.
 
 ### Reds
 
-Four, all the same one.
+**The only reds I ever reproduced were a missing dependency, and they are gone.**
 
-| Test | Failure | Reading |
-|---|---|---|
-| `tests/test_dashboard.py::test_dashboard_runs_on_every_kind_of_snapshot`, all four cases (`committed`, `full`, `partial`, `empty`) | `ModuleNotFoundError: No module named 'altair'`, raised inside the notebook subprocess at `dashboard/loop_dashboard.py:37` | **Neither the test nor the code is wrong. The environment is.** `altair>=5.4` is declared in `requirements.txt:12`, with `pandas>=2.0` on line 13, and the notebook genuinely imports it (`mo.ui.altair_chart` at four call sites). This container simply never installed it. `pip install -r requirements.txt` clears all four. Worth stating plainly because SPEC section 15 item 14 is "`make doctor` then `make demo` work on a clean machine in under five minutes": a clean machine that ran the requirements file does not see this, so it is not evidence against item 14. |
+`tests/test_dashboard.py::test_dashboard_runs_on_every_kind_of_snapshot` failed
+all four cases (`committed`, `full`, `partial`, `empty`) with
+`ModuleNotFoundError: No module named 'altair'`, raised inside the notebook
+subprocess at `dashboard/loop_dashboard.py:37`.
 
-`tests/test_dashboard.py` is otherwise 5 passed. `tests/test_server.py` passes
-70/70 in isolation.
+Neither the test nor the code was wrong. `altair>=5.4` is declared in
+`requirements.txt:12`, with `pandas>=2.0` on line 13, and the notebook genuinely
+imports it at four `mo.ui.altair_chart` call sites; this container had simply
+never installed it. It has since been installed (6.2.2) and the four pass. Worth
+recording rather than deleting, because SPEC section 15 item 14 is "`make doctor`
+then `make demo` on a clean machine": a clean machine that ran the requirements
+file never saw this, so it was never evidence against item 14.
 
-Not counted as reds, per `audit/xfail.md`: the 30 stale tests in
+`tests/test_server.py` passes 70/70 in isolation.
+
+Not counted as reds, per `audit/xfail.md`: the stale tests in
 `tests/test_live_tutor.py` and the `web/course/app.js` arm of
 `tests/test_canonical_lines.py`. They are deliberately xfail, the marking is not
-strict, and the file explains each one. They show as `x` in the run.
+strict, and that file explains each one. They show as `x`. There were 30 and a
+31st was added at dd3ae9e.
+
+### One red I could not attribute, and will not pretend I could
+
+An earlier full run reported 54 failed, 50 of them `tests/test_voice.py` with
+`Page.goto: net::ERR_CONNECTION_REFUSED`, the module's own mock server having
+gone away. I could not reproduce that cleanly, and I am fairly sure it was mine:
+I had two playwright driver sessions, two mock servers and a second pytest run
+competing for the machine at the time. An idle mock server polled every 20 s for
+two minutes stayed up and answered 200 every time, so there is no server that
+dies on its own.
+
+The final clean run at dd3ae9e was still in `tests/test_voice.py` when this was
+written, with **one** failure in the preceding 92 percent and no dashboard
+failures at all. I am reporting that honestly rather than rounding it to green:
+the suite is not fully verified at dd3ae9e by me, and the one outstanding F is
+unidentified. Anyone re-running it should give it a clear machine and about
+fifteen minutes.
 
 ### Not a red, but worth knowing
 
-A full run does not finish inside fifteen minutes; the first attempt was killed
-at 900 s having reached about 95 percent. Almost all of the time is
-`tests/test_voice.py` (59 tests, each launching a browser). That is fine for a
-nightly, but it is not a pre-commit gate, and the metric gate of SPEC section 19
-(E2/G1) will feel it. `make test` should probably grow a fast default with the
-browser tests behind a marker.
+A full run does not reliably finish inside fifteen minutes; the first attempt was
+killed at 900 s having reached about 95 percent, and the fastest clean run was
+475 s. Almost all of it is `tests/test_voice.py` (59 tests, each launching a
+browser). That is fine for a nightly, but it is not a pre-commit gate, and the
+metric gate of SPEC section 19 (E2/G1) will feel it. `make test` should probably
+grow a fast default with the browser tests behind a marker.
 
----
 
 ## 2. Contradictions, ordered by how much they hurt the demo
 
@@ -668,9 +694,16 @@ SPEC.md is not mine to edit, so these are reported, not fixed.
   `pose_stable` **and** `pose_confirm_frames`, which is a different rule and a
   slower one. Full detail in 2.10; this is the one where SPEC and the code
   disagree outright rather than drifting.
-- **F10 broke the start check.** The amendment is clear and the code obeys it;
-  the casualty is 2.1. F10 deserves a sentence saying the check node is the one
-  exception, or the check has to stop going through the scheduler.
+- **F10 broke the start check, and the gate inherited the break.** The amendment
+  is clear and the code obeys it; the casualty is 2.1. F10 needs one sentence
+  saying the check node is the exception, or the gate has to stop going through
+  the scheduler.
+- **The visual ladder is in no amendment either, and it contradicts one.** L1 and
+  L2 are now silent by design. Nothing in section 19 records that decision, and
+  SPEC section 9's own table still describes `wrong_pose` as "doigt fautif en
+  orange, fleche courbe... bandeau orange" with a spoken fallback phrase. The
+  code is probably right and the spec is certainly behind, which is the state
+  that produced 2.5.
 - **F10 vs `demo/scenario.json`.** The scenario's `comment` field still explains
   itself in terms of "the one review from outside a node is allowed", which is
   `MAX_OUTSIDE_REVIEWS`, which F10 deleted. The comment is stale. `demo/` is
