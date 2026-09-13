@@ -21,6 +21,8 @@ def make_repo(tmp_path: Path, hard: bool = True) -> Path:
     dst = tmp_path / "tenfold"
     for rel in ["classifier", "eval", "loop", "lesson", "tests", "tenfold"]:
         shutil.copytree(REPO / rel, dst / rel, ignore=shutil.ignore_patterns("__pycache__", "results", "transcripts"))
+    # the live rules.py is whatever the critic last accepted; the loop tests always start from V0
+    shutil.copy(REPO / "tests" / "rules_v0.py", dst / "classifier" / "rules.py")
     (dst / "data").mkdir()
     synth.write_jsonl(synth.synthetic_dataset(seed=1, session="train", hard=hard), dst / "data" / "samples.jsonl")
     (tmp_path / "tenfold-heldout").mkdir()
@@ -61,6 +63,7 @@ def worktree(tmp_path):
     wt = tmp_path / "wt"
     for rel in ["classifier", "loop"]:
         shutil.copytree(REPO / rel, wt / rel, ignore=shutil.ignore_patterns("__pycache__", "transcripts"))
+    shutil.copy(REPO / "tests" / "rules_v0.py", wt / "classifier" / "rules.py")
     subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
     subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"], cwd=wt, check=True)

@@ -81,7 +81,41 @@ def sync() -> bool:
         git("rebase", "--abort")
         log(f"SKIP pull: {p.stderr.strip()[-300:]}")
         return False
+    remap_rebased_shas(REPO / "data" / "metrics.json", REPO / "data" / "BEST_VERSION")
     return True
+
+
+def on_head(sha: str) -> bool:
+    return git("merge-base", "--is-ancestor", sha, "HEAD").returncode == 0
+
+
+def remap_rebased_shas(metrics_path: Path, best_path: Path) -> None:
+    """A rebase rewrites the runner's unpushed critic commits. Point metrics.json and data/BEST_VERSION at the new
+    hashes (matched by their "critic vN:" subject), so the app and the dashboard never pin a commit that only
+    existed before the rebase."""
+    try:
+        metrics = json.loads(metrics_path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    by_version: dict[str, str] = {}
+    for line in git("log", "--author=critic-agent", "--format=%H%x09%s").stdout.splitlines():
+        sha, _, subject = line.partition("\t")
+        by_version.setdefault(subject.split(":", 1)[0], sha)  # newest first
+    changed = False
+    for v in metrics.get("versions", []):
+        sha = v.get("sha")
+        if v.get("kind") != "patch" or not sha or sha == "no-commit" or on_head(sha):
+            continue
+        new = by_version.get(f"critic v{v.get('version')}")
+        if new:
+            log(f"rebased: critic v{v.get('version')} {sha[:8]} -> {new[:8]}")
+            v["sha"], changed = new, True
+    if changed:
+        metrics_path.write_text(json.dumps(metrics, indent=2))
+    patches = [v for v in metrics.get("versions", []) if v.get("kind") == "patch" and v.get("accepted")]
+    best = best_path.read_text().strip() if best_path.exists() else ""
+    if patches and best and not on_head(best) and on_head(patches[-1]["sha"]):
+        best_path.write_text(patches[-1]["sha"] + "\n")
 
 
 def publish(push: bool) -> None:

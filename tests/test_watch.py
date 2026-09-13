@@ -101,6 +101,23 @@ def test_watch_iterates_idles_and_picks_up_a_teammates_new_captures(tmp_path):
     assert len(commits_by_critic(runner)) == 1
 
 
+def test_watch_repoints_metrics_and_best_version_after_rebasing_critic_commits(tmp_path):
+    origin, runner, teammate = make_runner(tmp_path)
+    assert "ACCEPTED v1" in run_critic(runner, "--skip-heldout").stdout  # committed locally, not pushed
+    old = versions(runner)[1]["sha"]
+    (teammate / "notes.txt").write_text("teammate work\n")
+    subprocess.run(["git", "add", "notes.txt"], cwd=teammate, check=True)
+    subprocess.run(["git", "commit", "-qm", "docs: notes"], cwd=teammate, check=True)
+    subprocess.run(["git", "push", "-q", "origin", "HEAD:main"], cwd=teammate, check=True)
+
+    p = run_watch(runner, "--force", mode="same")  # the pull rebases critic v1 onto the teammate's commit
+    assert p.returncode == 0, p.stdout + p.stderr
+    new = versions(runner)[1]["sha"]
+    assert new != old and f"rebased: critic v1 {old[:8]} -> {new[:8]}" in p.stdout
+    assert subprocess.run(["git", "merge-base", "--is-ancestor", new, "HEAD"], cwd=runner).returncode == 0
+    assert (runner / "data" / "BEST_VERSION").read_text().strip() == new
+
+
 def test_watch_stops_at_its_budget_across_cycles(tmp_path):
     origin, runner, _ = make_runner(tmp_path)
     p = run_watch(runner, "--max-cost", "1")
