@@ -161,16 +161,38 @@ def _(datetime, mo, re):
         m = re.search(r"([A-Z_]{4,}) from ([0-9.]+) to ([0-9.]+)", (patch or "").replace("`", ""))
         return (m.group(1), float(m.group(2)), float(m.group(3))) if m else None
 
-    def plain_change(patch):
-        """The setting that moved, with its values."""
+    # code changes recognised from the lines a patch adds to classifier/rules.py, most specific first:
+    # (pattern, what it means for a child, short label for the history)
+    CODE_CHANGES = (
+        (r"^\+\s*def tip_motion\b",
+         "The app waits while the fingers are still moving into shape, unless the camera tracking is too shaky to tell",
+         "waits while the fingers are still moving into shape"),
+        (r"^\+\s*def wrist_motion\b", "The app waits while the hands are still moving from one gesture to the next",
+         "waits while the hands are still moving"),
+        (r"^\+\s*AMBIGUITY_MARGIN\s*=",
+         "When two finger pairs look almost tied, the app checks the whole short clip instead of one shaky frame",
+         "checks the whole clip when one frame is a coin flip"),
+    )
+
+    def _code_change(diff):
+        for pattern, effect, short in CODE_CHANGES:
+            if re.search(pattern, diff or "", re.M):
+                return effect, short
+        return None
+
+    def plain_change(patch, diff=""):
+        """A short label: the setting that moved with its values, or what a code change does."""
         s = _setting(patch)
         if s:
             names = {"CONTACT_THRESHOLD": "touch limit", "UNKNOWN_THRESHOLD": "confidence needed"}
             return f"{names.get(s[0], s[0].lower())} {s[1]:g} → {s[2]:g}"
+        code = _code_change(diff)
+        if code:
+            return code[1]
         text = " ".join((patch or "").split())
         return text if len(text) <= 70 else text[:69] + "…"
 
-    def plain_effect(patch):
+    def plain_effect(patch, diff=""):
         """What the change means for a child in front of the camera."""
         s = _setting(patch)
         if s and s[0] == "CONTACT_THRESHOLD":
@@ -179,7 +201,14 @@ def _(datetime, mo, re):
         if s and s[0] == "UNKNOWN_THRESHOLD":
             return ("The app answers only when it sees both hands clearly" if s[2] > s[1]
                     else "The app answers even when it sees the hands less clearly")
-        return plain_change(patch)
+        code = _code_change(diff)
+        return code[0] if code else plain_change(patch, diff)
+
+    def technical(patch, diff=""):
+        """The one line under the plain sentence: the setting values, or that the rule gained a new check."""
+        if _setting(patch):
+            return plain_change(patch, diff)
+        return "a new check added to the rule's code" if _code_change(diff) else ""
 
     def plain_reason(why):
         why = why or ""
@@ -271,12 +300,18 @@ def _(datetime, mo, re):
                            "includes no change, so this result does not establish a reliable drop.")
         else:
             badge, text = ("No change observed", "The updated rules scored the same on this retrospective evaluation.")
-        return {"badge": badge, "text": text, "gain": f"{signed(d)} pts",
+        plain = ("A gain, and the likely range stays above zero." if d > 0 and not includes_zero else
+                 "A small gain, but not proven yet: the likely range still includes no gain." if d > 0 else
+                 "A drop, and the likely range stays below zero." if d < 0 and not includes_zero else
+                 "A small drop, but not proven: the likely range still includes no change." if d < 0 else "No change.")
+        ea, eb = (r.get("a") or {}).get("exact_match"), (r.get("b") or {}).get("exact_match")
+        return {"badge": badge, "text": text, "plain": plain, "gain": f"{signed(d)} pts",
                 "ci": f"{signed(lo)} to {signed(hi)} pts" if lo is not None and hi is not None else "",
-                "a": pct(((r.get("a") or {}).get("exact_match")), 2), "b": pct(((r.get("b") or {}).get("exact_match")), 2)}
+                "a": pct(ea, 2), "b": pct(eb, 2),
+                "a_100": "n/a" if ea is None else f"{ea * 100:.0f}", "b_100": "n/a" if eb is None else f"{eb * 100:.0f}"}
 
     return (RETRO_LABEL, basis, comparable, em, kicker, limits, names_for, pct, pill, plain_change, plain_class,
-            plain_effect, plain_reason, pts, retro_summary, said, same_pose, section, steps, when)
+            plain_effect, plain_reason, pts, retro_summary, said, same_pose, section, steps, technical, when)
 
 
 @app.cell
@@ -349,7 +384,7 @@ def _(best_version, checks, comparable, compare, em, informed, missing, mo, name
         '<h1 class="tf-h1">An AI loop that teaches an app to <em>read</em> children\'s hands.</h1>'
         '<p class="tf-sub-hero">Kids answer a multiplication by touching two fingertips in front of the camera. '
         'Before it can check the answer, the app has to see which fingers touch.</p></div>'
-        f'{_headline}{_limits_html}</div>'
+        f'{_limits_html}</div>'
     )
     return
 
@@ -408,8 +443,8 @@ def _(compare, explorer, mo, set_limit):
 
 
 @app.cell
-def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button, alt, compare, example_pick, explorer,
-      get_limit, icon, kicker, limit_slider, mo, old_rule_button, pd, said, same_pose, steps, style):
+def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button, alt, checks, compare, example_pick,
+      explorer, get_limit, icon, kicker, limit_slider, mo, old_rule_button, pd, said, same_pose, steps, style):
     if example_pick is None or not explorer:
         _view = mo.md("")
     else:
@@ -472,6 +507,15 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
             f'<span class="tf-verdict-icon">{icon("check" if _right else "x", 17, "#fff", 2.6)}</span>'
             f'{"The app reads it right" if _right else "The app reads it wrong"}</div>'
             f'<dl class="tf-rows"><dt>App sees</dt><dd>{said(_answer)}</dd><dt>Child did</dt><dd>{said(_ex["label"])}</dd></dl></div>')
+        # the payoff comes right after the demo: the same hard case, measured on every almost-touching practice gesture
+        _na, _nb = ((compare or {}).get("a") or {}).get("near_contact_accuracy"), ((compare or {}).get("b") or {}).get("near_contact_accuracy")
+        _payoff = mo.Html(
+            f'<div class="tf"><div class="tf-headline"><div class="tf-headline-value"><span class="tf-from">{_na * 100:.0f}</span>'
+            f'<span class="tf-arrow">→</span>{_nb * 100:.0f}<span class="tf-unit">out of 100</span></div>'
+            '<div class="tf-headline-text"><span><b>Across every almost-touching practice gesture</b>, the app reads this many right, '
+            'before the AI and now.</span>'
+            f'<span class="tf-quiet">{compare.get("near_holds")} practice gestures · same data and scorers</span></div></div></div>'
+        ) if checks["compare"] and _na is not None and _nb is not None else mo.md("")
         _keys = mo.Html(
             f'<div class="tf tf-keys"><span class="tf-key"><i class="tf-swatch" style="background:{LEFT_HAND}"></i>left hand</span>'
             f'<span class="tf-key"><i class="tf-swatch" style="background:{RIGHT_HAND}"></i>right hand</span>'
@@ -486,6 +530,7 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
                            mo.hstack([old_rule_button, ai_rule_button], justify="start", wrap=True, gap=0.5),
                            limit_slider, mo.ui.altair_chart(style(_ruler), chart_selection=False, legend_selection=False)], gap=1),
             ], wrap=True, gap=2, align="start"),
+            _payoff,
         ], gap=1)
     _view
     return
@@ -621,8 +666,8 @@ def _(get_selected, informed, mo, set_selected, version_names):
 
 
 @app.cell
-def _(comparable, em, get_selected, html, informed, mo, pct, pill, plain_change, plain_class, plain_effect, plain_reason,
-      pts, version_menu, version_names):
+def _(comparable, em, get_selected, html, informed, mo, pct, pill, plain_class, plain_effect, plain_reason, pts, technical,
+      version_menu, version_names):
     _tag = get_selected()
     _i = next((i for i, v in enumerate(informed) if v["tag"] == _tag), len(informed) - 1)
     if not informed:
@@ -643,8 +688,8 @@ def _(comparable, em, get_selected, html, informed, mo, pct, pill, plain_change,
         if _v.get("kind") == "patch":
             _delta = (em(_v.get("train")) - em(_prev.get("train"))) if _ok and em(_v.get("train")) is not None and em(_prev.get("train")) is not None else None
             _cards = (
-                f'<div class="tf-card"><span class="tf-label">What changed</span><div class="tf-card-title">{html.escape(plain_effect(_v.get("patch")))}</div>'
-                f'<div class="tf-quiet">{html.escape(plain_change(_v.get("patch")))}</div></div>'
+                f'<div class="tf-card"><span class="tf-label">What changed</span><div class="tf-card-title">{html.escape(plain_effect(_v.get("patch"), _v.get("diff")))}</div>'
+                f'<div class="tf-quiet">{html.escape(technical(_v.get("patch"), _v.get("diff")))}</div></div>'
                 f'<div class="tf-card"><span class="tf-label">Effect</span>'
                 + (f'<div class="tf-big">{pts(_delta)}</div><div class="tf-quiet">gestures read right, {pct(em(_prev.get("train")))} → {pct(em(_v.get("train")))}</div>'
                    f'<div class="tf-moves">{_moves_html}</div>' if _delta is not None else '<div class="tf-card-text">comparison not verified</div>')
@@ -687,7 +732,7 @@ def _(comparable, em, html, informed, mo, pill, plain_change, plain_reason, pts,
         if _kind == "patch":
             _ok = comparable(_previous, _v) and em(_v.get("train")) is not None and em(_previous.get("train")) is not None
             _events.append((str(_v.get("ts") or ""), 1, pill("Kept", "good"),
-                            f"{version_names.get(_v['tag'], _v['tag'])}: {html.escape(plain_change(_v.get('patch')))}",
+                            f"{version_names.get(_v['tag'], _v['tag'])}: {html.escape(plain_change(_v.get('patch'), _v.get('diff')))}",
                             pts(em(_v.get("train")) - em(_previous.get("train"))) if _ok else "not verified"))
         elif _kind == "data_refresh":
             _events.append((str(_v.get("ts") or ""), 1, pill("Data", "accent"), "20% of recordings set aside for the retrospective evaluation", ""))
@@ -780,11 +825,14 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, gate_since, icon, inform
     _practice_gain = (_b["exact_match"] - _a["exact_match"]) if _a.get("exact_match") is not None and _b.get("exact_match") is not None else None
     _measured_on = _name_of((_retro.get("b") or {}).get("commit")) if _retro else ""
     _retro_pills = ((pill(_rs["badge"]) if _rs else pill("not run"))
-                    + (pill("not verified", "warn") if _retro and not checks["retro"] else "")
-                    + (pill(f"measured on {_measured_on}, not on the rule in use", "warn") if _retro and not retro_current else ""))
+                    + (pill("not verified", "warn") if _retro and not checks["retro"] else ""))
     _pair = f"Original → {_measured_on}" if _retro else ""
-    _gate_note = (f"<br>Since {_names.get(gate_since['tag'], gate_since['tag'])}, the loop also uses these held-back gestures "
-                  "to accept or refuse changes, so they can no longer check later versions independently." if gate_since else "")
+    _in_use_name = next((_names[v["tag"]] for v in informed if v.get("sha") and _best
+                         and (v["sha"].startswith(_best[:7]) or _best.startswith(v["sha"][:7]))), "the rule in use")
+    _gate_note = ((f'<div class="tf-quiet" style="margin-top:8px">Why {_measured_on} and not {_in_use_name}: '
+                   + (f"since {_names.get(gate_since['tag'], gate_since['tag'])}, these gestures help decide which changes to keep, "
+                      "so they can no longer judge the newer fixes fairly." if gate_since else "no report exists yet for the rule in use.")
+                   + '</div>') if _retro and not retro_current else "")
     _method = ((f'<div class="tf-quiet" style="margin-top:10px">Method: these {_retro.get("holds")} gesture holds were set aside after '
                 'earlier development had used the full dataset. Participants are not reliably identified. Evaluation on new users '
                 f'is still needed. ({RETRO_LABEL})</div>') if _retro else "")
@@ -799,10 +847,12 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, gate_since, icon, inform
               else "No verified before and after comparison in this snapshot.",
               pts(_practice_gain) if _practice_gain is not None else ""),
         _rung("partial" if _rs else "next", f"Retrospective evaluation {_retro_pills}",
-              (f"{_pair}: {_rs['a']} → {_rs['b']}, {_rs['gain']} · 95% CI {_rs['ci']}<br>{_rs['text']}{_gate_note}"
+              (f"On {_retro.get('holds')} gestures set aside from practice, {_measured_on} reads <b>{_rs['b_100']}</b> out of 100, "
+               f"against <b>{_rs['a_100']}</b> for the original rule. {_rs['plain']}"
+               f"<br><span class='tf-quiet'>{_pair}: {_rs['a']} → {_rs['b']}, {_rs['gain']} · 95% CI {_rs['ci']}</span>"
                if _rs else "Not in this snapshot."),
               _rs["gain"] if _rs else "",
-              (f'<div class="tf-ci">{_ci_svg(_versions)}</div>' if _versions else "") + _method),
+              (f'<div class="tf-ci">{_ci_svg([_retro])}</div>' if _rs else "") + _gate_note + _method),
         _rung("next", f"Independent evaluation {pill('next')}", "New users the loop has never seen"),
         _rung("later", f"Children's learning {pill('not measured')}",
               "Every check above evaluates gesture recognition, not children's learning outcomes."),

@@ -17,7 +17,7 @@ sys.path.insert(0, str(REPO))
 
 import loop.critic as critic  # noqa: E402
 from loop import guard as G  # noqa: E402
-from test_guard_and_loop import commits_by_critic, make_repo, run_critic  # noqa: E402
+from test_guard_and_loop import commits_by_critic, copy_sources, make_repo, run_critic  # noqa: E402
 
 V0 = (REPO / "tests" / "rules_v0.py").read_text()
 HOOK = "    frame = features.last_valid_frame(window)"
@@ -29,8 +29,7 @@ MARKER = "CANDIDATE_EXECUTED"
 @pytest.fixture
 def worktree(tmp_path):
     wt = tmp_path / "wt"
-    for rel in ["classifier", "loop"]:
-        shutil.copytree(REPO / rel, wt / rel, ignore=shutil.ignore_patterns("__pycache__", "transcripts"))
+    copy_sources(wt, ["classifier", "loop"])
     shutil.copy(REPO / "tests" / "rules_v0.py", wt / "classifier" / "rules.py")
     subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
     subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
@@ -318,7 +317,7 @@ def test_critic_instructions_describe_the_guard_rules(rel):
     for rule in ("np.load", "np.fromfile", "np.memmap", "tofile", "get_type_hints", "underscore", "dataclasses.sys",
                  "np.lib", "assigns a module", "smoke not run", "python loop/guard.py --check"):
         assert rule in text, f"{rel} does not describe {rule!r}"
-    assert "—" not in text and "–" not in text
+    assert chr(0x2014) not in text and chr(0x2013) not in text  # em and en dash, by code point so this file has none
 
 
 def test_a_hanging_candidate_is_rejected(worktree):
