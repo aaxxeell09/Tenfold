@@ -12,7 +12,7 @@ L'audit des lignes canoniques de la page, un moment marqué ici, ne l'est plus :
 les 27 phrases de `web/course/app.js` sont parties dans
 `lesson/tally_lines.json` et les quatre bras du test sont verts.
 
-## tests/test_live_tutor.py, 30 tests
+## tests/test_live_tutor.py, 32 tests (30 de la matinée, plus les deux des sections suivantes)
 
 Le tuteur a changé sous eux, sur quatre points :
 
