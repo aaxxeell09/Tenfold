@@ -1922,6 +1922,22 @@ def make_scheduler(demo: bool = False) -> Scheduler:
         return Scheduler(now=now_utc())
 
 
+def engine_from_params() -> Engine:
+    """The engine on the tuned confirmation values, or on its own defaults.
+
+    build_tutor decided that a bad params file must not stop a lesson, and the
+    engine's bounds check runs first and raises. A number out of range in a
+    JSON file is logged and the engine keeps its defaults, which is what the
+    tutor does with the same file.
+    """
+    values = load_tutor_params().get("global", {})
+    try:
+        return Engine(params=values)
+    except (TypeError, ValueError):
+        log.exception("server: tutor_params.json rejected by the engine, defaults kept")
+        return Engine()
+
+
 def create_app(mock: bool = False, camera: int | None = None,
                demo: bool = False, camera_name: str | None = None,
                mirror: bool = True) -> web.Application:
@@ -1931,7 +1947,7 @@ def create_app(mock: bool = False, camera: int | None = None,
     a camera, a browser or a port.
     """
     hub = Hub()
-    lesson = Lesson(Engine(params=load_tutor_params().get("global", {})), hub, make_scheduler)
+    lesson = Lesson(engine_from_params(), hub, make_scheduler)
     lesson.demo_available = demo
     # data/tutor_log.jsonl is the dataset Loop 2 is built on, so a run with no
     # camera in front of a child never writes a line into it.

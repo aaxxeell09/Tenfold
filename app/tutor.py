@@ -302,8 +302,18 @@ BEAT_PARTS = ("line", "halo", "stars", "counter")
 DROP_REPLACED = "replaced"
 DROP_QUEUE_FULL = "queue_full"
 DROP_INTERRUPTED = "interrupted"
+DROP_STALE = "stale"
 DROP_UNKNOWN = "unknown"
-DROP_REASONS = (DROP_REPLACED, DROP_QUEUE_FULL, DROP_INTERRUPTED, DROP_UNKNOWN)
+DROP_REASONS = (DROP_REPLACED, DROP_QUEUE_FULL, DROP_INTERRUPTED, DROP_STALE,
+                DROP_UNKNOWN)
+# The page's own words for the same things. web/course/app.js names a drop by
+# what its queue did; the log keeps one token per cause, so the page's names
+# are read here rather than logged as unknown.
+DROP_SYNONYMS = {
+    "replaced_by_newer_of_same_kind": DROP_REPLACED,
+    "no_longer_true": DROP_STALE,
+    "cut": DROP_INTERRUPTED,
+}
 # How much of a malformed reason or line is kept in the log.
 DROP_TEXT_LIMIT = 120
 
@@ -902,6 +912,7 @@ class Tutor:
         token = reason if isinstance(reason, str) else None
         if token is not None:
             token = token.strip().lower()
+            token = DROP_SYNONYMS.get(token, token)
         known = token if token in DROP_REASONS else DROP_UNKNOWN
         raw = None if token in DROP_REASONS else self._reported(reason)
         reported_at: float | None = None
@@ -2025,8 +2036,11 @@ class Tutor:
             return None
         moves.sort()
         middle = len(moves) // 2
+        # Frame fractions into palm widths on both branches: an odd count of
+        # fingertips used to come back ten times too small, and the movement
+        # invariant silently stopped holding.
         if len(moves) % 2:
-            return moves[middle]
+            return moves[middle] / NOMINAL_PALM
         return (0.5 * (moves[middle - 1] + moves[middle])) / NOMINAL_PALM
 
     def _update_motion(self, motion: float | None, moment: float) -> None:
@@ -2193,13 +2207,22 @@ class Tutor:
                 self._raw_frames = 1
         if self._raw_key is None:
             return
-        # A pose is evaluated on time and on frames, both: a new pose has to
-        # have been seen pose_confirm_frames times before anything is decided
-        # about it, so a camera that drops frames cannot have a pose judged on
-        # two of them.
+        # A wrong pose is evaluated on time and on frames, both: a new pose has
+        # to have been seen pose_confirm_frames times and held pose_stable
+        # before anything is said about it, so a camera that drops frames
+        # cannot have a pose judged on two of them, and a hand passing through
+        # a wrong shape on its way is not corrected. The correct pose is the
+        # other way round, amendment F8: pose_confirm_frames frames or
+        # pose_confirm_ms, whichever comes first, because the child is already
+        # right while a slower clock would still be counting.
         frames = int(self.effective("pose_confirm_frames"))
-        if (moment - self._raw_since >= self.effective("pose_stable")
-                and self._raw_frames >= frames):
+        held = moment - self._raw_since
+        if self._condition(self._raw_key) == SIT_CORRECT:
+            confirmed = (self._raw_frames >= frames
+                         or held >= self.effective("pose_confirm_ms") / MS_PER_S)
+        else:
+            confirmed = held >= self.effective("pose_stable") and self._raw_frames >= frames
+        if confirmed:
             self._held_key = self._raw_key
             self._ever_stable = True
             if self._condition(self._held_key) == SIT_CORRECT:

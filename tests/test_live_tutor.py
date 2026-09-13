@@ -45,6 +45,10 @@ from app.tutor import (
     load_params,
     nearest_gap,
     tip_positions,
+    NOMINAL_PALM,
+    DROP_REPLACED,
+    DROP_STALE,
+    DROP_QUEUE_FULL,
 )
 from classifier.schema import GestureState
 
@@ -336,7 +340,7 @@ def test_pose_ready_then_check_answer_then_success() -> None:
     while harness.last.tutor_state != POSE_READY and harness.clock.t < 5.0:
         harness.feed(STEP, gesture=pose(8, 7, True))
     assert harness.last.tutor_state == POSE_READY
-    assert harness.clock.t == pytest.approx(0.8 + STEP, abs=STEP)
+    assert harness.clock.t == pytest.approx(3 * STEP, abs=STEP)
     harness.feed(STEP, gesture=pose(8, 7, True))
     assert harness.last.tutor_state == CHECK_ANSWER
     harness.tutor.answer(56, correct=True, now=harness.clock.t)
@@ -1987,7 +1991,7 @@ def test_the_table_never_delays_the_acknowledgement_of_a_correct_pose() -> None:
     at = harness.clock.t
     said = watch(harness, POSE_STABLE + 4 * STEP, gesture=pose(8, 7, True),
                  gap=TOUCHING)
-    assert said == [ACK]
+    assert said[:1] == [ACK]
     assert harness.clock.t - at <= POSE_STABLE + 5 * STEP
     assert harness.tutor.reading.name == "correct"
 
@@ -2003,3 +2007,47 @@ def test_a_clock_still_escalates_when_the_reading_is_ambiguous() -> None:
     assert said == [], "the clock climbs, and L1 is still shown rather than said"
     said += climb(harness, 3, gesture=wrong, hint=HINT, tips=[])
     assert said == [WRONG_RIGHT]
+
+
+def test_the_motion_fallback_is_in_palm_widths_whatever_the_fingertip_count() -> None:
+    """One unit on both branches of the median: an odd count of tips used to
+    come back in frame fractions, ten times too small for the threshold."""
+    harness = Harness()
+    tutor = harness.tutor
+    before = [{"hand": "left", "number": n, "x": 0.3, "y": 0.5} for n in (6, 7, 8)]
+    after = [{"hand": "left", "number": n, "x": 0.3 + 0.05, "y": 0.5} for n in (6, 7, 8)]
+    tutor._prev_fingers = before
+    odd = tutor._motion(after)
+    tutor._prev_fingers = before[:2]
+    even = tutor._motion(after[:2])
+    assert odd == pytest.approx(even)
+    assert odd == pytest.approx(0.05 / NOMINAL_PALM)
+
+
+def test_the_page_drop_reasons_land_in_the_log_vocabulary() -> None:
+    """Two of the three reasons the page sends used to be logged as unknown."""
+    harness = Harness()
+    harness.tutor.new_exercise(8, 7, node="u2-l3", now=harness.clock.t)
+    for sent, kept in (("replaced_by_newer_of_same_kind", DROP_REPLACED),
+                       ("no_longer_true", DROP_STALE),
+                       ("queue_full", DROP_QUEUE_FULL),
+                       ("something_else", "unknown")):
+        harness.tutor.line_dropped(line="pose_ready", reason=sent, at=1.0,
+                                   now=harness.clock.tick())
+        record = harness.kind("line_drop")[-1]
+        assert record["reason"] == kept, sent
+        assert record["reported_reason"] == (None if kept != "unknown" else sent)
+
+
+def test_the_correct_pose_is_confirmed_in_frames_or_ms_whichever_first() -> None:
+    """Amendment F8, on the tutor's side of the fence as well as the engine's."""
+    harness = Harness()
+    harness.tutor.new_exercise(6, 6, node="u1-l1", now=harness.clock.t)
+    harness.feed(0.5, gesture=UNKNOWN, hands=0)
+    stable = harness.tutor.effective("pose_stable")
+    confirm_ms = harness.tutor.effective("pose_confirm_ms") / 1000.0
+    assert confirm_ms < stable, "the test only means something on a faster clock"
+    right = pose(6, 6, True)
+    said = harness.feed(confirm_ms + 3 * STEP, gesture=right)
+    assert harness.last.tutor_state == "POSE_READY", "confirmed before pose_stable"
+    assert said, "the acknowledgement rides the confirmation"

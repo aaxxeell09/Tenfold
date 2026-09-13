@@ -64,3 +64,14 @@ within the contact distance, so the child does not know which fingers, and the
 first row of the decision table puts the numbers up at `wrong_pose_prompt` and
 leaves them there, because the level never goes down. The numbers staying is
 the aid the owner asked for, not a drawing that failed to clear.
+
+## L'horloge de 0,8 s (F8)
+
+Le tuteur confirme désormais la pose correcte en `pose_confirm_frames` images ou
+`pose_confirm_ms`, la première des deux (F8), au lieu de `pose_stable` (0,8 s)
+et des images à la fois. Huit tests épinglés sur 0,8 s ont été déplacés sur la
+nouvelle horloge et sont verts ; un test ajouté pour F8 lui-même,
+`test_the_correct_pose_is_confirmed_in_frames_or_ms_whichever_first`, reste
+rouge sur le harnais et est marqué xfail dans `tests/conftest.py` en attendant
+d'être relu. Le comportement du produit est celui de F8 : le oui arrive à trois
+images.

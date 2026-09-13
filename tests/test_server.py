@@ -2016,3 +2016,18 @@ def test_the_success_beat_holds_the_next_exercise_back():
     lesson.command({"type": "quit"})
     time.sleep(0.3)
     assert not lesson.running and lesson.pick is None
+
+
+def test_a_bad_params_file_keeps_the_engine_on_its_defaults(monkeypatch, caplog):
+    """The one place that decided a bad number must not stop a lesson."""
+    monkeypatch.setattr(server, "load_tutor_params",
+                        lambda: {"global": {"pose_confirm_ms": 90000}})
+    with caplog.at_level(logging.ERROR):
+        engine = server.engine_from_params()
+    assert isinstance(engine, Engine)
+    assert engine.pose_confirm_ms == Engine().pose_confirm_ms
+    assert any("defaults kept" in rec.message for rec in caplog.records)
+
+    monkeypatch.setattr(server, "load_tutor_params",
+                        lambda: {"global": {"pose_confirm_ms": 300}})
+    assert server.engine_from_params().pose_confirm_ms == 300

@@ -40,6 +40,9 @@ CUE = LINES[POSE_READY_KEY]
 FPS = 15
 STEP = 1.0 / FPS
 POSE_STABLE = 0.8
+# Amendment F8: the correct pose is confirmed in pose_confirm_frames frames or
+# pose_confirm_ms, whichever first. At the harness fps the frames come first.
+CONFIRM = 3 * STEP
 DELAY_S = 0.8
 
 
@@ -143,7 +146,7 @@ def test_the_acknowledgement_comes_first_and_may_cut() -> None:
     assert [line for _, line, _ in said] == [ACK, CUE]
     at_ack, _, cuts = said[0]
     assert cuts is True, "a child who has just made the pose hears yes now"
-    assert at_ack == pytest.approx(POSE_STABLE + STEP, abs=2 * STEP)
+    assert at_ack == pytest.approx(CONFIRM, abs=2 * STEP)
 
 
 def test_the_canonical_cue_follows_eight_hundred_milliseconds_later() -> None:
@@ -183,7 +186,7 @@ def test_a_delay_outside_its_bounds_is_a_startup_error() -> None:
 def test_ack_delay_ms_moves_the_pair_and_keeps_its_shape() -> None:
     said = confirmed(Harness(params_with(ack_delay_ms=300)))
     assert [line for _, line, _ in said] == [ACK, CUE]
-    assert said[0][0] == pytest.approx(POSE_STABLE + 0.3, abs=3 * STEP)
+    assert said[0][0] == pytest.approx(CONFIRM + 0.3, abs=3 * STEP)
     assert said[1][0] - said[0][0] == pytest.approx(DELAY_S, abs=2 * STEP)
 
 
@@ -192,13 +195,13 @@ def test_without_the_acknowledgement_the_canonical_cue_plays_alone() -> None:
     said = confirmed(Harness(lines=lines_without(ACK_LINE_KEY)))
     assert [line for _, line, _ in said] == [CUE]
     assert said[0][2] is True, "the one line of the beat is still the instant one"
-    assert said[0][0] == pytest.approx(POSE_STABLE + STEP, abs=2 * STEP)
+    assert said[0][0] == pytest.approx(CONFIRM, abs=2 * STEP)
 
 
 def test_the_cue_is_dropped_when_the_exercise_is_over() -> None:
     """Nothing else about which line is said when moved with the beat."""
     harness = Harness()
-    said = harness.feed(POSE_STABLE + 4 * STEP, gesture=pose(8, 7, True))
+    said = harness.feed(CONFIRM + 2 * STEP, gesture=pose(8, 7, True))
     assert [line for _, line, _ in said] == [ACK]
     harness.tutor.answer(56, correct=True, now=harness.clock.t)
     harness.tutor.end_exercise("answered", now=harness.clock.t)
