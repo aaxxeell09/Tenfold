@@ -4,9 +4,12 @@ Headless Chromium ships no speech recognition, which is exactly the case the
 page has to survive: the microphone stays hidden and the keyboard still works.
 A fake recogniser is then injected to exercise the rest, because the parser and
 the listening window are the parts that can silently submit a wrong answer.
-The same browser is used for the answer paths around voice: the typed digits on
-the start check, the question counter, the first try bonus and the XP a child
-keeps when quitting, none of which can be exercised without a real page.
+The same browser drives the ready gate, which runs before every activity and is
+the one screen that asks for a word rather than a number: its steps, its Ready
+button for a browser that cannot hear, and the skip once a gate has worked.
+The rest of the answer paths around voice are here too: the question counter,
+the first try bonus and the XP a child keeps when quitting, none of which can be
+exercised without a real page.
 
 Skipped when playwright or its browser is missing, so make test stays green on a
 machine that has neither.
@@ -14,6 +17,7 @@ machine that has neither.
 
 from __future__ import annotations
 
+import json
 import socket
 import subprocess
 import sys
@@ -640,27 +644,49 @@ def test_the_mute_switch_silences_tally_and_is_remembered(page):
     tab.click("#mute")
     assert tab.evaluate("Tenfold.muted") is True
     assert "is-muted" in tab.get_attribute("#mute", "class")
-    tab.evaluate("() => Tenfold.speak('Say the answer.')")
+    tab.evaluate("() => Tenfold.speak('Ready when you are.')")
     tab.wait_for_timeout(100)
     assert tab.evaluate("window.__spoken") == []
     tab.reload(wait_until="domcontentloaded")
     tab.wait_for_function("!!window.Tenfold")
     assert tab.evaluate("Tenfold.muted") is True
     tab.click("#mute")
-    tab.evaluate("() => Tenfold.speak('Say the answer.')")
+    tab.evaluate("() => Tenfold.speak('Ready when you are.')")
     tab.wait_for_timeout(100)
-    assert [u["text"] for u in tab.evaluate("window.__spoken")] == ["Say the answer."]
+    assert [u["text"] for u in tab.evaluate("window.__spoken")] == ["Ready when you are."]
 
 
 BOTH_HANDS = [{"hand": hand, "number": 6, "x": 0.3 if hand == "left" else 0.7, "y": 0.5}
               for hand in ("left", "right")]
 
+# The last step of the gate is a microphone test, and the line Tally says for it lives
+# in lesson/tally_lines.json, which is the one place a line of his may live. That file
+# is written by other hands, so the test reads the line from it rather than spelling it
+# out, and covers the gate with the key still missing too: no line is then spoken, and
+# every other thing the step does has to happen all the same.
+READY_LINE_KEY = "check_ready"
+READY_LINE = json.loads((REPO / "lesson" / "tally_lines.json").read_text(encoding="utf-8")).get(READY_LINE_KEY, "")
+READY_SAID = [READY_LINE] if READY_LINE else []
+
+# The gate's per child memory of the pose step, and the session's proof that the camera
+# and the microphone both worked. The page owns these keys; a test that wants a child
+# who has already met the pose step writes the first one rather than walking a whole
+# extra gate for it.
+KEY_POSE = "tenfold.posestep"
+KEY_GATE_OK = "tenfold.gate.ok"
+
+
+def known_child(name: str = "ada") -> str:
+    """A child this computer already knows, whose first gate is behind them."""
+    return (f"localStorage.setItem('tenfold.child', '{name}');"
+            f"localStorage.setItem('{KEY_POSE}.{name}', '1');")
+
 
 def open_check(tab, url):
-    """Land on the start check, with SILENT_SOCKET holding the camera stream back.
+    """Land on the ready gate, with SILENT_SOCKET holding the camera stream back.
 
     The page opens its socket and starts the node as usual; nothing the server pushes
-    reaches it, so the check only ever moves on the messages the test feeds it.
+    reaches it, so the gate only ever moves on the messages the test feeds it.
     """
     tab.add_init_script(MISSING_VIEWS)
     tab.goto(url + "#check", wait_until="domcontentloaded")
@@ -671,6 +697,29 @@ def open_check(tab, url):
 def feed_check(tab, **fields):
     fields.setdefault("fingers", BOTH_HANDS)
     tab.evaluate("(m) => window.__feed(m)", state_message("check", **fields))
+
+
+def gate_steps(tab):
+    return tab.evaluate("() => (Tenfold.gate ? Tenfold.gate.steps : null)")
+
+
+def wait_step(tab, step: str, timeout: int = 15000):
+    """Wait for the gate to be standing on one of its steps, and for the last one to be
+    open: a step is reached when the camera says so and opened one line later, which is
+    when the screen moves with it."""
+    tab.wait_for_function(
+        "(want) => { const g = Tenfold.gate;"
+        " if (!g || g.done || g.steps[g.at] !== want) return false;"
+        " return want !== 'ready' || g.listening === true; }",
+        arg=step, timeout=timeout)
+
+
+def hear(tab, text: str):
+    """The child says something, once Tally's own voice can no longer be mistaken for
+    it: a transcript that arrives while his line is in the air is his echo, not the
+    child, so the test waits that window out exactly as the page measures it."""
+    tab.wait_for_function("() => Date.now() >= Tenfold.voice.spokeUntil", timeout=15000)
+    tab.evaluate("(t) => window.__say(t, true)", text)
 
 
 def said(tab):
@@ -704,31 +753,30 @@ def quiet_tts(tab, timeout: int = 30000):
 
 
 def test_every_check_sentence_is_spoken_and_nothing_else_is(page):
-    """The rhythm of the check, end to end: an instruction, silence while the child
-    works, a short acknowledgement when they succeed, a beat, the next instruction.
-    The step dots, the banner and the result are shown and never spoken."""
+    """The rhythm of a child's first gate, end to end: an instruction, silence while the
+    child works, a short acknowledgement when they succeed, a beat, the next instruction.
+    The tiles and the banner are shown and never spoken, and no answer is ever asked
+    for: the last step is a microphone test and it passes on the word."""
     context, url = page
     tab = context.new_page()
-    # with a working microphone step 3 asks for the answer out loud
     tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
     open_check(tab, url)
     tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
     feed_check(tab, state="waiting_pose")
     tab.wait_for_function("window.__spoken.length === 3", timeout=10000)
     feed_check(tab, state="correct_pose")
-    tab.wait_for_function("window.__spoken.length === 5", timeout=10000)
-    feed_check(tab, state="answer_correct", answer=36)
-    # "Thirty six. Exactly." is one line and two utterances
-    tab.wait_for_function("window.__spoken.length === 7", timeout=10000)
-    assert said(tab) == ["Show me both hands.", "Perfect.", "Touch your 6 with your 6.",
-                         "Yes, that's it.", "Say the answer.", "Thirty six.", "Exactly."]
+    lines = ["Show me both hands.", "Perfect.", "Touch your 6 with your 6.",
+             "Yes, that's it."] + READY_SAID
+    tab.wait_for_function("(n) => window.__spoken.length === n", arg=len(lines), timeout=10000)
+    wait_step(tab, "ready")
+    assert said(tab) == lines
     assert tab.text_content("#check .banner-top").strip() == "That is a 6 and a 6."
-    assert tab.text_content("#result").strip() == "36"
 
-    # the node ends: the path opens once Tally has finished saying so
-    tab.evaluate("(m) => window.__feed(m)", {"type": "node_end", "node_id": "check", "correct": 1, "total": 1})
+    # the word passes the gate, and the path opens once Tally has finished saying so
+    hear(tab, "I'm ready")
     tab.wait_for_function("window.__spoken.some((u) => u.text === 'Your path is open.')", timeout=10000)
     tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+    assert "Say the answer" not in " ".join(said(tab))
 
 
 def test_the_check_acknowledges_on_the_event_not_on_a_timer(page):
@@ -741,7 +789,7 @@ def test_the_check_acknowledges_on_the_event_not_on_a_timer(page):
     open_check(tab, url)
     tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
     assert said(tab) == ["Show me both hands."]
-    # the child does nothing: no clock walks the check on without them
+    # the child does nothing: no clock walks the gate on without them
     tab.wait_for_timeout(1500)
     assert said(tab) == ["Show me both hands."]
     assert tab.get_attribute("#check .frame", "data-step") == "1"
@@ -762,7 +810,7 @@ def test_the_check_acknowledges_on_the_event_not_on_a_timer(page):
     # the screen moves with the instruction, not before it
     tab.wait_for_function("document.querySelector('#check .frame').dataset.step === '2'", timeout=5000)
 
-    # the pose is right: the same rhythm again, and the mic opens with the question
+    # the pose is made: the same rhythm again, and the pill comes up with the word
     tab.wait_for_timeout(1200)
     tab.evaluate("() => { window.__t0 = Date.now(); }")
     feed_check(tab, state="correct_pose")
@@ -771,41 +819,18 @@ def test_the_check_acknowledges_on_the_event_not_on_a_timer(page):
     assert spoken[3]["text"] == "Yes, that's it."
     delay = spoken[3]["at"] - tab.evaluate("window.__t0")
     assert delay < 500, f"the acknowledgement waited {delay} ms, that is a clock and not the event"
-    assert tab.is_hidden("#check-mic"), "the answer was asked for before the question"
-
-    tab.wait_for_function("window.__spoken.length === 5", timeout=5000)
-    spoken = tab.evaluate("window.__spoken")
-    assert spoken[4]["text"] == "Say the answer."
-    beat = spoken[4]["at"] - spoken[3]["at"]
-    assert beat >= 900, f"the question followed the acknowledgement after only {beat} ms"
+    if READY_LINE:
+        assert tab.is_hidden("#check-mic"), "the word was asked for before the step it belongs to"
+        tab.wait_for_function("window.__spoken.length === 5", timeout=5000)
+        spoken = tab.evaluate("window.__spoken")
+        assert spoken[4]["text"] == READY_LINE
+        beat = spoken[4]["at"] - spoken[3]["at"]
+        assert beat >= 900, f"the question followed the acknowledgement after only {beat} ms"
+    wait_step(tab, "ready")
     tab.wait_for_selector("#check-mic", state="visible", timeout=5000)
-    assert tab.evaluate("Tenfold.voice.gate") is True
-
-
-def test_a_check_correction_the_child_has_fixed_is_not_spoken(page):
-    """A correction is only worth saying while the pose is still wrong. One that the
-    child has already fixed by the time its turn comes is dropped."""
-    context, url = page
-    tab = context.new_page()
-    tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
-    open_check(tab, url)
-    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
-    feed_check(tab, state="waiting_pose")
-    tab.wait_for_function("document.querySelector('#check .frame').dataset.step === '2'", timeout=10000)
-    # the engine holds the line that is playing, so the correction has to queue behind it
-    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; }")
-    tab.evaluate("() => Tenfold.say('Almost, keep them touching.', null, null, {})")
-    tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
-    feed_check(tab, state="wrong_pose", tally="Move your left thumb down.")
-    feed_check(tab, state="wrong_pose", tally="Move your left thumb down.")
-    tab.wait_for_timeout(200)
-    assert said(tab) == ["Almost, keep them touching."], "the same correction was queued twice"
-    # the child fixes the pose before the correction is ever spoken
-    feed_check(tab, state="correct_pose")
-    tab.evaluate("() => window.__finish()")
-    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
-    tab.wait_for_timeout(400)
-    assert said(tab) == ["Almost, keep them touching.", "Yes, that's it."]
+    # the gate listens for a word, so the answer gate that carries numbers stays shut
+    assert tab.evaluate("Tenfold.voice.gate") is False
+    assert tab.evaluate("() => Tenfold.gate.listening") is True
 
 
 # Five fingers up on each hand, so the numbers ten down to six have something to light.
@@ -815,7 +840,9 @@ BOTH_HANDS_OPEN = [{"hand": hand, "number": number, "y": 0.5,
 
 
 def tiles(tab):
-    return tab.eval_on_selector_all("#check .stepnum img", "els => els.map((e) => e.getAttribute('src'))")
+    return tab.eval_on_selector_all(
+        "#check .stepnum img",
+        "els => els.filter((e) => e.style.display !== 'none').map((e) => e.getAttribute('src'))")
 
 
 def frame_class(tab):
@@ -823,10 +850,10 @@ def frame_class(tab):
 
 
 def test_the_check_walks_its_three_steps_on_one_frame(page):
-    """The export sheet draws the three steps as three frames, f1, f2 and f3; the screen
-    is one frame and the step it is on is its data-step. The three steps are walked here
-    on that one frame: the tiles, the numbers lighting ten down to six, the green banner,
-    the pill that asks for the answer and the result behind it."""
+    """The export sheet draws the steps as frames side by side, f1, f2 and f3; the screen
+    is one frame and the step it is on is its data-step. A child's first gate is the one
+    that walks all three: the tiles, the numbers lighting ten down to six, the green
+    banner, and the pill that asks for the word."""
     context, url = page
     tab = context.new_page()
     errors = []
@@ -836,10 +863,11 @@ def test_the_check_walks_its_three_steps_on_one_frame(page):
 
     # step one: the camera streams, the first tile is lit, nothing is asked for yet
     tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    assert gate_steps(tab) == ["hands", "pose", "ready"]
     assert tab.get_attribute("#check .frame", "data-step") == "1"
     assert (tab.get_attribute("#check-cam .practice-video", "src") or "").startswith("/video")
     assert tiles(tab) == ["art/tile-1-on.png", "art/tile-2-off.png", "art/tile-3-off.png"]
-    assert tab.is_hidden("#check-mic"), "the answer was asked for before the question"
+    assert tab.is_hidden("#check-mic"), "the word was asked for before the step it belongs to"
     assert tab.text_content("#check-say").strip() == "Show me both hands."
 
     # both hands seen: the frame says so, and the numbers light ten down to six
@@ -852,8 +880,8 @@ def test_the_check_walks_its_three_steps_on_one_frame(page):
         " return all.length === 10 && Array.prototype.every.call(all, (t) => t.classList.contains('lit')); }",
         timeout=10000)
 
-    # step two ends on the pose: the export's banner drops and the pill comes up with
-    # the question, carrying the third tile with it
+    # the pose step ends on the pose: the export's banner drops and the pill comes up
+    # with the word, carrying the third tile with it
     feed_check(tab, state="correct_pose", fingers=BOTH_HANDS_OPEN)
     tab.wait_for_function("document.querySelector('#check .frame').dataset.step === '3'", timeout=10000)
     assert tab.text_content("#check .banner-top").strip() == "That is a 6 and a 6."
@@ -861,17 +889,201 @@ def test_the_check_walks_its_three_steps_on_one_frame(page):
     assert tiles(tab) == ["art/tile-1-off.png", "art/tile-2-off.png", "art/tile-3-on.png"]
     tab.wait_for_selector("#check-mic", state="visible", timeout=5000)
 
-    # the answer: the result behind the pill, then the path opens on Tally's last line
-    feed_check(tab, state="answer_correct", answer=36, fingers=BOTH_HANDS_OPEN)
-    tab.wait_for_function("document.querySelector('#result').textContent === '36'", timeout=10000)
-    assert "result" in frame_class(tab) and "heard" in frame_class(tab)
-    # the three steps are done and the screen has not thrown once; what the practice
-    # view does with the child after this is that screen's own business
+    # the word: the pill says it heard, and the path opens on Tally's last line. The
+    # export's result state belonged to a step that asked for a number; none does now.
+    hear(tab, "ready")
+    tab.wait_for_function("() => document.querySelector('#check .frame').classList.contains('heard')", timeout=10000)
+    assert "result" not in frame_class(tab)
+    assert tab.eval_on_selector("#result", "el => getComputedStyle(el).opacity") == "0"
     assert mine(errors) == []
-    tab.evaluate("(m) => window.__feed(m)", {"type": "node_end", "node_id": "check", "correct": 1, "total": 1})
     tab.wait_for_function("document.querySelector('#check .frame').classList.contains('mapin')", timeout=10000)
     tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=15000)
-    assert tab.evaluate("() => sessionStorage.getItem('tenfold.checked')") == "1"
+    # the camera and the microphone both worked here, which is what a later skip needs
+    assert tab.evaluate("() => sessionStorage.getItem('tenfold.gate.ok')") == "1"
+
+
+READY_WORDS = ["I'm ready", "ready", "yes"]
+
+
+@pytest.mark.parametrize("word", READY_WORDS)
+def test_the_gate_passes_on_every_ready_word(page, word):
+    """One word, however the recogniser wraps it, and the gate is through."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + SILENT_SOCKET
+                        + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    # a child who has met the pose once has two steps and two tiles, never a third
+    assert gate_steps(tab) == ["hands", "ready"]
+    feed_check(tab, state="waiting_pose")
+    wait_step(tab, "ready")
+    assert tiles(tab) == ["art/tile-1-off.png", "art/tile-2-on.png"]
+    hear(tab, word)
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+
+
+def test_a_number_does_not_pass_the_gate(page):
+    """The gate asks for a word and for nothing else: an answer said out loud is not a
+    way through it, and it is never sent as one."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + SILENT_SOCKET
+                        + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    feed_check(tab, state="waiting_pose")
+    wait_step(tab, "ready")
+    tab.evaluate(WATCH_SENDS)
+    hear(tab, "thirty six")
+    tab.wait_for_timeout(600)
+    assert tab.evaluate("() => Tenfold.gate.done") is False
+    assert tab.evaluate("() => document.body.dataset.view") == "check"
+    assert checks(tab) == [], "a number at the gate was sent as an answer"
+    assert [m["text"] for m in sent(tab, "speech")] == ["thirty six"], "it is still the child speaking"
+    # the word still works straight after it
+    hear(tab, "yes")
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+
+
+def test_the_gate_never_asks_for_an_answer(page):
+    """The words "Say the answer" are gone from the gate: from what Tally says, from
+    what the screen shows, and from the page itself."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    feed_check(tab, state="waiting_pose")
+    feed_check(tab, state="correct_pose")
+    wait_step(tab, "ready")
+    quiet(tab)
+    assert "Say the answer" not in " ".join(said(tab))
+    assert "Say the answer" not in tab.inner_text("#check")
+    assert "Say the answer" not in tab.request.get(f"{url}/app.js").text()
+
+
+def test_the_gate_line_comes_from_the_lines_file(page):
+    """Tally's line for the last step is the one in lesson/tally_lines.json, read by its
+    key. The page carries the key and never the sentence, so that file stays the one
+    place the words live, and a key that has not landed there yet costs the gate
+    nothing: the step opens in silence and the word still passes it."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + SILENT_SOCKET
+                        + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    feed_check(tab, state="waiting_pose")
+    wait_step(tab, "ready")
+    quiet(tab)
+    source = tab.request.get(f"{url}/app.js").text()
+    assert f'"{READY_LINE_KEY}"' in source, "the page does not ask for the line by its key"
+    if READY_LINE:
+        assert READY_LINE in said(tab)
+        assert READY_LINE not in source, "the sentence is written in the page as well"
+    hear(tab, "yes")
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+
+
+def test_the_gate_runs_before_a_lesson_started_from_the_path(page):
+    """Every activity starts with the gate: tapping a node opens it, and the lesson
+    itself waits behind it until the word is in."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + CAPTURE_SOCKET
+                        + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#practice", wait_until="domcontentloaded")
+    tab.wait_for_selector('[data-action="start"]', timeout=10000)
+    tab.click('[data-action="start"]', force=True)
+    tab.wait_for_function("document.body.dataset.view === 'check'", timeout=10000)
+    assert tab.evaluate("!Tenfold.lesson"), "the lesson started without the gate"
+    wait_step(tab, "ready", timeout=30000)
+    hear(tab, "yes")
+    tab.wait_for_selector("#lesson .cam", timeout=15000)
+    tab.wait_for_function("!!Tenfold.lesson", timeout=10000)
+
+
+def test_the_pose_step_runs_once_for_a_child(page):
+    """The finger pose is the one step that proves the camera can read a pose. A child
+    meets it on their very first gate and never again, and it is remembered against
+    their own name, not against the tablet."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.add_init_script("localStorage.setItem('tenfold.child', 'ada');")
+    open_check(tab, url)
+    assert gate_steps(tab) == ["hands", "pose", "ready"]
+    feed_check(tab, state="waiting_pose")
+    wait_step(tab, "pose")
+    assert len(tiles(tab)) == 3
+    feed_check(tab, state="correct_pose")
+    wait_step(tab, "ready")
+    hear(tab, "yes")
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+    assert tab.evaluate("() => localStorage.getItem('tenfold.posestep.ada')") == "1"
+
+    # the second gate of the same child: two steps, two tiles, and the pose never
+    # mentioned again
+    tab.evaluate("() => { window.__spoken = []; }")
+    tab.evaluate("() => { location.hash = 'check'; }")
+    wait_step(tab, "hands")
+    assert gate_steps(tab) == ["hands", "ready"]
+    feed_check(tab, state="waiting_pose")
+    wait_step(tab, "ready")
+    assert len(tiles(tab)) == 2
+    assert "Touch your 6" not in " ".join(said(tab))
+    # a child who has never played here still meets the pose step
+    tab.evaluate("() => Tenfold.setChild('Bo')")
+    tab.evaluate("() => { location.hash = 'practice'; }")
+    tab.evaluate("() => { location.hash = 'check'; }")
+    wait_step(tab, "hands")
+    assert gate_steps(tab) == ["hands", "pose", "ready"]
+
+
+def test_the_skip_needs_a_gate_that_already_worked(page):
+    """A tap on Tally skips the gate, but only once the camera and the microphone have
+    both worked in this session. Before that the tap does nothing and Tally says
+    nothing new."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + SILENT_SOCKET
+                        + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    quiet(tab)
+    before = said(tab)
+    tab.click("#check-tally", force=True)
+    tab.wait_for_timeout(600)
+    assert tab.evaluate("() => document.body.dataset.view") == "check", "the gate was skipped unproven"
+    assert said(tab) == before, "Tally said something new about a tap that does nothing"
+
+    # the gate is walked properly: the camera saw the hands and the microphone brought
+    # the word back, which is the proof a skip needs
+    feed_check(tab, state="waiting_pose")
+    wait_step(tab, "ready")
+    hear(tab, "yes")
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+    assert tab.evaluate("() => Tenfold.gateProved") is True
+
+    # the next gate: one tap on Tally and the child is through it
+    tab.evaluate("() => { location.hash = 'check'; }")
+    wait_step(tab, "hands")
+    tab.click("#check-tally", force=True)
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+
+
+def test_the_gate_is_under_ten_seconds_in_the_mock(page):
+    """The whole point of the gate is that it is short. Driven by the mock camera, from
+    the tap on the node to the lesson on screen, with the word said as soon as it is
+    asked for."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#practice", wait_until="domcontentloaded")
+    tab.wait_for_selector('[data-action="start"]', timeout=10000)
+    tab.evaluate("() => { window.__t0 = Date.now(); }")
+    tab.click('[data-action="start"]', force=True)
+    wait_step(tab, "ready", timeout=20000)
+    tab.evaluate("() => window.__say('yes', true)")
+    tab.wait_for_selector("#lesson .cam", timeout=15000)
+    spent = tab.evaluate("() => Date.now() - window.__t0")
+    assert spent < 10000, f"the gate took {spent} ms"
 
 
 # The page's own socket, with every message it sends recorded as parsed JSON.
@@ -905,7 +1117,7 @@ def test_the_tts_pair_brackets_every_line(page):
     # muted: nothing is heard, the pair is sent all the same
     tab.click("#mute")
     tab.evaluate("() => { window.__sent = []; window.__spoken = []; }")
-    tab.evaluate("() => Tenfold.speak('Say the answer.')")
+    tab.evaluate("() => Tenfold.speak('Ready when you are.')")
     tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=8000)
     assert tts_pairs(tab) == [True, False]
     assert tab.evaluate("window.__spoken") == []
@@ -1003,25 +1215,48 @@ def test_a_refused_microphone_can_be_asked_for_again(page):
     assert tab.inner_text("#lesson .mic .mic-label").strip().lower() == "listening"
 
 
-def test_the_check_shows_the_typing_path_with_no_speech_api(page):
-    """No recognition at all: step 3 asks for the answer typed, the pill carries the
-    digits and a Backspace takes one back off."""
+def test_the_gate_gives_a_ready_button_with_no_speech_api(page):
+    """Firefox and Safari have no speech recognition, and a microphone can be refused.
+    The gate must still be passable: the pill becomes a Ready button, at once when there
+    is nothing to listen with, and a tap on it opens what the child asked for."""
     context, url = page
     tab = context.new_page()
     errors = []
     tab.on("pageerror", lambda e: errors.append(str(e)))
-    tab.add_init_script(NO_SPEECH_API + MISSING_VIEWS)
-    tab.goto(url + "#check", wait_until="domcontentloaded")
+    tab.add_init_script(NO_SPEECH_API + SILENT_SOCKET + MISSING_VIEWS + known_child())
+    open_check(tab, url)
+    feed_check(tab, state="waiting_pose")
     tab.wait_for_selector("#check-mic", state="visible", timeout=30000)
-    assert tab.text_content("#check-say").strip() == "Type the answer."
-    assert tab.text_content("#check-miclabel").strip() == "Type it"
-    tab.keyboard.type("36")
-    assert tab.text_content("#check-miclabel").strip() == "36"
-    tab.keyboard.press("Backspace")
-    assert tab.text_content("#check-miclabel").strip() == "3"
-    tab.keyboard.press("Backspace")
-    assert tab.text_content("#check-miclabel").strip() == "Type it"
+    tab.wait_for_function("() => document.querySelector('#check-mic').getAttribute('role') === 'button'",
+                          timeout=10000)
+    assert tab.text_content("#check-miclabel").strip() == "Ready"
+    if READY_LINE:
+        assert tab.text_content("#check-say").strip() == READY_LINE
+    tab.click("#check-mic", force=True)
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+    # the button passes the step, but a tap is not proof that a microphone works
+    assert tab.evaluate("() => Tenfold.gateProved") is False
     assert mine(errors) == []
+
+
+def test_the_ready_button_waits_for_the_microphone_first(page):
+    """A microphone that may yet work keeps the word as the way through: the button
+    only comes up once the gate's own timing has run out with nothing heard."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + SILENT_SOCKET
+                        + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    feed_check(tab, state="waiting_pose")
+    wait_step(tab, "ready")
+    assert tab.evaluate("() => Tenfold.gate.button") is False
+    assert tab.text_content("#check-miclabel").strip() == "Listening"
+    # the wait is a policy timing, lesson/tutor_params.json owns it, and the button
+    # comes up when it runs out
+    tab.wait_for_function("() => !!Tenfold.gate && Tenfold.gate.button === true", timeout=12000)
+    assert tab.text_content("#check-miclabel").strip() == "Ready"
+    tab.click("#check-mic", force=True)
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
 
 
 def test_the_camera_streams_only_while_it_is_on_screen(page):
@@ -1523,21 +1758,24 @@ def test_every_bubble_shown_is_spoken(page):
     tab.goto(url + "#home", wait_until="domcontentloaded")
     tab.wait_for_function("!!window.Tenfold")
 
-    # the start check, three steps driven by the camera
+    # the ready gate, its steps driven by the camera
     tab.click("a.door[href='#check']")
     tab.wait_for_selector("#check-mic", state="visible", timeout=30000)
     tab.wait_for_timeout(300)
     assert silent(tab) == []
 
-    # the practice card
-    tab.evaluate("() => { location.hash = 'practice'; }")
-    tab.wait_for_selector('[data-action="start"]', timeout=10000)
+    # the practice card, once the gate is through
+    hear(tab, "yes")
+    tab.wait_for_selector('[data-action="start"]', timeout=15000)
     tab.wait_for_timeout(300)
     assert silent(tab) == []
 
-    # the lesson bubble: the line it opens on, then every line the tutor sends
+    # the lesson bubble, behind the gate that runs before every activity: the line it
+    # opens on, then every line the tutor sends
     tab.click('[data-action="start"]', force=True)
-    tab.wait_for_selector("#lesson .cam", timeout=10000)
+    wait_step(tab, "ready", timeout=30000)
+    hear(tab, "yes")
+    tab.wait_for_selector("#lesson .cam", timeout=15000)
     node = running_lesson(tab)
     tab.wait_for_timeout(300)
     assert silent(tab) == []
