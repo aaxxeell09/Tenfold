@@ -71,6 +71,23 @@ WANDB_INFERENCE_URL = "https://api.inference.wandb.ai/v1"
 TEXT_AGENT_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
 
 
+GUARD_TIMEOUT_S = 120.0
+
+
+def guard_verdict(returncode: int, stdout: str, stderr: str = "") -> list[str]:
+    """What loop/guard.py decided. Accepted ([]) only on exit 0 with GUARD_OK as the last line and no rejection line;
+    a crash, a non-zero exit, a missing verdict or a truncated output all come back as a rejection."""
+    lines = [l.strip() for l in stdout.splitlines() if l.strip()]
+    rejects = [l for l in lines if l.startswith("GUARD_REJECT ") or l.startswith("GUARD_ERROR")]
+    if returncode == 0 and lines and lines[-1] == "GUARD_OK" and not rejects:
+        return []
+    if rejects:
+        return rejects
+    tail = (stderr.strip()[-300:] or (lines[-1][:120] if lines else "no output")).replace("\n", " ")
+    return [f"GUARD_REJECT guard_crash: loop/guard.py exited {returncode} without GUARD_OK | cause: {tail} | "
+            "fix: run python loop/guard.py --check and make it print GUARD_OK"]
+
+
 def approved(verdict: str) -> bool:
     """Only an explicit "VERDICT: APPROVE" line counts; a rejection that mentions the word approve does not."""
     for line in verdict.splitlines():
@@ -361,9 +378,18 @@ class Critic:
 
     @maybe_weave_op("critic.guard_code")
     def guard_code(self, transcript: Path) -> list[str]:
-        p = subprocess.run([sys.executable, str(self.repo / "loop" / "guard.py"), "--worktree", str(self.worktree),
-                            "--transcript", str(transcript)], capture_output=True, text=True, timeout=120)
-        return [l for l in p.stdout.splitlines() if l.startswith("GUARD_REJECT ") or l.startswith("GUARD_ERROR")]
+        """Rejection lines from loop/guard.py; empty only for an explicit GUARD_OK (see guard_verdict).
+        Runs with the critic's environment, so the held-out key never reaches the guard or the candidate."""
+        try:
+            p = subprocess.run([sys.executable, str(self.repo / "loop" / "guard.py"), "--worktree", str(self.worktree),
+                                "--transcript", str(transcript)], cwd=self.repo, env=self.env, stdin=subprocess.DEVNULL,
+                               capture_output=True, text=True, timeout=GUARD_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            return [f"GUARD_REJECT guard_timeout: loop/guard.py gave no verdict within {GUARD_TIMEOUT_S:.0f} s | "
+                    "cause: the guard or the smoke test hung | fix: keep classify() and the module body fast"]
+        except OSError as e:
+            return [f"GUARD_REJECT guard_crash: loop/guard.py could not start | cause: {type(e).__name__}: {e} | fix: rerun"]
+        return guard_verdict(p.returncode, p.stdout, p.stderr)
 
     # ---------- evaluation and gate ----------
     def run_eval(self, split: str, rules: Path, tag: str, report: Path | None = None, verdict: str | None = None,
