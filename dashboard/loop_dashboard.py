@@ -85,7 +85,9 @@ def _(informed, plt, snap):
 
     _xs = list(range(len(informed)))
     _labels = [v["tag"] for v in informed]
-    _fig, _ax = plt.subplots(figsize=(12, 4.8))
+    plt.rcParams.update({"font.size": 13, "axes.titlesize": 17, "axes.labelsize": 13, "xtick.labelsize": 14,
+                         "ytick.labelsize": 12, "legend.fontsize": 12})
+    _fig, _ax = plt.subplots(figsize=(11, 4.6))
 
     def _series(key, color, style, width, label, band_alpha):
         _pts = [(x, _metric(v.get(key)), (v.get(key) or {}).get("exact_match_ci95")) for x, v in zip(_xs, informed)]
@@ -100,10 +102,15 @@ def _(informed, plt, snap):
                  marker="o", label=label)
         for _x, _y, _ in _pts:
             _ax.annotate(f"{_y:.3f}", (_x, _y), textcoords="offset points", xytext=(0, 9), ha="center",
-                         fontsize=9, color=color)
+                         fontsize=12, color=color)
 
     _series("train", "#6b7280", "--", 2, "train (the data the critic sees)", 0.15)
     _series("heldout", "#16a34a", "-", 3, "held-out (other people's hands)", 0.18)
+    _trains = [(_x, _metric(v.get("train"))) for _x, v in zip(_xs, informed) if _metric(v.get("train")) is not None]
+    if len(_trains) > 1:
+        _ax.annotate(f"{(_trains[-1][1] - _trains[0][1]) * 100:+.1f} points since {informed[0]['tag']}",
+                     _trains[-1], textcoords="offset points", xytext=(-12, 34), ha="right", fontsize=15,
+                     fontweight="bold", color="#111827")
 
     _blind = snap.get("blind") or []
     if _blind:
@@ -129,7 +136,7 @@ def _(informed, plt, snap):
         if _v.get("kind") == "data_refresh":
             _ax.axvline(_x, color="#f5a623", linestyle=":", linewidth=1.5)
             _ax.annotate(f"new captures\n{(_v.get('data') or {}).get('n_samples', '?')} samples", (_x, 0.05),
-                         ha="center", fontsize=9, color="#b45309")
+                         ha="center", fontsize=11, color="#b45309")
 
     _ax.set_xticks(_xs, _labels)
     _ax.set_xlim(-0.5, max(len(_xs) - 0.5, 0.5))
@@ -139,7 +146,7 @@ def _(informed, plt, snap):
     _ax.grid(axis="y", alpha=0.25)
     for _side in ("top", "right"):
         _ax.spines[_side].set_visible(False)
-    _ax.legend(loc="upper left", frameon=False, fontsize=9)
+    _ax.legend(loc="upper left", frameon=False, fontsize=12)
     _fig.tight_layout()
     _fig
     return
@@ -182,18 +189,21 @@ def _(informed, mo, pick, plt):
         _prev = informed[_i - 1] if _i > 0 else None
         _now = (_v.get("train") or {}).get("per_class") or {}
         _before = ((_prev or {}).get("train") or {}).get("per_class") or {}
-        _classes = sorted(_now, key=lambda c: ((_now[c] or 0) - (_before.get(c) or 0), c))
-        _fig, _ax = plt.subplots(figsize=(7, max(3.0, 0.24 * len(_classes))))
+        _changed = [c for c in _now if _before and abs((_now[c] or 0) - (_before.get(c) or 0)) > 1e-9]
+        _classes = sorted(_changed or list(_now), key=lambda c: ((_now[c] or 0) - (_before.get(c) or 0), c))
+        _unchanged = len(_now) - len(_changed) if _changed else 0
+        _fig, _ax = plt.subplots(figsize=(7, max(2.6, 0.42 * len(_classes) + 1)))
         _ys = list(range(len(_classes)))
         if _before:
             _ax.barh([y + 0.2 for y in _ys], [_before.get(c) or 0 for c in _classes], height=0.4, color="#cbd5e1",
                      label=_prev["tag"])
         _ax.barh([y - 0.2 for y in _ys] if _before else _ys, [_now[c] or 0 for c in _classes], height=0.4,
                  color="#16a34a", label=_v["tag"])
-        _ax.set_yticks(_ys, _classes, fontsize=8)
+        _ax.set_yticks(_ys, _classes, fontsize=12)
         _ax.set_xlim(0, 1)
-        _ax.set_title(f"Accuracy by class, most improved at the bottom", loc="left", fontsize=11)
-        _ax.legend(frameon=False, fontsize=9, loc="lower right")
+        _ax.set_title(f"Classes that changed ({_unchanged} unchanged), most improved at the top" if _changed
+                      else "Accuracy by class", loc="left", fontsize=13)
+        _ax.legend(frameon=False, fontsize=12, loc="lower right")
         for _side in ("top", "right"):
             _ax.spines[_side].set_visible(False)
         _fig.tight_layout()
