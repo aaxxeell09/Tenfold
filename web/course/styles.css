@@ -1071,7 +1071,14 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
    4. the pill is the answer field when the browser cannot hear, so the step decides
       whether it is on screen: markMic() hides the first .mic of the page whenever
       there is no recognition, and is-off is the live state the export never shows. */
-#check .frame { transform: scale(var(--fit, 1)); transform-origin: center center; }
+/* the frame wears the state classes the export gives it, and one of them, result, is
+   also the class of the element that shows the answer, so the frame takes that
+   element's rule and vanishes. The frame's own geometry is restated here, after it. */
+#check .frame {
+  position: relative; inset: auto; display: block; opacity: 1;
+  font-size: 20px; font-weight: 700; letter-spacing: normal; color: var(--eel);
+  transform: scale(var(--fit, 1)); transform-origin: center center;
+}
 #check .stage .practice-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .85; }
 #check .practice-overlay { position: absolute; pointer-events: none; }
 #check .practice-overlay text { font-size: 0.05px; font-weight: 900; text-anchor: middle; font-family: var(--font); }
