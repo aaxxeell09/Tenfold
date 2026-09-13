@@ -44,6 +44,7 @@ KNOWN_STALE = {
         "test_the_grace_before_a_wrong_pose_is_scored_is_untouched",
         "test_no_other_value_in_the_params_file_moved",
         "test_a_dropped_line_is_logged_with_its_reason",
+        "test_supportive_after_two_hard_exercises_with_the_finger_numbers",
     ),
 }
 

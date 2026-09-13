@@ -16,6 +16,7 @@ import pytest
 
 from app.tutor import (
     ANSWER_RETRY,
+    TIP_SPREAD_PALMS,
     BEAT_PARAMS,
     BEAT_PARTS,
     BEAT_SUCCESS,
@@ -42,6 +43,8 @@ from app.tutor import (
     jsonl_sink,
     load_lines,
     load_params,
+    nearest_gap,
+    tip_positions,
 )
 from classifier.schema import GestureState
 
@@ -1225,7 +1228,8 @@ def test_the_motion_threshold_in_force_rides_every_intervention_line() -> None:
 # --------------------------------------------------------------------------
 
 DECISION_KEYS = {"kind", "ts", "learner_id", "exercise", "state", "stable_for",
-                 "intervention", "reason", "scored_error", "mode", "params_version"}
+                 "intervention", "reason", "reading", "scored_error", "mode",
+                 "params_version"}
 INTERVENTION_KEYS = {"kind", "ts", "learner_id", "exercise", "intervention",
                      "trigger_after_s", "state_before", "child_was_already_moving",
                      "child_moved_after_s", "correct_pose_within_5s",
@@ -1783,3 +1787,219 @@ def test_a_dropped_line_the_tutor_does_not_know_has_no_key() -> None:
     assert drop["line"] == "Something the page made up."
     assert drop["line_key"] is None
     assert drop["reason"] == "queue_full"
+
+
+# --------------------------------------------------------------------------
+# 13. reading the pose: one test per row of POSE_TABLE
+#
+# Every one of them injects fingertip coordinates and lets the tutor measure
+# them. Nothing here is driven by the classifier's contact flag: the tips are
+# placed a named number of palms apart, and contact_ratio decides what that
+# distance means.
+# --------------------------------------------------------------------------
+
+
+GLOBALS = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))["global"]
+CONTACT = GLOBALS["contact_ratio"]
+INITIAL_SILENCE = GLOBALS["initial_silence"]
+HINT_2_DELAY = GLOBALS["hint_2_delay"]
+POSE_STABLE = GLOBALS["pose_stable"]
+WRONG_POSE_PROMPT = GLOBALS["wrong_pose_prompt"]
+
+ACK = "Yes, that's it."
+WRONG_LEFT = "Your right hand is right. Find 8 on your left hand."
+WRONG_RIGHT = "Your left hand is right. Find 7 on your right hand."
+COME_HERE = "Come here, hands!"
+
+TOUCHING = 0.4 * CONTACT          # the two tips are together
+NEARLY = 1.5 * CONTACT            # close, and not touching
+APART = 4.0                       # four palms: nothing is near anything
+
+
+PALM = 0.06                       # the palm these fixtures are drawn in
+LEFT_STEP = 0.30 * PALM           # the gap between one hand's own fingertips
+RIGHT_STEP = 0.45 * PALM          # the other hand's, wider on purpose
+
+
+def hands_at(gap: float, pair: tuple[int, int] = (8, 7), hands: int = 2
+             ) -> list[dict[str, object]]:
+    """Ten fingertips, with one named pair exactly gap palms apart.
+
+    The palm the tutor reads in is the widest distance inside a hand over
+    TIP_SPREAD_PALMS, averaged over the hands, so the two steps below are
+    chosen to make that palm come out at PALM, and gap is measured in it. The
+    fingertips of one hand are spaced wider than the other's, which leaves the
+    named pair the only pair level with each other, and so the only nearest
+    pair the tutor can find.
+    """
+    dx = gap * PALM
+    out: list[dict[str, object]] = []
+    for hand in {0: (), 1: ("left",), 2: ("left", "right")}[hands]:
+        x = 0.5 - dx / 2.0 if hand == "left" else 0.5 + dx / 2.0
+        anchor = pair[0] if hand == "left" else pair[1]
+        step = LEFT_STEP if hand == "left" else RIGHT_STEP
+        for number in range(6, 11):
+            out.append({"hand": hand, "number": number, "x": x,
+                        "y": 0.5 + (number - anchor) * step})
+    return out
+
+
+def climb(harness: Harness, level: int, limit: float = 40.0, **kwargs: object
+          ) -> list[str]:
+    """Feed until the ladder reaches a level, and say what was said on the way."""
+    said: list[str] = []
+    while harness.last.intervention_level < level and harness.clock.t < limit:
+        said += watch(harness, 0.2, **kwargs)
+    assert harness.last.intervention_level == level, (
+        f"the ladder never reached L{level}")
+    return said
+
+
+def watch(harness: Harness, seconds: float, gesture: GestureState | None = UNKNOWN,
+          gap: float = APART, pair: tuple[int, int] = (8, 7), hands: int = 2,
+          hint: dict[str, object] | None = None,
+          tips: list[dict[str, object]] | None = None) -> list[str]:
+    """Feed placed fingertips for a while, and collect what was said."""
+    said: list[str] = []
+    for _ in range(int(round(seconds * FPS))):
+        harness.clock.tick()
+        obs = Observation(gesture=gesture,
+                          fingers=hands_at(gap, pair, hands) if tips is None else tips,
+                          hands_seen=hands, hint=hint)
+        harness.last = harness.tutor.observe(obs, harness.clock.t)
+        if harness.last.tutor_line:
+            said.append(harness.last.tutor_line)
+    return said
+
+
+def readings(harness: Harness) -> list[str]:
+    """The reading on every decision the tutor logged."""
+    return [line["reading"]["name"] for line in harness.kind("decision")]
+
+
+def test_the_geometry_fixture_places_the_pair_where_it_says() -> None:
+    """The rows below are worth no more than the fixture they inject."""
+    placed = tip_positions(hands_at(NEARLY))
+    spreads = [max(abs(one[1] - other[1]) for one in hand.values()
+                   for other in hand.values()) for hand in placed.values()]
+    assert sum(spreads) / len(spreads) / TIP_SPREAD_PALMS == pytest.approx(PALM)
+    nearest = nearest_gap(placed, PALM)
+    assert nearest is not None
+    assert nearest[1] == (("left", 8), ("right", 7))
+    assert nearest[0] == pytest.approx(NEARLY, abs=1e-9)
+    far = nearest_gap(tip_positions(hands_at(APART)), PALM)
+    assert far is not None and far[0] == pytest.approx(APART, abs=1e-9)
+
+
+def test_hands_open_and_far_apart_get_the_numbers_on_every_fingertip() -> None:
+    """Row 1. Nothing within the contact distance: the child does not know."""
+    harness = wrong_pose_harness()
+    said = watch(harness, INITIAL_SILENCE + 0.5, gap=APART)
+    assert harness.tutor.reading.name == "searching"
+    assert said == [], "the numbers are shown, not announced"
+    assert climb(harness, 1) == []
+    assert harness.last.tutor_visual == {"kind": "finger_numbers"}
+    assert "searching" in readings(harness)
+
+
+def test_two_fingertips_closing_in_are_left_alone_with_a_dot_each() -> None:
+    """Row 2. Close and not touching: say nothing, mark the two, wait."""
+    harness = wrong_pose_harness()
+    said = watch(harness, INITIAL_SILENCE + 1.5, gap=NEARLY)
+    assert harness.tutor.reading.name == "closing_in"
+    assert said == []
+    assert harness.last.intervention_level == 0
+    assert harness.last.tutor_visual == {
+        "kind": "closing_in",
+        "tips": [{"hand": "left", "finger": 8}, {"hand": "right", "finger": 7}],
+    }
+
+
+def test_a_wrong_pair_already_touching_is_answered_in_colour_and_silence() -> None:
+    """Row 3. The gesture is made and the count is wrong: colours, no voice."""
+    harness = wrong_pose_harness()
+    wrong = pose(9, 7, contact=False)
+    said = watch(harness, INITIAL_SILENCE + 0.5, gesture=wrong, gap=TOUCHING,
+                 pair=(9, 7))
+    assert harness.tutor.reading.name == "wrong_pair"
+    assert harness.tutor.reading.hand == "left"
+    said += climb(harness, 2, gesture=wrong, gap=TOUCHING, pair=(9, 7))
+    assert said == [], "L2 is shown, not said"
+    assert harness.last.tutor_visual == {"kind": "correction",
+                                         "wrong_hand": "left",
+                                         "expected_finger": 8}
+    assert "wrong_pair" in readings(harness)
+
+
+def test_the_same_wrong_pair_still_held_earns_the_voice_and_the_ghost() -> None:
+    """Row 4. Held through hint_2_delay after the colours: L3, and a word.
+
+    The ladder clock is the ceiling over this row and always reaches L3 first,
+    since it counts hint_2_delay from the exercise and this row counts it from
+    the colours. Both ask for the same aid, so what is asserted here is the aid
+    and the reading, never which of the two got there.
+    """
+    harness = wrong_pose_harness(params_with(hint_2_delay=6.0, rescue_delay=25.0))
+    wrong = pose(9, 7, contact=False)
+    held = {"gesture": wrong, "gap": TOUCHING, "pair": (9, 7)}
+    watch(harness, INITIAL_SILENCE + 0.5, **held)
+    climb(harness, 2, **held)
+    said = climb(harness, 3, **held)
+    assert said == [WRONG_LEFT], "L3 is the first level with a voice"
+    assert harness.last.tutor_visual == {"kind": "ghost", "hand": "left",
+                                         "from": 9, "to": 8}
+    while harness.tutor.reading.name != "wrong_pair_held" and harness.clock.t < 30:
+        watch(harness, 0.2, **held)
+    assert harness.tutor.reading.name == "wrong_pair_held"
+    assert harness.last.intervention_level == 3
+
+
+def test_one_hand_right_colours_the_hand_that_is_still_looking() -> None:
+    """Row 5. The colour goes on the searching hand, and nowhere else."""
+    harness = wrong_pose_harness()
+    wrong = pose(8, 9, contact=False)
+    watch(harness, INITIAL_SILENCE + 0.5, gesture=wrong, gap=APART)
+    assert harness.tutor.reading.name == "one_hand_searching"
+    assert harness.tutor.reading.hand == "right"
+    said = climb(harness, 1, gesture=wrong, gap=APART)
+    assert harness.last.tutor_visual == {"kind": "finger_numbers"}, "L1 first"
+    said += climb(harness, 2, gesture=wrong, gap=APART)
+    assert harness.last.tutor_visual == {"kind": "correction",
+                                         "wrong_hand": "right",
+                                         "expected_finger": 7}
+    assert said == []
+
+
+def test_hands_drifting_out_of_frame_get_the_come_here_line() -> None:
+    """Row 6. A visibility failure, and never a word about the pose."""
+    harness = wrong_pose_harness()
+    said = watch(harness, 4.0, gesture=None, hands=0)
+    assert harness.tutor.reading.name == "hands_gone"
+    assert said == [COME_HERE]
+    assert harness.last.tutor_visual == {"kind": "placement_zones"}
+
+
+def test_the_table_never_delays_the_acknowledgement_of_a_correct_pose() -> None:
+    """Whatever the table is in the middle of, a right pose is a yes at once."""
+    harness = wrong_pose_harness()
+    watch(harness, INITIAL_SILENCE + WRONG_POSE_PROMPT + 0.5, gap=APART)
+    assert harness.last.intervention_level == 1, "the table is mid ladder"
+    at = harness.clock.t
+    said = watch(harness, POSE_STABLE + 4 * STEP, gesture=pose(8, 7, True),
+                 gap=TOUCHING)
+    assert said == [ACK]
+    assert harness.clock.t - at <= POSE_STABLE + 5 * STEP
+    assert harness.tutor.reading.name == "correct"
+
+
+def test_a_clock_still_escalates_when_the_reading_is_ambiguous() -> None:
+    """No landmarks, no reading, and the ladder climbs on its clocks alone."""
+    harness = wrong_pose_harness()
+    wrong = pose(8, 9, contact=False)
+    said = watch(harness, INITIAL_SILENCE + 0.5, gesture=wrong, hint=HINT, tips=[])
+    assert harness.tutor.reading.name == "unclear"
+    assert said == []
+    said += climb(harness, 1, gesture=wrong, hint=HINT, tips=[])
+    assert said == [], "the clock climbs, and L1 is still shown rather than said"
+    said += climb(harness, 3, gesture=wrong, hint=HINT, tips=[])
+    assert said == [WRONG_RIGHT]
