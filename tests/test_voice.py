@@ -2010,6 +2010,105 @@ def test_the_tutor_line_is_spoken_once_and_shown_in_the_bubble(page):
     assert errors == []
 
 
+# The server refreshes the lesson many times a second, and every refresh after a tutor
+# line carries tutor_line null with the same tally. Fired from inside the page at the
+# camera rate, so the gaps are the ones a real socket would deliver.
+NULL_REFRESHES = """([message, fps, ms]) => new Promise((done) => {
+  let sent = 0;
+  const timer = setInterval(() => { window.__feed(message); sent += 1; }, 1000 / fps);
+  setTimeout(() => { clearInterval(timer); done(sent); }, ms);
+})"""
+
+
+def refreshes(tab, node: str, fps: int, ms: int, **fields) -> int:
+    return tab.evaluate(NULL_REFRESHES, [state_message(node, **fields), fps, ms])
+
+
+def spoken_texts(tab) -> list[str]:
+    return [u["text"] for u in tab.evaluate("window.__spoken")]
+
+
+PHRASE_WRONG = "Almost. Move your right finger from 9 to 7."
+
+
+@pytest.mark.parametrize("fps", [31, 40, 60])
+def test_a_tutor_line_sent_while_tally_talks_survives_the_null_refreshes(page, fps):
+    """The QA loss: tutor_line null on the next refresh fell back to the unchanged
+    tally, which replaced the waiting line and dropped it from the queue."""
+    context, url = page
+    tab, node, errors = tutor_page(context, url)
+    tab.evaluate("() => { window.__endUpTo = 0; }")      # the first line stays on the air
+    feed(tab, node, state="wrong_pose", tally=PHRASE_WRONG, tutor_line="Take your time.")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    feed(tab, node, state="wrong_pose", tally=PHRASE_WRONG,
+         tutor_line="Find 7 on your right hand.")
+    sent = refreshes(tab, node, fps, 1200, state="wrong_pose", tally=PHRASE_WRONG,
+                     tutor_line=None)
+    assert sent >= fps, f"only {sent} refreshes at {fps} fps"
+    assert spoken_texts(tab) == ["Take your time."], "something talked over the first line"
+
+    tab.evaluate("() => { window.__endUpTo = Infinity; window.__finish(); }")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    tab.wait_for_timeout(1500)
+    assert spoken_texts(tab) == ["Take your time.", "Find 7 on your right hand."]
+    assert tab.text_content("#lesson .say") == "Find 7 on your right hand."
+    assert errors == []
+
+
+@pytest.mark.parametrize("fps", [31, 40, 60])
+def test_a_tutor_line_sent_during_the_pause_is_spoken_after_it(page, fps):
+    context, url = page
+    tab, node, errors = tutor_page(context, url)
+    feed(tab, node, state="wrong_pose", tally=PHRASE_WRONG, tutor_line="Take your time.")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    tab.wait_for_timeout(100)                           # the line is over, the beat runs
+    feed(tab, node, state="wrong_pose", tally=PHRASE_WRONG,
+         tutor_line="Find 7 on your right hand.")
+    refreshes(tab, node, fps, 700, state="wrong_pose", tally=PHRASE_WRONG, tutor_line=None)
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    tab.wait_for_timeout(1500)
+    spoken = tab.evaluate("window.__spoken")
+    assert [u["text"] for u in spoken] == ["Take your time.", "Find 7 on your right hand."]
+    assert spoken[1]["at"] - spoken[0]["at"] >= 900, "the pause was cut short"
+    assert errors == []
+
+
+@pytest.mark.parametrize("change", ["situation", "exercise"])
+def test_a_waiting_tutor_line_is_dropped_once_its_moment_is_gone(page, change):
+    context, url = page
+    tab, node, errors = tutor_page(context, url)
+    tab.evaluate("() => { window.__endUpTo = 0; }")
+    feed(tab, node, state="wrong_pose", tutor_line="Take your time.")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    feed(tab, node, state="wrong_pose", tutor_line="Find 7 on your right hand.")
+    moved = ({"state": "correct_pose"} if change == "situation"
+             else {"state": "exercise_shown", "exercise": "7 x 7", "fact": "7x7"})
+    for _ in range(3):
+        feed(tab, node, **moved)
+    tab.evaluate("() => { window.__endUpTo = Infinity; window.__finish(); }")
+    tab.wait_for_timeout(1800)
+    assert spoken_texts(tab) == ["Take your time."], f"said after the {change} changed"
+    assert errors == []
+
+
+def test_a_line_that_opens_an_exercise_outlives_the_first_pose(page):
+    """A line sent with exercise_shown belongs to the exercise, not to that state: the
+    hands coming up while it waits its turn do not make it obsolete."""
+    context, url = page
+    tab, node, errors = tutor_page(context, url)
+    tab.evaluate("() => { window.__endUpTo = 0; }")
+    feed(tab, node, state="wrong_pose", tutor_line="Take your time.")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    feed(tab, node, state="exercise_shown", exercise="7 x 7", fact="7x7",
+         tutor_line="Try this one on your own.")
+    feed(tab, node, state="waiting_pose", exercise="7 x 7", fact="7x7")
+    feed(tab, node, state="wrong_pose", exercise="7 x 7", fact="7x7")
+    tab.evaluate("() => { window.__endUpTo = Infinity; window.__finish(); }")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    assert spoken_texts(tab) == ["Take your time.", "Try this one on your own."]
+    assert errors == []
+
+
 VISUALS = [
     ({"kind": "pulse_finger", "hand": "right", "finger": 7}, ".practice-overlay .pulse"),
     ({"kind": "correction", "wrong_hand": "right", "expected_finger": 7}, ".practice-overlay .hand-box"),
