@@ -13,10 +13,10 @@ test:
 	$(PY) -m pytest -q
 
 run:            ## live app with the webcam (Axel)
-	$(PY) app/main.py
+	$(PY) app/server.py
 
-demo:           ## replay a recorded window through the real pipeline, no camera, no keys (Axel)
-	$(PY) app/main.py --demo
+demo:           ## the fixed demo/scenario.json sequence through the real pipeline (Axel)
+	$(PY) app/server.py --mock --demo
 
 eval:           ## train evaluation, published to Weave when WANDB_API_KEY is set
 	$(PY) eval/run_eval.py --split train --tag $${TAG:-v0}

@@ -188,7 +188,7 @@ def build_message(update: Update, fingers: list[dict[str, Any]],
         "type": "state",
         "state": update.state,
         "exercise": update.exercise.title,
-        "tally": tally.phrase(moment, context),
+        "tally": PHRASE(moment, context),
         "wrong": [f.as_dict() for f in update.wrong],
         "match": [f.as_dict() for f in update.match],
         "answer": update.answer,
@@ -227,7 +227,7 @@ class Hub:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._subscribers: set[asyncio.Queue] = set()
         self._message: dict[str, Any] = {"type": "state", "state": "intro",
-                                         "exercise": "", "tally": tally.phrase("intro"),
+                                         "exercise": "", "tally": PHRASE("intro"),
                                          "wrong": [], "match": [], "answer": None,
                                          "reasoning": [], "fingers": []}
         self._frame: bytes | None = None
@@ -421,7 +421,7 @@ class Lesson:
             "state": self.scheduler.state.to_dict(),
             "metrics": metrics,
             "summary": summary.to_dict(),
-            "tally": tally.phrase(summary.reason,
+            "tally": PHRASE(summary.reason,
                                   {"tomorrow": _fact_title(summary.tomorrow)}),
         })
         self.node = None
@@ -849,6 +849,24 @@ def mock_loop(lesson: Lesson, stop: threading.Event) -> None:
         time.sleep(1 / 30)
 
 
+# --- tally's voice -----------------------------------------------------------
+
+# What Tally says. Tally's fixed phrases by default, so tests and keyless runs never touch the network.
+PHRASE: Callable[..., str] = tally.phrase
+
+
+def enable_tutor() -> None:
+    """Give Tally W&B Inference lines (lesson/tutor.py) when WANDB_API_KEY is set. Tutor.phrase has the signature
+    of tally.phrase and never blocks: it returns the fixed phrase at once and shows the model's line on the next
+    update of the same moment, each call traced in Weave as tutor.call."""
+    global PHRASE
+    if not os.environ.get("WANDB_API_KEY"):
+        return
+    from lesson.tutor import Tutor
+    PHRASE = Tutor(fallback=tally.phrase).phrase
+    log.info("server: Tally speaks through W&B Inference")
+
+
 # --- weave -----------------------------------------------------------------
 
 
@@ -1047,6 +1065,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     load_env()
+    enable_tutor()
 
     app = create_app(mock=args.mock, camera=args.camera, demo=args.demo)
 
