@@ -181,3 +181,19 @@ test("a perfect boss can cross two levels at once", () => {
 test("the reasoning arithmetic matches the fingers", () => {
   for (let a = 6; a <= 10; a++) for (let b = 6; b <= 10; b++) assert.strictEqual(L.tensOf(a, b) * 10 + L.onesOf(a, b), a * b, `${a}x${b}`);
 });
+
+test("the level ladder the profile draws is complete and its gear sits inside it", () => {
+  assert.strictEqual(L.LEVELS.length, 10);
+  for (const level of L.LEVELS) assert.ok(level.name && Number.isFinite(level.at), JSON.stringify(level));
+  const gear = Object.keys(L.ACCESSORIES).map(Number);
+  assert.strictEqual(gear.length, 5);
+  for (const level of gear) {
+    assert.ok(level >= 1 && level <= L.LEVELS.length, `gear at level ${level}`);
+    assert.ok(L.ACCESSORY_NAMES[L.ACCESSORIES[level]], `no name for ${L.ACCESSORIES[level]}`);
+  }
+  // the bar under every level name has something to fill, top level included
+  for (let xp = 0; xp <= 3600; xp += 60) {
+    const info = L.levelInfo(xp);
+    assert.ok(info.span > 0 && info.percent >= 0 && info.percent <= 100, `${xp} XP`);
+  }
+});

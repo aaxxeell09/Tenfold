@@ -26,31 +26,13 @@
         <input class="field" id="name" type="text" maxlength="14" placeholder="Your first name" aria-label="Your first name" style="text-align:center">
         <button class="btn btn-wide btn-xl" type="submit">Let's go</button>
       </form>
+      <!-- added, the export has no place for it: the children already known on this
+           computer, so a second child comes back in one tap and no spelling -->
+      <div class="known" id="known" hidden></div>
     </div>
   </section>
 
 </div>
-
-<script>
-(function () {
-  var form = document.getElementById('form');
-  var input = document.getElementById('name');
-  form.addEventListener('submit', function (e) {
-    e.preventDefault();
-    var name = (input.value || '').trim();
-    if (name) localStorage.setItem('tenfold.name', name);
-    window.location.href = 'hub.html';
-  });
-  input.focus();
-
-  function fit() {
-    var s = Math.min(1, window.innerWidth / 1194, window.innerHeight / 834);
-    document.documentElement.style.setProperty('--fit', s);
-  }
-  window.addEventListener('resize', fit);
-  fit();
-})();
-</script>
 </section>
 
 <!-- hub.html, taken from the export as it stands -->
@@ -58,13 +40,16 @@
 <div class="frame">
 
   <nav class="minibar" aria-label="More">
-    <a class="profile-btn" href="profile.html" aria-label="Profile"><img src="art/profile-btn.png" alt="Profile"></a>
+    <a class="profile-btn" href="#profile" aria-label="Profile"><img src="art/profile-btn.png" alt="Profile"></a>
   </nav>
 
   <section class="hub">
     <div class="hub-head">
       <img src="logo.png" alt="Nimble, learn math with your hands." class="hub-logo">
       <h1 id="greeting">Ready to practice?</h1>
+      <!-- added, the export has no place for it: several children share one computer,
+           and this is the way back to the welcome screen to change learner -->
+      <button class="switcher" id="switch-child" type="button" data-action="switch">Not you?</button>
     </div>
 
     <div class="doors">
@@ -95,7 +80,7 @@
         </div>
       </div>
 
-      <a class="door door-blue" href="practice.html">
+      <a class="door door-blue" href="#check">
         <div class="door-top">
           <div class="kicker">Camera and voice</div>
           <h2>Practice</h2>
@@ -107,17 +92,11 @@
       </a>
 
     </div>
+
+    <button class="dev-reset" data-action="reset" hidden>Reset this child</button>
   </section>
 
 </div>
-
-<script src="tally.js"></script>
-<script>
-(function () {
-  var name = localStorage.getItem('tenfold.name');
-  if (name) document.getElementById('greeting').textContent = 'Ready to practice, ' + name + '?';
-})();
-</script>
 </section>
 
 <!-- practice.html, taken from the export as it stands -->
@@ -125,13 +104,13 @@
 <div class="frame">
 
   <div class="top">
-    <a class="back" href="hub.html" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
+    <a class="back" href="#home" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
     <div>
       <p class="sub">Practice path</p>
       <h1 id="crumb">Meet your fingers</h1>
     </div>
-    <a class="levelbox" href="profile.html">
-      <div class="avatar" id="av" aria-hidden="true"></div>
+    <a class="levelbox" href="#profile">
+      <div class="avatar" id="av" data-tally="happy" data-outfit aria-hidden="true"></div>
       <div class="lvl">
         <div class="lvl-top"><b id="lvl-name">Finger Counter</b><span id="lvl-xp">60 / 150 XP</span></div>
         <div class="bar2 lvl-bar"><i id="lvl-fill" style="width:40%"></i></div>
@@ -150,7 +129,7 @@
       <div class="mid">
         <div class="metric"><span>Lessons done</span><b id="u-count">2 of 6</b></div>
         <div class="bar2"><i id="u-bar" style="width:33%"></i></div>
-        <div class="tallyspot"><div class="tally-art" aria-hidden="true"></div><p class="line" id="u-say">Your 6 times are next.</p></div>
+        <div class="tallyspot"><div class="tally-art" id="u-tally" data-tally="ready" data-outfit aria-hidden="true"></div><p class="line" id="u-say">Your 6 times are next.</p></div>
       </div>
       <div class="units" id="switch"></div>
     </section>
@@ -161,127 +140,6 @@
 
 </div>
 
-<script src="levels.js"></script>
-<script src="tally.js"></script>
-<script>
-(function () {
-  var units = [
-    {
-      kicker: 'Unit 1', name: 'Meet your fingers', desc: 'Numbers on every fingertip',
-      done: 2, tone: ['var(--green)', 'var(--green-lip)'], say: 'Your 6 times are next.',
-      face: 'happy',
-      nodes: [
-        { t: 'lesson', s: 'done' }, { t: 'lesson', s: 'done' },
-        { t: 'lesson', s: 'current' }, { t: 'chest', s: 'locked' },
-        { t: 'lesson', s: 'locked' }, { t: 'boss', s: 'locked' }
-      ]
-    },
-    {
-      kicker: 'Unit 2', name: 'Count the tens', desc: 'Fingers down make tens',
-      done: 0, tone: ['var(--blue)', 'var(--blue-lip)'], say: 'Finish unit 1 first.',
-      face: 'ready',
-      nodes: [
-        { t: 'lesson', s: 'locked' }, { t: 'lesson', s: 'locked' }, { t: 'lesson', s: 'locked' },
-        { t: 'chest', s: 'locked' }, { t: 'boss', s: 'locked' }
-      ]
-    },
-    {
-      kicker: 'Unit 3', name: 'Big numbers', desc: 'Nine times and ten times',
-      done: 0, tone: ['var(--purple)', '#a95fd8'], say: 'The big ones come last.',
-      face: 'thinking',
-      nodes: [
-        { t: 'lesson', s: 'locked' }, { t: 'lesson', s: 'locked' },
-        { t: 'lesson', s: 'locked' }, { t: 'boss', s: 'locked' }
-      ]
-    }
-  ];
-
-  // percentage positions along the winding path, so six nodes fit one screen
-  // a calm zigzag: top left down to bottom right, no sharp reversals
-  var SPOTS = [
-    [22, 12], [43, 26], [64, 40], [42, 56], [23, 71], [46, 88]
-  ];
-
-  function art(n) {
-    if (n.s === 'locked') return 'art/n-lock.png';
-    if (n.s === 'done') return 'art/n-done.png';
-    if (n.t === 'boss') return 'art/n-boss.png';
-    return 'art/start.png';
-  }
-
-  var at = 0;
-  var path = document.getElementById('path');
-  var sw = document.getElementById('switch');
-
-  function draw() {
-    var u = units[at];
-    var card = document.getElementById('card');
-    document.querySelector('.frame').style.setProperty('--unit', u.tone[0]);
-    document.querySelector('.frame').style.setProperty('--unit-lip', u.tone[1]);
-    card.style.setProperty('--unit', u.tone[0]);
-    card.style.setProperty('--unit-lip', u.tone[1]);
-
-    document.getElementById('crumb').textContent = u.name;
-    document.getElementById('u-kicker').textContent = u.kicker;
-    document.getElementById('u-name').textContent = u.name;
-    document.getElementById('u-desc').textContent = u.desc;
-    document.getElementById('u-count').textContent = u.done + ' of ' + u.nodes.length;
-    document.getElementById('u-bar').style.width = (u.done / u.nodes.length * 100) + '%';
-    document.getElementById('u-say').textContent = u.say;
-
-    sw.innerHTML = units.map(function (x, i) {
-      var state = i === at ? '-on' : '-off';
-      return '<button type="button" data-u="' + i + '" class="' + (i === at ? 'on' : '') + '" aria-label="Unit ' + (i + 1) + '">' +
-             '<img src="art/tile-' + (i + 1) + state + '.png" alt=""></button>';
-    }).join('');
-
-    var spots = u.nodes.map(function (n, i) { return SPOTS[i % SPOTS.length]; });
-    var d = 'M ' + spots.map(function (p) { return p[0] + ' ' + p[1]; }).join(' L ');
-    var html = '<svg class="track" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' +
-      '<path d="' + d + '"></path></svg>';
-
-    u.nodes.forEach(function (n, i) {
-      var p = spots[i];
-      var cls = 'node' + (n.s === 'locked' ? ' locked' : n.s === 'done' ? ' done' : ' current');
-      html += '<button class="' + cls + '" type="button" data-status="' + n.s + '" ' +
-        'style="left:' + p[0] + '%;top:' + p[1] + '%" aria-label="' + (n.s === 'current' ? 'Start' : n.t) + '">' +
-        '<span style="background-image:url(' + art(n) + ')"></span></button>';
-    });
-
-    path.innerHTML = html;
-  }
-
-  sw.addEventListener('click', function (e) {
-    var b = e.target.closest('button');
-    if (!b) return;
-    at = Number(b.dataset.u);
-    draw();
-  });
-
-  path.addEventListener('click', function (e) {
-    var n = e.target.closest('.node');
-    if (!n || n.dataset.status === 'locked') return;
-    window.location.href = 'check.html';
-  });
-
-  function level() {
-    var i = TF.info();
-    document.getElementById('lvl-name').textContent = i.name;
-    document.getElementById('lvl-xp').textContent = i.next ? i.inLevel + ' / ' + i.span + ' XP' : 'Top level';
-    document.getElementById('lvl-fill').style.width = i.percent + '%';
-  }
-  level();
-
-  function fit() {
-    var s = Math.min(1, window.innerWidth / 1194, window.innerHeight / 834);
-    document.documentElement.style.setProperty('--fit', s);
-  }
-  window.addEventListener('resize', fit);
-  fit();
-
-  draw();
-})();
-</script>
 </section>
 
 <!-- check.html, taken from the export as it stands -->
@@ -711,7 +569,7 @@
 <div class="frame" id="frame">
 
   <section class="pane" id="p1">
-    <div class="tally t-done" id="t-done" role="img" aria-label="Tally"></div>
+    <div class="tally t-done" id="t-done" data-tally="happy" data-outfit role="img" aria-label="Tally"></div>
     <h1>Lesson complete!</h1>
     <p class="sub">Your 8 times are getting quick.</p>
     <div class="gain"><svg viewBox="0 0 48 48" aria-hidden="true"><polygon points="27,2 10,27 22,27 19,46 38,19 25,19" fill="#f8c62c"></polygon></svg><span id="gain">0</span> XP</div>
@@ -719,12 +577,12 @@
       <div class="lvlhead"><b id="n1">Finger Counter</b><span id="x1">60 / 150 XP</span></div>
       <div class="track"><i id="f1"></i></div>
     </div>
-    <div class="btn-row"><a class="btn2" href="practice.html" id="cont1">Continue</a></div>
+    <div class="btn-row"><a class="btn2" href="#practice" id="cont1" data-action="home">Continue</a></div>
   </section>
 
   <section class="pane in" id="p2">
     <div class="confetti" id="confetti"></div>
-    <div class="tally t-up" id="t-up" role="img" aria-label="Tally"></div>
+    <div class="tally t-up" id="t-up" data-tally="happy" data-outfit role="img" aria-label="Tally"></div>
     <div class="newlevel">Level up</div>
     <h1 id="n2">Tip Toucher</h1>
     <p class="earned">New for Tally: <b id="acc">glasses</b></p>
@@ -733,104 +591,23 @@
       <div class="track"><i id="f2" style="width:0"></i></div>
     </div>
     <div class="btn-row">
-      <a class="btn2" href="practice.html">Continue</a>
-      <a class="btn2 ghost" href="profile.html">See Tally</a>
+      <a class="btn2" href="#practice" data-action="home">Continue</a>
+      <a class="btn2 ghost" href="#profile" data-action="profile">See Tally</a>
     </div>
   </section>
 
 </div>
 
-<script src="levels.js"></script>
-<script>
-(function () {
-  var q = new URLSearchParams(location.search);
-  var GAIN = Number(q.get('gain')) || 30;
-  // ?levelup=1 starts the lesson just under the next level that earns an accessory
-  var before = TF.xp();
-  if (q.get('levelup')) {
-    var cur = TF.info(before).level;
-    var target = Object.keys(TF.ACC).map(Number).filter(function (l) { return l > cur; })[0] || cur + 1;
-    before = (target - 1) * TF.SPAN - 20;
-  }
-  var after = before + GAIN;
-  var b = TF.info(before), a = TF.info(after);
-
-  document.getElementById('n1').textContent = b.name;
-  document.getElementById('x1').textContent = b.inLevel + ' / ' + b.span + ' XP';
-  document.getElementById('f1').style.width = b.percent + '%';
-
-  // XP counts up, then the bar fills to where the lesson leaves it
-  var DUR = 1100, t0 = Date.now(), settled = false;
-  function paint() {
-    var k = Math.min(1, (Date.now() - t0) / DUR);
-    document.getElementById('gain').textContent = Math.round(GAIN * k);
-    if (k < 1) { requestAnimationFrame(paint); return; }
-    settle();
-  }
-  function settle() {
-    if (settled) return;
-    settled = true;
-    document.getElementById('gain').textContent = GAIN;
-    var sameLevel = a.level === b.level;
-    document.getElementById('f1').style.width = (sameLevel ? a.percent : 100) + '%';
-    document.getElementById('x1').textContent = (sameLevel ? a.inLevel : b.span) + ' / ' + b.span + ' XP';
-    if (!sameLevel) setTimeout(levelUp, 1000);
-  }
-  requestAnimationFrame(paint);
-  setTimeout(settle, DUR + 220);
-
-  function levelUp() {
-    document.getElementById('p1').classList.add('out');
-    var p2 = document.getElementById('p2');
-    p2.classList.add('show');
-    document.getElementById('n2').textContent = a.name;
-    document.getElementById('n3').textContent = a.name;
-    document.getElementById('x2').textContent = a.inLevel + ' / ' + a.span + ' XP';
-    setTimeout(function () { document.getElementById('f2').style.width = a.percent + '%'; }, 350);
-
-    var earned = TF.earnedAt(a.level);
-    var line = document.querySelector('.earned');
-    if (earned) document.getElementById('acc').textContent = earned === 'hat' ? 'wizard hat' : earned;
-    else line.style.display = 'none';
-
-    confetti();
-  }
-
-  function confetti() {
-    var host = document.getElementById('confetti');
-    var colors = ['#2563d9', '#36a9f5', '#2fae82', '#ef5a4f', '#f8c62c', '#8b6ee0'];
-    for (var i = 0; i < 46; i++) {
-      var bit = document.createElement('i');
-      bit.style.left = (Math.random() * 100) + '%';
-      bit.style.background = colors[i % colors.length];
-      bit.style.setProperty('--dx', (Math.random() * 220 - 110) + 'px');
-      bit.style.setProperty('--rot', (Math.random() * 900 - 450) + 'deg');
-      bit.style.animationDuration = (2.4 + Math.random() * 1.8) + 's';
-      bit.style.animationDelay = (Math.random() * 1.1) + 's';
-      host.appendChild(bit);
-    }
-  }
-
-  if (!q.get('levelup')) TF.setXp(after);
-
-  function fit() {
-    var s = Math.min(1, window.innerWidth / 1194, window.innerHeight / 834);
-    document.documentElement.style.setProperty('--fit', s);
-  }
-  window.addEventListener('resize', fit);
-  fit();
-})();
-</script>
 </section>
 
 <!-- profile.html, taken from the export as it stands -->
 <section class="view view-profile" id="profile" hidden>
 <div class="frame">
 
-  <a class="back" href="hub.html" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
+  <a class="back" href="#home" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
 
   <section class="left">
-    <div class="stage" role="img" aria-label="Tally"></div>
+    <div class="stage" id="pf-tally" data-tally="happy" data-outfit role="img" aria-label="Tally"></div>
 
     <p class="lsub">Level <span id="lnum">2</span> of 10</p>
     <h1 class="lname" id="lname">Finger Counter</h1>
@@ -853,55 +630,17 @@
 
 </div>
 
-<script src="levels.js"></script>
-<script>
-(function () {
-  var i = TF.info();
-  document.getElementById('lnum').textContent = i.level;
-  document.getElementById('lname').textContent = i.name;
-  document.getElementById('lxp').textContent = i.next ? i.inLevel + ' / ' + i.span : 'Complete';
-  document.getElementById('lfill').style.width = i.percent + '%';
-  document.getElementById('nextline').textContent = i.next ? 'Next: ' + i.next : 'Top level reached.';
-
-  var names = { glasses: 'Glasses', headband: 'Headband', hat: 'Wizard hat', cape: 'Cape', crown: 'Crown' };
-
-  // the gear row: earned items in colour, the rest waiting
-  var worn = i.accessories.split(' ').filter(Boolean);
-  document.getElementById('wardrobe').innerHTML = Object.keys(TF.ACC).map(function (lvl) {
-    var a = TF.ACC[lvl];
-    var on = worn.indexOf(a) > -1;
-    return '<span class="slot' + (on ? ' on' : '') + '" title="' + names[a] + (on ? '' : ' at level ' + lvl) + '">' +
-           '<img src="art/acc-' + a + '.png" alt="' + names[a] + '"></span>';
-  }).join('');
-  var check = '<span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true">' +
-    '<path d="M 5 12.5 L 9.5 17 L 19 7" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>';
-
-  document.getElementById('list').innerHTML = TF.LEVELS.map(function (name, k) {
-    var lvl = k + 1;
-    var cls = lvl < i.level ? 'got' : lvl === i.level ? 'now' : '';
-    var acc = TF.ACC[lvl];
-    var item = acc ? '<img class="item" src="art/acc-' + acc + '.png" alt="' + names[acc] + '" title="' + names[acc] + '">' : '';
-    var tail = lvl === i.level ? '<span class="tag">You are here</span>' + check
-             : lvl < i.level ? check
-             : '<span class="pending"></span>';
-    return '<div class="row ' + cls + '"><span class="no">' + lvl + '</span>' +
-           '<span class="nm">' + name + '</span>' +
-           '<span class="right-side">' + item + tail + '</span></div>';
-  }).join('');
-
-  function fit() {
-    var s = Math.min(1, window.innerWidth / 1194, window.innerHeight / 834);
-    document.documentElement.style.setProperty('--fit', s);
-  }
-  window.addEventListener('resize', fit);
-  fit();
-})();
-</script>
 </section>
 
 <!-- learn: no export page, the practice markup is reused as a read only showcase -->
-<section class="view view-learn" id="learn" hidden></section>
+<section class="view view-learn view-practice" id="learn" hidden></section>
+
 <div class="toast" id="toast" role="status"></div>
+<!-- added, the export has no place for it: Tally can be silenced from any screen -->
+<button class="mute" id="mute" type="button" data-action="mute" aria-label="Mute Tally" aria-pressed="false">
+  <svg class="on" viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-sound"></use></svg>
+  <svg class="off" viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-muted"></use></svg>
+</button>
 <script src="levels.js?v=7"></script>
 <script src="tally.js?v=7"></script>
 <script src="app.js?v=7"></script>
