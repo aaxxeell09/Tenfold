@@ -232,8 +232,15 @@ LINE_KEYS = (
     "visibility_one", "visibility_keep", "wrong_right", "wrong_left",
     "wrong_both", "not_touching", "show", "pose_ready", "count_tens",
     "multiply_above", "wrong_answer_1", "wrong_answer_2", "wrong_answer_3",
-    "rescue", "success", "autonomous",
+    "rescue", "success", "autonomous", "correction_neutral",
 )
+# The correction that names no hand. "Your right hand is right" is only said of
+# a hand the tutor is sure about: the classifier has read the expected finger
+# on it for pose_confirm_frames observations in a row, every one of them above
+# PRAISE_MIN_CONFIDENCE. Anything less and the child hears this line instead,
+# because praise for a hand that is not right teaches the wrong thing twice.
+NEUTRAL_LINE_KEY = "correction_neutral"
+PRAISE_MIN_CONFIDENCE = 0.8
 # One line per wrong answer on the same exercise, the last one repeating.
 WRONG_ANSWER_KEYS = ("wrong_answer_1", "wrong_answer_2", "wrong_answer_3")
 # The two beats of a confirmed pose: the acknowledgement, said at once and
@@ -756,6 +763,12 @@ class Tutor:
         self._hands_since = 0.0
         self._contact_ok = True
         self._contact_frames = 0
+        # Per hand, the finger the classifier last read on it and how many
+        # observations in a row it has read that same finger above
+        # PRAISE_MIN_CONFIDENCE. What _correction_line praises a hand on.
+        self._hand_streak: dict[str, tuple[int | None, int]] = {
+            "left": (None, 0), "right": (None, 0)}
+        self._hand_confidence = 0.0
 
         # session and node
         self._node: Any = None
@@ -1117,6 +1130,7 @@ class Tutor:
         self._update_hands(obs.hands_seen, moment)
         self._update_contact(obs)
         self._update_pose(obs, moment)
+        self._update_hand_streaks(obs.gesture)
         # The acknowledgement reads the raw clock, never a pedagogical one: the
         # child who just reached the pose is moving, and movement must not hold
         # back the one line that says the pose is right.
@@ -1669,15 +1683,77 @@ class Tutor:
         return self._correction_line()
 
     def _correction_line(self) -> str | None:
-        """Name the hand, or the two hands, holding a finger nobody asked for."""
+        """Name the hand, or the two hands, holding a finger nobody asked for.
+
+        The one hand correction praises the other hand by name, and it may only
+        do so when that hand is sure: the same finger the exercise wants, read
+        pose_confirm_frames observations in a row, above PRAISE_MIN_CONFIDENCE
+        every time. Otherwise the neutral correction is said, and no hand is
+        called good. Each choice is one "praise" event in the log.
+        """
         left_wrong, right_wrong = self._wrong_hands()
         if left_wrong and right_wrong:
             return self._render("wrong_both", a=self._a, b=self._b)
         if right_wrong:
-            return self._render("wrong_right", b=self._b)
+            key = self._praise_key("left", "wrong_right")
+            return self._render(key, b=self._b) if key == "wrong_right" else self._render(key)
         if left_wrong:
-            return self._render("wrong_left", a=self._a)
+            key = self._praise_key("right", "wrong_left")
+            return self._render(key, a=self._a) if key == "wrong_left" else self._render(key)
         return self._render("hesitation_1")
+
+    def _praise_key(self, hand: str, praising_key: str) -> str:
+        """The line key for a one hand correction, and the praise decision logged.
+
+        hand is the hand the praising line would call good. It is called good
+        only when its streak of sure readings of the expected finger is at
+        least pose_confirm_frames long; otherwise NEUTRAL_LINE_KEY is chosen.
+        """
+        left_wants, right_wants = self._expected_numbers()
+        expected = left_wants if hand == "left" else right_wants
+        finger_read, streak = self._hand_streak[hand]
+        frames = int(self.effective("pose_confirm_frames"))
+        matched = streak if finger_read == expected else 0
+        praised = matched >= frames
+        key = praising_key if praised else NEUTRAL_LINE_KEY
+        self._write({
+            "kind": "praise",
+            "ts": _iso(self._utc()),
+            "learner_id": self.learner_id,
+            "exercise": self._title,
+            "hand": hand,
+            "finger_read": finger_read,
+            "expected": expected,
+            "confidence": round(self._hand_confidence, 3),
+            "frames_matched": matched,
+            "praised": praised,
+            "line_key": key,
+        })
+        return key
+
+    def _update_hand_streaks(self, gesture: GestureState | None) -> None:
+        """Count, per hand, the sure readings in a row of one finger number.
+
+        A streak grows on an observation that reads the same finger as the last
+        one with confidence above PRAISE_MIN_CONFIDENCE. A different finger, an
+        unreadable hand or an unsure classifier breaks it: the count goes back
+        to zero, so a hand is never praised on readings nobody would bet on.
+        """
+        sure = (gesture is not None and gesture.method == "6-10"
+                and gesture.confidence > PRAISE_MIN_CONFIDENCE)
+        self._hand_confidence = 0.0 if gesture is None else float(gesture.confidence)
+        for hand in ("left", "right"):
+            finger = None
+            if gesture is not None and gesture.method == "6-10":
+                value = gesture.left if hand == "left" else gesture.right
+                finger = None if value is None else int(value)
+            previous, count = self._hand_streak[hand]
+            if finger is None or not sure:
+                self._hand_streak[hand] = (finger, 0)
+            elif finger == previous and count > 0:
+                self._hand_streak[hand] = (finger, count + 1)
+            else:
+                self._hand_streak[hand] = (finger, 1)
 
     def _wrong_hands(self) -> tuple[bool, bool]:
         """Which hands hold a finger the exercise did not ask for.
@@ -2447,6 +2523,8 @@ class Tutor:
         self._raw_misses = 0
         self._raw_frames = 0
         self._gone_since = None
+        self._hand_streak = {"left": (None, 0), "right": (None, 0)}
+        self._hand_confidence = 0.0
 
     def _decision(self, line: str | None = None, cuts: bool = False) -> Decision:
         # The beat rides exactly one decision, the one that carries the success
