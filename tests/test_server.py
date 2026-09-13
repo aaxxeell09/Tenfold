@@ -8,14 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+from datetime import timedelta
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from app import server
-from classifier.schema import HandFrame, Window
+from classifier.schema import GestureState, HandFrame, Window
 from lesson import tally
 from lesson.engine import Engine, Exercise
+from lesson.scheduler import ScriptedScheduler, now_utc
 
 
 def run(coroutine):
@@ -42,7 +45,9 @@ def test_build_message_carries_everything_the_page_renders():
 
     assert set(message) == {"type", "state", "exercise", "tally", "wrong", "match",
                             "answer", "reasoning", "fingers", "reason", "reaction",
-                            "hint", "hint_level", "fact", "session", "node", "demo"}
+                            "hint", "hint_level", "hint_auto", "pose_slip",
+                            "fact", "session", "node", "demo"}
+    assert message["pose_slip"] is False and message["hint_auto"] is False
     assert message["state"] == "wrong_pose"
     assert message["exercise"] == "8 x 7"
     assert message["wrong"] == [{"hand": "right", "number": 9}]
@@ -308,3 +313,449 @@ def test_a_node_scopes_the_session_to_its_pairs_and_length():
             await client.close()
             await srv.close()
     run(scenario())
+
+
+# --- the camera thread: a failure has to reach the page ----------------------
+
+
+class FakeCamera:
+    """A capture that answers a fixed read, and remembers being released."""
+
+    def __init__(self, read: tuple[bool, object]) -> None:
+        self._read = read
+        self.calls = 0
+        self.released = False
+
+    def read(self):
+        self.calls += 1
+        return self._read
+
+    def release(self) -> None:
+        self.released = True
+
+
+class FakeDetector:
+    def __init__(self, num_hands: int = 2) -> None:
+        self.closed = False
+
+    def detect(self, frame):
+        return []
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _blind(window):
+    return GestureState(method="unknown", confidence=0.0)
+
+
+def test_a_perception_failure_releases_the_camera_and_tells_the_page(monkeypatch):
+    """The classifier or the model download raising used to kill the thread."""
+    import app.camera as camera_module
+    import classifier.loader as loader
+
+    camera = FakeCamera((True, None))
+    monkeypatch.setattr(camera_module, "open_camera", lambda index=None: (camera, 0))
+
+    def explode():
+        raise RuntimeError("rules.py does not import")
+
+    monkeypatch.setattr(loader, "load_classifier", explode)
+
+    lesson = _lesson()
+    stop = threading.Event()
+    server.camera_loop(lesson, stop, None)
+
+    assert camera.released, "the webcam has to be given back on any failure"
+    assert stop.is_set()
+    assert lesson.hub.message["tally"] == server.CAMERA_LOST
+
+
+def test_a_camera_that_stops_delivering_gives_up_instead_of_spinning(monkeypatch):
+    import app.camera as camera_module
+    import app.landmarks as landmarks
+    import classifier.loader as loader
+
+    camera = FakeCamera((False, None))
+    monkeypatch.setattr(camera_module, "open_camera", lambda index=None: (camera, 0))
+    monkeypatch.setattr(landmarks, "HandDetector", FakeDetector)
+    monkeypatch.setattr(loader, "load_classifier", lambda: _blind)
+    monkeypatch.setattr(server, "READ_FAILURES_ALLOWED", 5)
+    monkeypatch.setattr(server, "READ_RETRY_S", 0.0)
+
+    lesson = _lesson()
+    stop = threading.Event()
+    server.camera_loop(lesson, stop, None)
+
+    assert camera.calls == 5, "a failing read is bounded, never a busy loop"
+    assert camera.released and stop.is_set()
+    assert lesson.hub.message["tally"] == server.CAMERA_LOST
+
+
+def test_no_camera_says_so_on_the_page_instead_of_loading_for_ever(monkeypatch):
+    import app.camera as camera_module
+
+    def no_camera(index=None):
+        raise camera_module.CameraError("no camera produced a lit image")
+
+    monkeypatch.setattr(camera_module, "open_camera", no_camera)
+
+    lesson = _lesson()
+    stop = threading.Event()
+    stop.set()                      # the fallback loop returns straight away
+    server.camera_loop(lesson, stop, None)
+
+    assert lesson.hub.message["tally"] == server.CAMERA_NONE
+    assert lesson.hub.frame(), "the fallback still gives the page a picture"
+
+
+# --- the hub ----------------------------------------------------------------
+
+
+def test_a_stalled_browser_loses_refreshes_but_never_the_finish_screen():
+    hub = server.Hub()
+    queue = hub.subscribe()
+    for index in range(12):
+        hub._publish({"type": "state", "n": index})
+    assert queue.qsize() == 9, "state refreshes stop piling up"
+
+    hub._publish({"type": "node_end", "node_id": "u1-l1"})
+    drained = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert drained[-1]["type"] == "node_end", "the finish screen is never dropped"
+
+
+def test_publishing_after_the_loop_closed_is_a_no_op():
+    """The Ctrl+C race: the camera thread publishes into a loop that is gone."""
+    loop = asyncio.new_event_loop()
+    hub = server.Hub()
+    hub.bind(loop)
+    loop.close()
+    hub.publish({"type": "state", "state": "intro"})
+
+
+def test_a_socket_that_dies_on_its_first_send_leaves_no_queue_behind(monkeypatch):
+    def boom(self):
+        raise ConnectionResetError("the browser went away")
+
+    monkeypatch.setattr(server.Hub, "message", property(boom))
+
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            ws = await client.ws_connect("/ws")
+            await asyncio.wait_for(ws.receive(), timeout=5)
+            hub = app[server.LESSON_KEY].hub
+            assert hub._subscribers == set(), "the queue went with the socket"
+            await ws.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_a_closed_socket_is_cleaned_up_and_the_next_one_still_works():
+    async def scenario():
+        app = server.create_app(mock=True)
+        hub = app[server.LESSON_KEY].hub
+        srv, client = await _client(app)
+        try:
+            first = await client.ws_connect("/ws")
+            await first.send_json({"type": "hello", "state": None})
+            await _await_fact(first)
+            await first.close()
+            await _until(lambda: not hub._subscribers)
+            assert hub._subscribers == set()
+
+            second = await client.ws_connect("/ws")
+            message = await asyncio.wait_for(second.receive_json(), timeout=5)
+            assert message["type"] == "state"
+            await second.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+# --- one session at a time ---------------------------------------------------
+
+
+def test_a_second_tab_cannot_take_the_running_node_and_a_reload_can():
+    first_node = {"id": "u1-l1", "kind": "lesson", "pairs": [[6, 6], [7, 7]]}
+    second_node = {"id": "u1-l2", "kind": "lesson", "pairs": [[6, 7]]}
+
+    async def scenario():
+        app = server.create_app(mock=True)
+        lesson = app[server.LESSON_KEY]
+        srv, client = await _client(app)
+        try:
+            first = await client.ws_connect("/ws")
+            await first.send_json({"type": "start_node", "state": None, "node": first_node})
+            await _await(first, lambda m: m.get("fact") and m.get("node") == "u1-l1")
+
+            second = await client.ws_connect("/ws")
+            await second.send_json({"type": "start_node", "state": None, "node": second_node})
+            refused = await _await(second, lambda m: m.get("tally") == server.ALREADY_PLAYING)
+            assert refused["node"] == "u1-l2", "the refusal reaches the tab that asked"
+            assert lesson.node["id"] == "u1-l1", "the running lesson is untouched"
+
+            # the first tab goes away, so a reload may take the session
+            await first.close()
+            await _until(lambda: lesson.owner is None)
+            await second.send_json({"type": "start_node", "state": None, "node": second_node})
+            started = await _await(second, lambda m: m.get("fact") and m.get("node") == "u1-l2")
+            assert started["node"] == "u1-l2"
+            await second.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+async def _await(ws, wanted, timeout: float = 8.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        message = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
+        if wanted(message):
+            return message
+    raise AssertionError("the message never arrived")
+
+
+async def _until(ready, timeout: float = 5.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline and not ready():
+        await asyncio.sleep(0.02)
+
+
+# --- the lesson, without a socket -------------------------------------------
+
+
+def _lesson(demo: bool = False) -> server.Lesson:
+    lesson = server.Lesson(Engine(), server.Hub(), server.make_scheduler)
+    lesson.demo_available = demo
+    lesson.start()
+    return lesson
+
+
+def _node(node_id: str = "u1-l1", pairs=((6, 6),), count: int = 1) -> dict:
+    return {"id": node_id, "kind": "lesson",
+            "pairs": [list(pair) for pair in pairs], "count": count}
+
+
+def test_hello_starts_a_session_again_after_a_node_has_been_played():
+    """Outcomes are never emptied, so hello used to be refused for ever."""
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "node": _node(), "state": None})
+    lesson.command({"type": "quit"})
+    lesson.command({"type": "hello", "state": None})
+    assert lesson.running and lesson.pick is not None
+
+
+def test_a_browser_with_no_record_gets_a_fresh_learner():
+    """A null state is a child who has never played, not the previous child."""
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "node": _node(), "state": None})
+    lesson.command({"type": "next"})
+    first = lesson.learner
+    assert first.math, "the first child left a record"
+
+    lesson.command({"type": "start_node", "node": _node(), "state": None})
+    assert lesson.learner.learner_id != first.learner_id
+    assert lesson.learner.math == {} and lesson.learner.sessions == 1
+
+
+def _poses(lesson) -> tuple[GestureState, GestureState]:
+    """A wrong finger and the right one, for whichever exercise is up."""
+    pick = lesson.pick
+    wrong_finger = 7 if pick.right != 7 else 8
+    return (GestureState(method="6-10", left=pick.left, right=wrong_finger,
+                         contact=False, confidence=0.9),
+            GestureState(method="6-10", left=pick.left, right=pick.right,
+                         contact=True, confidence=0.95))
+
+
+def test_a_finger_fixed_inside_the_grace_is_not_a_pose_error():
+    """Bringing the hands up shows a wrong finger on nearly every exercise."""
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "node": _node(), "state": None})
+    pick = lesson.pick
+    wrong, right = _poses(lesson)
+    for now in (0.0, 0.4, 1.0):
+        lesson.observe(wrong, [], 2, now)
+    assert lesson.pose_error is False, "the child is still inside the grace"
+    assert lesson.hub.message["pose_slip"] is False
+    for now in (1.5, 2.0):
+        lesson.observe(right, [], 2, now)
+    lesson.command({"type": "check", "value": pick.result})
+
+    outcome = lesson.scheduler.outcomes[0]
+    assert outcome.correct is True and outcome.pose_error is False
+    assert lesson.learner.math[pick.fact].mastery == 1, "the fact was learned"
+    assert lesson.learner.pose[pick.pose].mastery == 1, "the pose was held in the end"
+    assert lesson.scheduler.consecutive_errors == 0, "no rescue, no retry queue"
+    assert lesson.scheduler.retry_queue == []
+
+
+def test_a_wrong_pose_held_past_the_grace_is_a_pose_error_on_the_right_hand():
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "node": _node(), "state": None})
+    pick = lesson.pick
+    wrong, right = _poses(lesson)
+    lesson.observe(wrong, [], 2, 0.0)
+    lesson.observe(wrong, [], 2, 0.4)                    # Tally names the finger
+    lesson.observe(wrong, [], 2, 0.4 + server.POSE_GRACE_SECONDS - 0.1)
+    assert lesson.pose_error is False, "the grace runs from the correction"
+    lesson.observe(wrong, [], 2, 0.4 + server.POSE_GRACE_SECONDS)
+    assert lesson.pose_error is True
+    assert lesson.hub.message["pose_slip"] is True, "the page reads the slip here"
+
+    for now in (10.0, 10.4):
+        lesson.observe(right, [], 2, now)
+    lesson.command({"type": "check", "value": pick.result})
+
+    outcome = lesson.scheduler.outcomes[0]
+    assert outcome.correct is False, "the pose was wrong for four seconds"
+    assert outcome.pose_error is True
+    assert outcome.wrong_hand == "wrong_right_finger", "which hand, from the engine"
+    assert lesson.learner.error_profile["wrong_right"] == 1
+    assert lesson.learner.pose[pick.pose].mastery == 0
+
+
+def _recorded(lesson) -> list[dict]:
+    """Every message the lesson publishes from here on, in order."""
+    said: list[dict] = []
+    publish = lesson.hub.publish
+
+    def record(message: dict) -> None:
+        said.append(message)
+        publish(message)
+
+    lesson.hub.publish = record
+    return said
+
+
+def test_tally_prompts_at_five_seconds_and_ghosts_the_finger_at_ten():
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=2)})
+    wrong, _ = _poses(lesson)
+    said = _recorded(lesson)
+    lesson.started_at = 0.0                  # drive the exercise clock
+    lesson.observe(wrong, [], 2, 0.0)
+    lesson.observe(wrong, [], 2, 0.4)
+    assert lesson.hint_level == 0
+
+    lesson.observe(wrong, [], 2, 5.0)
+    assert lesson.hint_level == 1
+    assert lesson.hub.message["tally"] == tally.phrase(
+        "hint_1", {"hint": lesson.hub.message["hint"]})
+
+    lesson.observe(wrong, [], 2, 7.0)        # said once, never repeated
+    assert lesson.hint_level == 1
+
+    lesson.observe(wrong, [], 2, 10.0)
+    assert lesson.hint_level == 2, "the page draws the ghost finger from here"
+    assert lesson.hub.message["hint"]["hand"] and lesson.hub.message["hint"]["move_to"]
+    assert [m["reaction"] for m in said if m["reaction"]] == ["hint_1", "hint_2"]
+    assert lesson.hub.message["hint_auto"] is True, "the clock raised it, not the child"
+
+    # a new exercise starts both clocks again
+    lesson.command({"type": "next"})
+    assert lesson.hint_level == 0 and lesson.hub.message["hint_auto"] is False
+
+
+def test_a_hint_the_child_asked_for_is_not_an_automatic_one():
+    """Only help the child asked for costs the first try bonus on the page."""
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "node": _node(), "state": None})
+    wrong, _ = _poses(lesson)
+    lesson.started_at = 0.0
+    lesson.observe(wrong, [], 2, 0.0)
+    lesson.observe(wrong, [], 2, 0.4)
+
+    lesson.command({"type": "hint"})
+    assert lesson.hint_level == 1
+    assert lesson.hub.message["hint_auto"] is False
+    assert lesson.hub.message["hint_level"] == 1
+
+    # the ten second ghost is the clock's doing, and says so
+    lesson.observe(wrong, [], 2, 10.0)
+    assert lesson.hint_level == 2
+    assert lesson.hub.message["hint_auto"] is True
+
+
+def test_a_session_is_a_sitting_not_a_node():
+    lesson = _lesson()
+    state = None
+    for index in (1, 2, 3):
+        lesson.command({"type": "start_node", "node": _node(f"u1-l{index}"), "state": state})
+        assert lesson.scheduler.session == 1, "every node of one visit is one session"
+        lesson.command({"type": "next"})
+        state = lesson.learner.to_dict()
+    assert lesson.learner.sessions == 1
+
+    # coming back later is a new sitting, and that one is a new session
+    lesson.sitting_at = now_utc() - timedelta(seconds=server.SITTING_GAP_S + 1)
+    lesson.command({"type": "start_node", "node": _node(), "state": state})
+    assert lesson.scheduler.session == 2
+
+
+# --- demo mode ---------------------------------------------------------------
+
+
+DEMO_NODE = _node("u2-l1", pairs=((6, 8), (8, 6), (7, 8)), count=5)
+
+
+def test_the_demo_stays_inside_the_node_it_is_played_in():
+    lesson = _lesson(demo=True)
+    lesson.command({"type": "start_node", "node": DEMO_NODE, "state": None})
+    assert isinstance(lesson.scheduler, ScriptedScheduler)
+
+    facts = []
+    while lesson.running and len(facts) < 10:
+        facts.append(lesson.pick.fact)
+        lesson.command({"type": "next"})
+
+    assert len(facts) == 5, f"a five question node plays five exercises: {facts}"
+    assert facts[0] == "7x8", "the stage opener is still 8 x 7"
+    outside = [fact for fact in facts if fact not in {"6x8", "7x8"}]
+    assert len(outside) <= 1, f"at most one review from outside the node: {facts}"
+    assert not lesson.running, "the node ends itself"
+
+
+def test_the_scripted_demo_can_be_rehearsed_more_than_once():
+    """demo_played used to burn the script on the first node of the process."""
+    lesson = _lesson(demo=True)
+    for _ in range(2):
+        lesson.command({"type": "start_node", "node": DEMO_NODE, "state": None})
+        assert isinstance(lesson.scheduler, ScriptedScheduler)
+        assert lesson.pick.fact == "7x8"
+        for _ in range(10):
+            if not lesson.running:
+                break
+            lesson.command({"type": "next"})
+        assert not lesson.running
+
+    # the start check is one exercise on 6x6 and never plays the script
+    lesson.command({"type": "start_node", "state": None, "node": {
+        "id": "check", "kind": "check", "pairs": [[6, 6]], "count": 1}})
+    assert not isinstance(lesson.scheduler, ScriptedScheduler)
+
+
+def test_a_broken_demo_scenario_falls_back_to_the_live_scheduler(monkeypatch, tmp_path):
+    from lesson.scheduler import DEFAULT_SCENARIO, Scheduler
+
+    scenario_path = tmp_path / DEFAULT_SCENARIO
+    scenario_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(server, "REPO_ROOT", tmp_path)
+
+    scenario_path.write_text("{not json at all", encoding="utf-8")
+    assert type(server.make_scheduler(demo=True)) is Scheduler
+
+    scenario_path.write_text('{"exercises": [{"left": 6}]}', encoding="utf-8")
+    assert type(server.make_scheduler(demo=True)) is Scheduler
+
+    scenario_path.unlink()
+    assert type(server.make_scheduler(demo=True)) is Scheduler

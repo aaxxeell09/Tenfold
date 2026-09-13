@@ -1,18 +1,18 @@
 {
   "name": "three minute demo",
-  "comment": "Fixed sequence for the stage. SPEC.md section 14 beats: the opener, the deliberate wrong finger, a break, the retry, then two new facts.",
+  "comment": "Fixed sequence for the stage. SPEC.md section 14 beats: the opener, the deliberate wrong finger, a break, the retry, then the last one. It is played inside the node the showcase opens, u2-l1 Hello eight, pairs 6x8 8x6 7x8, five questions. So the five that play are the node's own two facts, plus 6x6 as the one review from outside a node is allowed, and step five is the node's other orientation of 6x8, a pose the child has not held yet. The sixth step is reached only by a client with no node, which fixes no length.",
   "onboarding": false,
   "exercises": [
     {"fact": "7x8", "left": 8, "right": 7, "reason": "review"},
-    {"fact": "7x9", "left": 9, "right": 7, "reason": "next_new", "is_new": true},
-    {"fact": "6x10", "left": 10, "right": 6, "reason": "confidence"},
+    {"fact": "6x8", "left": 6, "right": 8, "reason": "next_new", "is_new": true},
+    {"fact": "6x6", "left": 6, "right": 6, "reason": "confidence"},
     {"fact": "7x8", "left": 7, "right": 8, "reason": "retry"},
-    {"fact": "9x9", "left": 9, "right": 9, "reason": "next_new", "is_new": true},
+    {"fact": "6x8", "left": 8, "right": 6, "reason": "next_new"},
     {"fact": "10x10", "left": 10, "right": 10, "reason": "level_up"}
   ],
   "end": {
     "reason": "end_success",
-    "opened": ["7x9", "9x9"],
+    "opened": ["6x8"],
     "became_solid": ["7x8"],
     "tomorrow": "6x7"
   }
