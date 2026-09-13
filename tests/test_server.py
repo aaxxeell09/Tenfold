@@ -2031,3 +2031,29 @@ def test_a_bad_params_file_keeps_the_engine_on_its_defaults(monkeypatch, caplog)
     monkeypatch.setattr(server, "load_tutor_params",
                         lambda: {"global": {"pose_confirm_ms": 300}})
     assert server.engine_from_params().pose_confirm_ms == 300
+
+
+def test_the_mock_never_skips_a_scripted_step_before_its_pose():
+    """make demo lost one of its five steps at random: the skip fired on the
+    wall clock alone, whenever the node opened mid cycle. Under a script the
+    mock waits for the pose; on a live scheduler it moves on as before."""
+    scripted = _lesson(demo=True)
+    scripted.command({"type": "start_node", "state": None,
+                      "node": {"id": "u1-l1", "kind": "lesson", "pairs": [[6, 6]]}})
+    assert isinstance(scripted.scheduler, ScriptedScheduler)
+    first = scripted.pick
+    stop = threading.Event()
+    monkeypatch_step = server.MOCK_STEP_S
+    try:
+        server.MOCK_STEP_S = 0.05
+        worker = threading.Thread(target=server.mock_loop, args=(scripted, stop), daemon=True)
+        worker.start()
+        time.sleep(0.45)
+    finally:
+        stop.set()
+        worker.join(timeout=2.0)
+        server.MOCK_STEP_S = monkeypatch_step
+    served = [pick.fact for pick in scripted.scheduler.history]
+    assert served[0] == first.fact
+    assert served == [pick.fact for pick in scripted.scheduler.script[:len(served)]], \
+        "every scripted step was served in order, none eaten"

@@ -1739,12 +1739,15 @@ def mock_loop(lesson: Lesson, stop: threading.Event) -> None:
             # The correct pose latches the lesson, so move on before replaying it.
             # Never inside the start check: it is one exercise that waits for the
             # child's answer, and skipping it would end the check on its own.
-            # Nor under --demo: the scripted sequence is the whole point of
-            # demo/scenario.json, and a skip on the wall clock ate one of its
-            # five steps at random, a different one each run.
+            # Under --demo the skip waits for the pose: the scripted sequence
+            # is the whole point of demo/scenario.json, and a skip on the wall
+            # clock alone ate one of its five steps at random, a different one
+            # each run, whenever the node opened mid cycle. Every scripted step
+            # now gets its correct pose before the mock moves on.
             in_check = (lesson.node or {}).get("kind") == "check"
             scripted = isinstance(lesson.scheduler, ScriptedScheduler)
-            if phase == 0 and step >= 0 and not in_check and not scripted:
+            posed = lesson.engine.latched
+            if phase == 0 and step >= 0 and not in_check and (posed or not scripted):
                 lesson.command({"type": "next"})
             step = slot
         gesture = mock_gestures(lesson.engine.exercise)[phase]
