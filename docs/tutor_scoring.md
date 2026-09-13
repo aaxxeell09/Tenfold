@@ -57,6 +57,21 @@ said), which needs Tally's own line and runs offline only. A judge model rates w
 fraction is pass among pass or fail; `not_verifiable` is counted apart. The earlier `tally-voice` Evaluation used the v1
 rules and is not comparable. No gesture data, held-out or validation, is used here.
 
+Published on 2026-09-13 (19:16 UTC):
+https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/weave/leaderboards/tally-voice-leaderboard-v2
+
+| model | no_spoiler | correction_consistency | keeps_numbers | in_time | warmth / clarity | mean latency |
+|---|---|---|---|---|---|---|
+| Qwen3 235B | 1.0 (33 decided) | 1.0 (8 of 9 decided) | 0.90 | 1.0 | 3.85 / 4.13 | 0.84 s |
+| Qwen3 30B | 1.0 (33) | 1.0 (9 of 9) | 1.00 | 1.0 | 3.83 / 4.15 | 0.44 s |
+| Llama 3.3 70B | 1.0 (33) | 1.0 (8 of 9) | 0.90 | 1.0 | 3.23 / 3.60 | 0.49 s |
+| DeepSeek V4 Flash | 1.0 (33) | 1.0 (7 of 9) | 0.83 | 1.0 | 3.63 / 4.00 | 0.76 s |
+| gpt-oss-120b | no reply | no reply | no reply | 0.05 | no rating | 3.75 s |
+
+The fraction is pass among decided rows: `correction_consistency` rests on 7 to 9 correction moments, the rest were
+not verifiable. gpt-oss-120b returned empty text on all 40 moments: it used all 60 completion tokens (the live
+tutor's `max_tokens`) without producing a reply, so it is not rated here.
+
 ## 3. What each score measures, and its limits
 
 | rule | fails when | not applicable / not verifiable |
@@ -82,7 +97,7 @@ Limits:
    Dataset `tally-moments`.
 2. **Evaluation** (15 s). `make tutor-eval`, run once beforehand (about 400 W&B Inference calls with the judge).
    Leaderboard `tally-voice-leaderboard-v2`: per model, `no_spoiler`, `correction_consistency`, `in_time` and the
-   rest. As of 2026-09-13 the v2 Evaluation has not been published yet; only v1 `tally-voice` exists.
+   rest (results of 2026-09-13 in section 2).
 3. **Live interaction** (20 s). `make demo`, make a wrong pose: Tally's fixed line, then the model's line.
 4. **Scored trace** (15 s). Traces, op `tutor.call`, the newest call: its inputs (event, exercise, hint, no name),
    Feedback `tutor_rules_v2` with a status and a reason per rule, and `tutor_delivery`.
