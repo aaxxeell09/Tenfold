@@ -42,6 +42,32 @@ from classifier.schema import FINGER_NUMBERS, GestureState, Window
 CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale
 UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer
 AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the last frame's own top pair is a coin flip
+MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units, above which hands are still moving
+
+
+def wrist_motion(window: Window) -> float:
+    """Mean per-step wrist displacement of both hands, in mean-scale units, over both-present frames.
+
+    A held gesture keeps the wrist still while the fingertips make contact; a transition is the wrist
+    still travelling between two holds. Averaged over the whole window (not just the last step) so one
+    noisy frame pair cannot hide steady travel.
+    """
+    frames = features.both_present_frames(window)
+    if len(frames) < 2:
+        return 0.0
+    total = 0.0
+    steps = 0
+    for (l0, r0), (l1, r1) in zip(frames, frames[1:]):
+        s = features.mean_scale(l0, r0)
+        if not s > 0:
+            continue
+        lw0, lw1 = np.asarray(l0.wrist_xy, dtype=float), np.asarray(l1.wrist_xy, dtype=float)
+        rw0, rw1 = np.asarray(r0.wrist_xy, dtype=float), np.asarray(r1.wrist_xy, dtype=float)
+        step = (float(np.linalg.norm(lw1 - lw0)) + float(np.linalg.norm(rw1 - rw0))) / (2.0 * s)
+        if np.isfinite(step):
+            total += step
+            steps += 1
+    return total / steps if steps else 0.0
 
 
 def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:
@@ -74,6 +100,8 @@ def classify(window: Window) -> GestureState:
     left, right = frame
     confidence = min(float(left.detection_conf), float(right.detection_conf))
     if confidence < UNKNOWN_THRESHOLD:
+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
+    if wrist_motion(window) > MOTION_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     lf, rf, dist = averaged_pair(window, frame)
     return GestureState(
