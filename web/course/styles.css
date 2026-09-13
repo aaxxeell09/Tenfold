@@ -1332,3 +1332,11 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
   stroke-dasharray: 16 13; animation: crawl 1.1s linear infinite;
 }
 #check .practice-overlay .head { fill: rgba(247, 148, 51, 0.85); }
+
+/* The owner's call: the fingertip markers and the arrow head are marks on a finger,
+   not covers, but nothing painted over the hands is fully opaque. fill-opacity keeps
+   the export's own colours and only softens them. The dashed rounded placement zones
+   are final and unchanged. */
+#lesson .gh .fin.want .tip, #lesson .gh .fin.bad .tip, #lesson .guide .head,
+#check .gh .fin.lit .tip, #check .gh .fin.want .tip, #check .gh .fin.bad .tip,
+#check .practice-overlay .head { fill-opacity: .85; }
