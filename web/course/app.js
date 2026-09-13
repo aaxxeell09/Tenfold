@@ -558,7 +558,11 @@
     if (!run || run.done || m.type !== "state") return;
     readParams(m);
     const cuts = interrupts(m);
-    drawFingers(m, $("#check .stage"));
+    // The gate has no exercise, so it draws no exercise: the fingertips and their
+    // numbers, and none of the marks a lesson message carries. While the check node
+    // still serves an exercise, its green and orange belong to a question the child
+    // was never asked, and the gate must not show them.
+    drawFingers({ fingers: m.fingers }, $("#check .stage"));
     const hands = new Set((m.fingers || []).map((f) => f.hand)).size;
     const step = stepNow(run);
     if (step === "hands") {

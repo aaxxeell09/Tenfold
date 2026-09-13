@@ -166,6 +166,39 @@ def test_snapshot_carries_the_retrospective_validation_under_its_own_name(tmp_pa
     assert all(v["heldout"] is None for v in snap["informed"])  # never folded into the held-out fields
 
 
+def test_dashboard_names_code_changes_in_plain_words():
+    script = f"""
+import importlib.util
+spec = importlib.util.spec_from_file_location("nimble_dashboard", {str(NOTEBOOK)!r})
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+_, defs = module.app.run()
+effect, change = defs["plain_effect"], defs["plain_change"]
+print("RESULT", effect("agent words", "+def tip_motion(window: Window) -> float:"))
+print("RESULT", change("agent words", "+def wrist_motion(window: Window) -> float:"))
+print("RESULT", effect("agent words", "+AMBIGUITY_MARGIN = 0.025  # gap"))
+print("RESULT", effect("Raised `UNKNOWN_THRESHOLD` from 0.5 to 0.525", ""))
+print("RESULT", change("a patch nobody recognises", "+x = 1"))
+print("RESULT", effect("agent words", "+def pair_separation_trend(window: Window) -> float:"))
+print("RESULT", effect("Lowered PAIR_DRIFT_THRESHOLD from 0.05 to 0.0475, the only change", ""))
+print("RESULT", effect("Lowered SOME_NEW_LIMIT from 0.3 to 0.2", "") + " | " + defs["technical"]("Lowered SOME_NEW_LIMIT from 0.3 to 0.2", ""))
+"""
+    env = {**os.environ, "MPLBACKEND": "Agg", "PYTHONPATH": str(REPO)}
+    env.pop("WANDB_API_KEY", None)
+    env.pop("TENFOLD_SNAPSHOT", None)
+    p = subprocess.run([sys.executable, "-c", script], cwd=REPO, env=env, capture_output=True, text=True, timeout=180)
+    assert p.returncode == 0, p.stdout[-2000:] + p.stderr[-2000:]
+    results = [line[len("RESULT "):] for line in p.stdout.splitlines() if line.startswith("RESULT ")]
+    assert "fingers are still moving into shape" in results[0]
+    assert results[1] == "waits while the hands are still moving"
+    assert "whole short clip" in results[2]
+    assert results[3] == "The app answers only when it sees both hands clearly"
+    assert results[4] == "a patch nobody recognises"  # unknown changes fall back to the agent's own words
+    assert "keep moving apart" in results[5]
+    assert results[6] == "Fingertips moving apart a little more slowly now also count as leaving a gesture"
+    assert results[7] == "A setting of the rule was fine-tuned | some_new_limit 0.3 → 0.2"  # values once, not twice
+
+
 def test_dashboard_page_text_is_english():
     source = NOTEBOOK.read_text()
     assert "retrospective validation, participants not identified" in source
