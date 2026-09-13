@@ -792,7 +792,9 @@
   const MAX_PENDING = 1;          // one line waiting behind the one being spoken, no deeper
   const READ_MS_PER_WORD = 320;   // how long a line stands when this browser cannot speak it
   const SPEAK_GRACE_MS = 4000;    // an engine that never reports the end must not hold the queue
-  const speech = { queue: [], line: null, serial: 0, timer: null, guard: null, waiting: false, lastLine: null };
+  // "hold" is the wait for a line whose moment has not come yet: it stands at the head of
+  // the queue in silence until then, and nothing behind it goes out before it.
+  const speech = { queue: [], line: null, serial: 0, timer: null, guard: null, hold: null, waiting: false, lastLine: null };
   function hasVoice() { return Boolean(window.speechSynthesis); }
   // Chrome hands the voice list over asynchronously: the first line waits for
   // voiceschanged (or a short timeout for browsers that never fire it) rather than
@@ -858,12 +860,14 @@
   // answer they have just given.
   const REPLACEABLE = ["nudge", "correction"];
   const KEPT = ["ack", "earned"];
-  function enqueue(item) {
+  function enqueue(item, ahead) {
     if (REPLACEABLE.includes(item.kind)) {
       speech.queue.filter((q) => q.kind === item.kind)
         .forEach((q) => dropLine(q, "replaced_by_newer_of_same_kind"));
     }
-    speech.queue.push(item);
+    // "ahead" goes to the front of the line without cutting what is playing: the beat's
+    // closing line, which is due before the exercise line that may already be waiting
+    if (ahead) speech.queue.unshift(item); else speech.queue.push(item);
     // the depth is counted in lines that may go: a line the child is owed waits its
     // turn without costing another line its place, because it will be spoken anyway
     while (speech.queue.filter((q) => KEPT.indexOf(q.kind) === -1).length > MAX_PENDING) {
@@ -878,23 +882,33 @@
   // spoken, not when it is asked for, so what is on screen is what Tally is saying.
   // "still" is the condition that made the line true; the queue tests it again at the
   // last moment and drops the line rather than speak it late. "onStart" moves the
-  // screen with the line, "after" runs once the line is over or dropped.
+  // screen with the line, "after" runs once the line is over or dropped. "notBefore"
+  // gives the moment the line is due, as a function of the clock: until then it waits at
+  // the head of the queue in silence, and it is never dropped for waiting.
   function say(text, bubble, tally, opts) {
     const line = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
     if (!line) return null;
     const cuts = Boolean(opts && opts.interrupt);
     const item = { text: line, bubble: bubble || null, tally: tally || null, done: false,
       kind: (opts && opts.kind) || (cuts ? "ack" : "instruction"), key: (opts && opts.key) || null,
-      still: (opts && opts.still) || null, onStart: (opts && opts.onStart) || null, after: (opts && opts.after) || null };
+      still: (opts && opts.still) || null, onStart: (opts && opts.onStart) || null, after: (opts && opts.after) || null,
+      notBefore: (opts && opts.notBefore) || null };
     if (item.kind === "ack") {
       // ahead of whatever is waiting, then the line in flight is ended where it stands
       speech.queue.unshift(item);
       cutLine();
     } else {
-      enqueue(item);
+      enqueue(item, Boolean(opts && opts.ahead));
     }
     pump();
     return item;
+  }
+  // how long a line at the head of the queue still has to wait for its moment
+  function holdOf(item) {
+    if (!item || !item.notBefore) return 0;
+    let due = 0;
+    try { due = Number(item.notBefore()) || 0; } catch (e) { due = 0; }
+    return Math.max(0, due - Date.now());
   }
   function speak(text, host, opts) { return say(text, null, host || null, opts); }
   // a line is stale when its screen is gone or the child has moved past the moment it
@@ -911,13 +925,23 @@
     if (item.after) { try { item.after(); } catch (e) { /* the dialogue goes on */ } }
   }
   function pump() {
+    // the head of the queue is judged again on every call: a line that was waiting for
+    // its moment may be due now, or a line due sooner may have been put ahead of it
+    clearTimeout(speech.hold); speech.hold = null;
     if (speech.line || speech.timer) return;          // Tally is talking, or the beat is running
     if (!speech.queue.length) return;
     if (!muted && !voicesReady()) { waitForVoices(); return; }
     const dropped = [];
     let item = speech.queue.shift();
     while (item && stale(item)) { dropped.push(item); item = speech.queue.shift(); }
-    if (item) startLine(item);
+    const wait = holdOf(item);
+    if (wait > 0) {
+      // not yet: the line keeps its place and the queue comes back for it on time
+      speech.queue.unshift(item);
+      speech.hold = setTimeout(() => { speech.hold = null; pump(); }, wait);
+    } else if (item) {
+      startLine(item);
+    }
     dropped.forEach((gone) => { reportDrop(gone, "no_longer_true"); closeItem(gone); });
   }
   function talking(item, on) {
@@ -978,6 +1002,7 @@
   function cutLine() {
     clearTimeout(speech.timer); speech.timer = null;
     clearTimeout(speech.guard); speech.guard = null;
+    clearTimeout(speech.hold); speech.hold = null;
     speech.serial += 1;          // the engine may still report the end of a line that is over
     const line = speech.line;
     speech.line = null;
@@ -993,6 +1018,7 @@
   function cutSpeech() {
     clearTimeout(speech.timer); speech.timer = null;
     clearTimeout(speech.guard); speech.guard = null;
+    clearTimeout(speech.hold); speech.hold = null;
     speech.serial += 1;
     const dropped = speech.queue.splice(0);
     const line = speech.line;
@@ -1109,47 +1135,82 @@
   }
   // ---------- the success beat ----------
   // The tutor calls the beat and hands the page its numbers; the page owns the pixels
-  // and reads the numbers rather than inventing them. The parts it names run for
-  // success_ms, then pause_ms of silence, and the line that closes it is said when the
-  // next exercise arrives, which the server holds back until the beat is over. A message
-  // without a beat changes nothing, so a server that does not send one plays as before.
+  // and the clock, and reads the numbers rather than inventing them. The order is fixed:
+  // the success line, then success_ms of silence with the halo, the stars and the counter
+  // on, then the line that closes the beat ("Next one."), then pause_ms of silence, and
+  // only then the line of the next exercise. The two silences are counted from the END
+  // of the line before them, not from its start: a line is as long as it is, and a
+  // silence measured from its start would be eaten by a long line and be no silence at
+  // all. The server holds the next exercise back for success_ms + pause_ms from the
+  // answer; if it lands before its moment its line waits, if after, it plays on arrival.
+  // A message without a beat changes nothing, so a server that does not send one plays as
+  // before. The clocks live on the beat record itself, so two beats never share one.
   let beatTimer = null;
+  // no beat holds the next exercise for ever: past this much over its two silences, a
+  // chain that broke (a line that never closed) lets the exercise line go anyway
+  const BEAT_HOLD_CAP_MS = 12000;
   function playBeat(beat) {
     const s = lesson;
-    if (!s || !beat || beat.kind !== "success") return;
+    if (!s || !beat || beat.kind !== "success") return null;
     const root = $("#lesson"), frame = $("#lesson .frame");
-    if (!root || !frame) return;
-    // next_line closes the beat, and it is the tutor's line, not one the page writes
-    s.beat = beat;
+    if (!root || !frame) return null;
     const parts = beat.parts || [];
-    const ms = Math.max(0, Number(beat.success_ms) || 0);
-    clearTimeout(beatTimer);
+    // next_line closes the beat, and it is the tutor's line, not one the page writes
+    s.beat = { next_line: beat.next_line || null, parts,
+      success_ms: Math.max(0, Number(beat.success_ms) || 0), pause_ms: Math.max(0, Number(beat.pause_ms) || 0),
+      at: Date.now(), lesson: s, lineItem: null, lineEnd: null, nextSaid: false, nextEnd: null, timer: null };
+    clearTimeout(beatTimer); beatTimer = null;
     root.dataset.beat = beat.kind;
     // the parts by name: the halo on the hands, the stars of the export's badge and the
-    // counter. Each one is a class the design can hang on, and the badge pops today.
+    // counter. Each one is a class the design can hang on, and the badge pops today. They
+    // come on with the success line and stay through the silence after it.
     parts.forEach((part) => root.classList.add(`beat-${part}`));
     if (parts.indexOf("stars") !== -1) { void frame.offsetWidth; frame.classList.add("is-cheer"); }
     // the number heard belonged to the answer that earned the beat: it goes with it
     clearHeard();
+    return s.beat;
+  }
+  // The success line is over (spoken to the end, or cut): the first silence starts here.
+  // The parts stay on for it, and the closing line is due when it has run out.
+  function beatLineOver(beat) {
+    if (!beat || beat.lineEnd !== null) return;
+    beat.lineEnd = Date.now();
+    const root = $("#lesson");
+    clearTimeout(beatTimer);
     beatTimer = setTimeout(() => {
       beatTimer = null;
+      if (!root) return;
       root.dataset.beat = "";
-      parts.forEach((part) => root.classList.remove(`beat-${part}`));
-    }, ms);
+      beat.parts.forEach((part) => root.classList.remove(`beat-${part}`));
+    }, beat.success_ms);
+    beat.timer = setTimeout(() => { beat.timer = null; sayNextOne(beat); }, beat.success_ms);
   }
-  // the new exercise has landed, so the beat is over: its closing line is said here, on
-  // the screen the child is looking at, and never over the success line it follows
-  function closeBeat() {
-    const s = lesson;
-    if (!s || !s.beat) return;
-    const closing = s.beat.next_line;
-    s.beat = null;
-    if (!closing) return;
-    const turn = s.turn;
-    // the beat is the child's: its closing line is earned like the exercise line behind
-    // it, so the queue keeps both and neither cuts the success they follow
-    say(closing, $("#lesson .say"), lessonTally(),
-        { kind: "earned", key: "next_one", still: () => Boolean(lesson) && lesson.turn === turn });
+  // The closing line, once per beat, on the screen the child is looking at. It goes to
+  // the front of the queue, ahead of an exercise line that may already be waiting, and
+  // never cuts: the queue is silent at this point, that is what the silence was for. It
+  // is the child's line, so the queue keeps it whatever comes. The second silence is
+  // counted from its end; a beat without a closing line counts it from here.
+  function sayNextOne(beat) {
+    if (beat.nextSaid) return;
+    // a timer may wake a hair early against the clock the silence is measured on: the
+    // silence is the promise, so the line waits the rest of it
+    const short = beat.lineEnd + beat.success_ms - Date.now();
+    if (short > 0) { beat.timer = setTimeout(() => { beat.timer = null; sayNextOne(beat); }, short); return; }
+    beat.nextSaid = true;
+    // the lesson it belonged to has gone: nothing is said on another screen
+    if (lesson !== beat.lesson || view !== "lesson") return;
+    if (!beat.next_line) { beat.nextEnd = Date.now(); pump(); return; }
+    say(beat.next_line, $("#lesson .say"), lessonTally(),
+        { kind: "earned", key: "next_one", ahead: true, after: () => { beat.nextEnd = Date.now(); } });
+  }
+  // when the line of the next exercise is due: pause_ms after the closing line ended, or,
+  // while that end is not known yet, the cap, which pump comes back to before that anyway
+  // because every end of a line runs pump again
+  function exerciseDue(beat) {
+    return () => {
+      const cap = beat.at + beat.success_ms + beat.pause_ms + BEAT_HOLD_CAP_MS;
+      return beat.nextEnd === null ? cap : Math.min(cap, beat.nextEnd + beat.pause_ms);
+    };
   }
   // The pill carries one number for one exercise and no longer. The success beat is
   // where it goes: the moment the beat starts the pill drops the number and is listening
@@ -1368,8 +1429,8 @@
     // the success beat between two exercises, and the exercise it hands over to: the
     // beat plays on its own numbers, the pill drops the number it was showing at the
     // start of it, and the new exercise is armed with nothing of the last one on screen
-    if (m.tutor_beat) playBeat(m.tutor_beat);
-    if (fresh && m.state === "exercise_shown") { clearHeard(); closeBeat(); }
+    const beat = m.tutor_beat ? playBeat(m.tutor_beat) : null;
+    if (fresh && m.state === "exercise_shown") clearHeard();
     if (m.fact) lesson.fact = m.fact;
     if (fresh && m.state === "answer_wrong" && lesson.hearts !== null) {
       lesson.hearts -= 1; lesson.hit = true;
@@ -1384,6 +1445,11 @@
     renderPractice(m);
     listenWhile(m.state);
     speakFor(m);
+    // a beat whose success line the queue never took (the line was already said, or
+    // there was none) counts its first silence from now rather than never
+    if (beat && !beat.lineItem) beatLineOver(beat);
+    // the exercise line has its clock in hand: the beat that timed it is spent
+    if (lesson && fresh && m.state === "exercise_shown") lesson.beat = null;
   }
   // What Tally says for one state message. tutor_line is a new intervention, sent once;
   // null means nothing new, never "cancel what is waiting". Without one, the engine's
@@ -1408,17 +1474,28 @@
     // how the queue treats the line is the server's word, whichever of the two it is:
     // an acknowledgement still goes ahead, may cut, and is never dropped
     const delivery = { kind: lineKind(m), key: m.reaction || m.state, interrupt: interrupts(m) };
+    // The beat's two clocks ride the two lines they time. The success line, the one the
+    // beat arrived with, starts the first silence when it is over; the line of the next
+    // exercise is due pause_ms after the closing line, and waits at the head of the
+    // queue until then. An exercise that lands after that moment plays on arrival.
+    const beat = s.beat;
+    const closing = beat && m.state === "answer_correct" && beat.lineItem === null && beat.lineEnd === null ? beat : null;
+    const held = beat && m.state === "exercise_shown" ? beat : null;
+    if (closing) delivery.after = () => beatLineOver(closing);
+    if (held) delivery.notBefore = exerciseDue(held);
+    let item = null;
     if (m.tutor_line) {
       if (m.tutor_line === s.said) return;
       s.said = m.tutor_line;
       const turn = ++s.turn;
       s.tallyTurn += 1;
-      say(m.tutor_line, bubble, host, { ...delivery, still: () => inScope() && s.turn === turn });
+      item = say(m.tutor_line, bubble, host, { ...delivery, still: () => inScope() && s.turn === turn });
     } else if (m.tally && tallyChanged && m.tally !== s.said) {
       s.said = m.tally;
       const tallyTurn = ++s.tallyTurn;
-      say(m.tally, bubble, host, { ...delivery, still: () => inScope() && s.tallyTurn === tallyTurn });
+      item = say(m.tally, bubble, host, { ...delivery, still: () => inScope() && s.tallyTurn === tallyTurn });
     }
+    if (closing && item) closing.lineItem = item;
   }
   // --demo: the map opens as a showcase, first unit done, second current
   function seedShowcase() {
@@ -2176,7 +2253,7 @@
     get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); },
     get gate() { return checkRun; }, get gateProved() { return gateProved(); },
     // the dialogue as it stands, for a test that has to see why a line did not go out
-    get queue() { return { line: speech.line && speech.line.text, waiting: speech.queue.map((q) => q.text) }; },
+    get queue() { return { line: speech.line && speech.line.text, waiting: speech.queue.map((q) => q.text), held: Boolean(speech.hold) }; },
     // the gate's step as a number, the way the export numbers its frames
     get checkStep() { return checkRun ? checkRun.at + 1 : 0; },
     get child() { return child(); }, get name() { return name(); } };

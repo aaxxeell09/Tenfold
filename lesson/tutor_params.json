@@ -34,8 +34,8 @@
     "gate_step_pause_ms": 1000,
     "check_step_min_ms": 0,
     "answer_first_number_ms": 0,
-    "success_beat_ms": 1300,
-    "next_pause_ms": 1200,
+    "success_beat_ms": 1500,
+    "next_pause_ms": 1500,
     "gate_ready_button_s": 6.0
   },
   "bounds": {

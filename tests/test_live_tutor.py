@@ -1632,8 +1632,8 @@ def test_no_other_value_in_the_params_file_moved() -> None:
 
 # The two beat keys: what they are set to, and the bounds they live in.
 BEAT_DEFAULTS: dict[str, tuple[float, tuple[float, float]]] = {
-    "success_beat_ms": (1300, (600, 2500)),
-    "next_pause_ms": (1200, (400, 2500)),
+    "success_beat_ms": (1500, (600, 2500)),
+    "next_pause_ms": (1500, (400, 2500)),
 }
 SUCCESS_LINE = "Yes. 8 times 7 is 56."
 NEXT_LINE = "Next one."
@@ -1705,9 +1705,9 @@ def test_a_correct_answer_calls_the_beat_with_its_parts() -> None:
     assert beat == {
         "kind": BEAT_SUCCESS,
         "parts": ["line", "halo", "stars", "counter"],
-        "success_ms": 1300,
-        "pause_ms": 1200,
-        "total_ms": 2500,
+        "success_ms": 1500,
+        "pause_ms": 1500,
+        "total_ms": 3000,
         "line": SUCCESS_LINE,
         # The line that closes the beat, said as the next exercise fades in.
         "next_line": NEXT_LINE,
