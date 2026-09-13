@@ -16,10 +16,15 @@ import pytest
 
 from app.tutor import (
     ANSWER_RETRY,
+    BEAT_PARAMS,
+    BEAT_PARTS,
+    BEAT_SUCCESS,
     CHECK_ANSWER,
+    DROP_REASONS,
     INDEPENDENT,
     LINE_KEYS,
     NORMAL,
+    OPTIONAL_LINE_KEYS,
     PAUSED,
     POSE_READY,
     PROMPTING,
@@ -33,6 +38,7 @@ from app.tutor import (
     Observation,
     ParamsError,
     Tutor,
+    TutorParams,
     jsonl_sink,
     load_lines,
     load_params,
@@ -248,8 +254,11 @@ def test_invariant_no_parameter_can_leave_its_bounds() -> None:
 
 def test_there_are_exactly_twenty_lines() -> None:
     raw = json.loads(LINES_FILE.read_text(encoding="utf-8"))
-    assert len(raw) == 20
-    assert set(raw) == set(LINE_KEYS)
+    # The twenty required lines, plus whichever optional ones the file has
+    # grown since: "next_one" closes the success beat and is added by hand.
+    assert set(LINE_KEYS) <= set(raw)
+    assert set(raw) - set(LINE_KEYS) <= set(OPTIONAL_LINE_KEYS)
+    assert len(raw) >= 20
     for key, text in raw.items():
         assert len(text.split()) < 20, key
 
@@ -1307,23 +1316,24 @@ def test_the_jsonl_sink_appends_one_object_per_line(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# 14. the nine fields on the wire
+# 14. the ten fields on the wire
 # --------------------------------------------------------------------------
 
 
-def test_the_state_fields_are_the_nine_of_the_contract() -> None:
+def test_the_state_fields_are_the_ten_of_the_contract() -> None:
     harness = wrong_pose_harness()
     fields = harness.tutor.state_fields()
     assert set(fields) == {"tutor_state", "intervention_level", "tutor_line",
                            "tutor_visual", "scored_gesture_error",
                            "scored_math_error", "first_try", "mode",
-                           "tutor_line_cuts"}
+                           "tutor_line_cuts", "tutor_beat"}
     assert fields["tutor_state"] == PROMPTING
     assert fields["intervention_level"] == 0
     assert fields["mode"] == NORMAL
-    # No line, nothing to cut.
+    # No line, nothing to cut, and no beat outside a correct answer.
     assert fields["tutor_line"] is None
     assert fields["tutor_line_cuts"] is False
+    assert fields["tutor_beat"] is None
 
 
 def test_every_visual_kind_is_one_of_the_six() -> None:
@@ -1504,6 +1514,244 @@ def test_the_grace_before_a_wrong_pose_is_scored_is_untouched() -> None:
 
 def test_no_other_value_in_the_params_file_moved() -> None:
     raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
-    assert set(raw["global"]) == set(UNCHANGED_GLOBALS) | set(LATENCY_DEFAULTS)
+    assert (set(raw["global"])
+            == set(UNCHANGED_GLOBALS) | set(LATENCY_DEFAULTS) | set(BEAT_DEFAULTS))
     for key, value in UNCHANGED_GLOBALS.items():
         assert raw["global"][key] == value, key
+    for key, (value, bound) in LATENCY_DEFAULTS.items():
+        assert raw["global"][key] == value, key
+        assert raw["bounds"][key] == list(bound), key
+
+
+# --------------------------------------------------------------------------
+# 17. the success beat between two exercises
+# --------------------------------------------------------------------------
+
+
+# The two beat keys: what they are set to, and the bounds they live in.
+BEAT_DEFAULTS: dict[str, tuple[float, tuple[float, float]]] = {
+    "success_beat_ms": (1300, (600, 2500)),
+    "next_pause_ms": (1200, (400, 2500)),
+}
+SUCCESS_LINE = "Yes. 8 times 7 is 56."
+NEXT_LINE = "Next one."
+
+
+def beat_of(harness: Harness, mode: str = NORMAL) -> dict[str, object] | None:
+    """One correct answer in the given mode, and the beat it called for."""
+    harness.tutor._mode = mode
+    decision = harness.tutor.answer(56, correct=True, now=harness.clock.t)
+    assert decision.tutor_line == SUCCESS_LINE
+    assert decision.tutor_state == SUCCESS
+    return decision.tutor_beat
+
+
+def lines_with_next_one() -> dict[str, str]:
+    """The real line file once the owner has added the beat's second line."""
+    raw = json.loads(LINES_FILE.read_text(encoding="utf-8"))
+    raw["next_one"] = NEXT_LINE
+    path = Path(_tmp()) / "lines_with_next_one.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return dict(load_lines(path))
+
+
+def test_the_two_beat_keys_are_known_with_their_bounds() -> None:
+    raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
+    params = load_params(PARAMS_FILE)
+    for key, (value, bound) in BEAT_DEFAULTS.items():
+        assert key in REQUIRED_PARAMS, key
+        assert key in BEAT_PARAMS, key
+        assert raw["global"][key] == value, key
+        assert raw["bounds"][key] == list(bound), key
+        assert params.values[key] == value, key
+        assert params.bound(key) == bound, key
+
+
+def test_a_beat_key_outside_its_bounds_is_a_startup_error() -> None:
+    raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
+    raw["global"]["success_beat_ms"] = 9000
+    path = Path(_tmp()) / "beat_out_of_bounds.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ParamsError) as excinfo:
+        load_params(path)
+    assert "success_beat_ms" in str(excinfo.value) and "2500" in str(excinfo.value)
+
+
+def test_the_beat_timings_are_clamped_and_never_scaled() -> None:
+    real = load_params(PARAMS_FILE)
+    stretched = TutorParams(values=dict(real.values,
+                                        success_beat_ms=9000.0, next_pause_ms=10.0),
+                            bounds=real.bounds, invariants=real.invariants,
+                            params_version=real.params_version)
+    harness = Harness(params=stretched,
+                      factors={"pace_factor": 9.0, "help_factor": 9.0,
+                               "tutor_observations": 500})
+    harness.tutor.new_exercise(8, 7, node="u2-l3", now=harness.clock.t)
+    for mode in (NORMAL, SUPPORTIVE, INDEPENDENT):
+        harness.tutor._mode = mode
+        assert harness.tutor.effective("success_beat_ms") == 2500
+        assert harness.tutor.effective("next_pause_ms") == 400
+    beat = beat_of(harness)
+    assert beat is not None
+    assert (beat["success_ms"], beat["pause_ms"], beat["total_ms"]) == (2500, 400, 2900)
+
+
+def test_a_correct_answer_calls_the_beat_with_its_parts() -> None:
+    harness = answering_harness()
+    wait(harness)
+    beat = beat_of(harness)
+    assert beat == {
+        "kind": BEAT_SUCCESS,
+        "parts": ["line", "halo", "stars", "counter"],
+        "success_ms": 1300,
+        "pause_ms": 1200,
+        "total_ms": 2500,
+        "line": SUCCESS_LINE,
+        # The second line is not in lesson/tally_lines.json yet.
+        "next_line": None,
+    }
+    assert list(BEAT_PARTS) == beat["parts"]
+
+
+def test_the_beat_rides_one_message_and_is_never_replayed() -> None:
+    harness = answering_harness()
+    wait(harness)
+    assert harness.tutor.state_fields()["tutor_beat"] is None
+    assert beat_of(harness) is not None
+    # The page plays it once: every message after it says nothing about a beat.
+    assert harness.tutor.state_fields()["tutor_beat"] is None
+    harness.feed(1.0, gesture=pose(8, 7, True))
+    assert harness.last.tutor_beat is None
+
+
+def test_a_wrong_answer_calls_no_beat() -> None:
+    harness = answering_harness()
+    wait(harness)
+    assert harness.tutor.answer(54, correct=False,
+                                now=harness.clock.t).tutor_beat is None
+
+
+def test_the_beat_is_identical_in_independent_mode() -> None:
+    normal = answering_harness()
+    wait(normal)
+    independent = answering_harness()
+    wait(independent)
+    # Independent mode makes Tally talk less by stretching her timers. The beat
+    # is not one of them: same parts, same milliseconds, same line.
+    assert beat_of(independent, mode=INDEPENDENT) == beat_of(normal, mode=NORMAL)
+    assert independent.tutor.mode_factor() == 1.4
+
+
+def test_the_beat_is_never_held_back_by_min_verbal_gap() -> None:
+    harness = answering_harness(params_with(min_verbal_gap=8.0))
+    # No wait: the acknowledgement was said a moment ago and the gap is in
+    # force, which holds every paced line back. The success line and its beat
+    # never go through that gate.
+    beat = beat_of(harness, mode=INDEPENDENT)
+    assert beat is not None and beat["line"] == SUCCESS_LINE
+
+
+def test_the_beat_closes_on_next_one_once_the_line_exists() -> None:
+    harness = Harness()
+    harness.tutor.lines = lines_with_next_one()
+    harness.tutor.new_exercise(8, 7, node="u2-l3", now=harness.clock.t)
+    harness.feed(1.5, gesture=pose(8, 7, True))
+    wait(harness)
+    beat = beat_of(harness)
+    assert beat is not None
+    assert beat["next_line"] == NEXT_LINE
+    assert beat["line"] == SUCCESS_LINE
+
+
+def test_the_line_file_may_carry_next_one_and_nothing_else_new() -> None:
+    raw = json.loads(LINES_FILE.read_text(encoding="utf-8"))
+    path = Path(_tmp()) / "lines_plus.json"
+    path.write_text(json.dumps(dict(raw, next_one=NEXT_LINE)), encoding="utf-8")
+    assert load_lines(path)["next_one"] == NEXT_LINE
+    # An empty optional line is refused like any other empty line, and an
+    # unknown key is still unknown.
+    path.write_text(json.dumps(dict(raw, next_one="  ")), encoding="utf-8")
+    with pytest.raises(ParamsError, match="next_one"):
+        load_lines(path)
+    path.write_text(json.dumps(dict(raw, whistle="Tally whistles.")),
+                    encoding="utf-8")
+    with pytest.raises(ParamsError, match="whistle"):
+        load_lines(path)
+
+
+# --------------------------------------------------------------------------
+# 18. the lines the page could not speak
+# --------------------------------------------------------------------------
+
+
+def test_a_dropped_line_is_logged_with_its_reason() -> None:
+    harness = wrong_pose_harness()
+    harness.feed(1.5, gesture=pose(8, 7, True))
+    before = len(harness.log)
+    state = harness.last.tutor_state
+    level = harness.last.intervention_level
+    harness.tutor.line_dropped(line=ACK_LINE, reason="replaced", at=5821.4,
+                               now=harness.clock.t)
+    drops = harness.kind("line_drop")
+    assert len(drops) == 1
+    drop = drops[0]
+    assert drop == {
+        "kind": "line_drop",
+        "ts": drop["ts"],
+        "learner_id": "9f31c0a7bd42",
+        "exercise": "8 x 7",
+        "line": ACK_LINE,
+        # The acknowledgement has nothing to fill in, so it is recognised.
+        "line_key": "pose_ready",
+        "reason": "replaced",
+        "reported_reason": None,
+        "reported_at": 5821.4,
+        "state": state,
+        "intervention": level,
+        "mode": NORMAL,
+    }
+    assert str(drop["ts"]).endswith("Z")
+    # It is one log line and nothing else: no decision, no score, no state move.
+    assert len(harness.log) == before + 1
+    assert harness.tutor.state_fields()["tutor_state"] == state
+    assert harness.tutor.state_fields()["scored_math_error"] is False
+
+
+def test_every_drop_reason_of_the_vocabulary_is_kept_as_it_is() -> None:
+    harness = wrong_pose_harness()
+    for reason in DROP_REASONS:
+        harness.tutor.line_dropped(line=ACK_LINE, reason=reason.upper(),
+                                   now=harness.clock.t)
+    assert [drop["reason"] for drop in harness.kind("line_drop")] == list(DROP_REASONS)
+
+
+def test_a_malformed_drop_report_is_logged_and_never_raises() -> None:
+    harness = wrong_pose_harness()
+    harness.tutor.line_dropped(line=None, reason=None, at=None,
+                               now=harness.clock.t)
+    harness.tutor.line_dropped(line=42, reason={"why": "no idea"}, at="soon",
+                               now=harness.clock.t)
+    harness.tutor.line_dropped(line="   ", reason="voice_engine_asleep",
+                               at=float("nan"), now=harness.clock.t)
+    harness.tutor.line_dropped(now=harness.clock.t)
+    drops = harness.kind("line_drop")
+    assert len(drops) == 4
+    # Nothing usable is invented, nothing unusable is thrown away.
+    assert [drop["line"] for drop in drops] == [None, None, None, None]
+    assert [drop["line_key"] for drop in drops] == [None, None, None, None]
+    assert [drop["reason"] for drop in drops] == ["unknown"] * 4
+    assert [drop["reported_at"] for drop in drops] == [None, None, None, None]
+    assert drops[0]["reported_reason"] is None
+    assert "no idea" in str(drops[1]["reported_reason"])
+    assert drops[2]["reported_reason"] == "voice_engine_asleep"
+    assert drops[3]["reported_reason"] is None
+
+
+def test_a_dropped_line_the_tutor_does_not_know_has_no_key() -> None:
+    harness = wrong_pose_harness()
+    harness.tutor.line_dropped(line="Something the page made up.",
+                               reason="queue_full", now=harness.clock.t)
+    drop = harness.kind("line_drop")[0]
+    assert drop["line"] == "Something the page made up."
+    assert drop["line_key"] is None
+    assert drop["reason"] == "queue_full"
