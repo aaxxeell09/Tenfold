@@ -145,16 +145,40 @@ PAGE_LINE_KEYS = ("gate_ready",)
 ```
 
 The server does not hand it to the page. `grep -n "gate" app/server.py` returns
-**nothing**. `web/course/app.js` has no gate either: every `gate` in that file is
-`gateVoice` / `voice.gate`, which is the microphone answer gate and predates
-this. There is no "I'm ready" step at the start of any activity, no second or
+**nothing** outside `__pycache__`. `web/course/app.js` has no gate either: every
+`gate` in that file is `gateVoice` / `voice.gate`, which is the microphone
+answer gate and predates this. There is no "I'm ready" step at the start of any
+activity, no second or
 third step of a three step gate, and `gate_step_pause_ms` (1000, bounds
-[500, 2000], added to `lesson/tutor_params.json:33`) is read by nothing.
+`[500, 2000]`, `lesson/tutor_params.json:33`) is read by no production code at
+all. The comment on it at `app/tutor.py:171` says "gate_step_pause_ms is the
+page's", and the page does not have it.
 
-So the ready gate pass landed a line, a parameter, a bound and a comment
-asserting an integration that was never written. Either it lands or the three
-artefacts come out; leaving a parameter nobody reads inside a bounded policy
-file is exactly what Loop 2 will later try to tune. **DECISION NEEDED.**
+**And two green tests cover the hole.** `tests/test_opening.py:111-136`:
+
+```python
+def test_the_gate_pause_is_read_as_written_for_every_child() -> None:
+        assert harness.tutor.effective("gate_step_pause_ms") == 1000
+
+def test_the_gate_says_its_third_step_from_the_line_file() -> None:
+    assert PAGE_LINE_KEYS == ("gate_ready",)
+    assert LINES["gate_ready"] == "Say: I'm ready!"
+```
+
+Both pass. Neither exercises a gate: one asserts that `effective()` returns a
+constant unscaled, the other that a tuple and a string exist. Two tests named
+after a feature, asserting only that its constants are present. They will keep
+passing for as long as the gate does not exist.
+
+To be fair to the pass: the rest of `tests/test_opening.py` covers behaviour that
+**is** built and works, the opening silence, the hands being called in, the
+ladder clock not running while the hands are away, the acknowledgement still
+landing during the opening silence. It is the ready gate specifically, the
+"I'm ready" step at the start of each activity, that is line, parameter, bound,
+comment and two tests, and no code.
+
+Either it lands or the artefacts come out. A bounded parameter nobody reads,
+inside the one file Loop 2 is designed to tune, is a trap. **DECISION NEEDED.**
 
 ### 2.4 BLOCKER, on `make demo`. The mock loop skips a scripted step every six seconds
 
@@ -169,24 +193,31 @@ demo:           ## the fixed demo/scenario.json sequence through the real pipeli
 `phase == 0`, that is every `3 * MOCK_STEP_S` = 6 s, unless the node is the
 check. `_skip()` records the exercise as unanswered and advances.
 
-The `--demo` replay reached the finish card, so the scenario does run end to
-end, but it served only four of its five steps:
+The `--demo` replay reached the finish card both times it was driven, so the
+scenario does run end to end. It served four of its five steps both times, and
+**not the same four**:
 
 ```
-exercises served in order: ['8 × 7', '6 × 8', '6 × 6', '8 × 6']
+run 1, on the pre-merge tree:  ['8 × 7', '6 × 8', '6 × 6', '8 × 6']   step 4 lost
+run 2, on e15ab97:             ['6 × 8', '6 × 6', '7 × 8', '8 × 6']   step 1 lost
 ```
 
-Step 4 of `demo/scenario.json` (`{"fact": "7x8", "left": 7, "right": 8,
-"reason": "retry"}`) was eaten by the auto-skip: the on-screen counter jumped
-from "3 of 5" straight to "5 of 5". That retry step is SPEC section 14's
-0:30-1:30 beat, the deliberate wrong finger and its correction, which is the
-single most important thirty seconds of the demo.
+`demo/scenario.json` has five steps for this node. Run 1 lost step 4
+(`{"fact": "7x8", "left": 7, "right": 8, "reason": "retry"}`), the counter
+jumping from "3 of 5" to "5 of 5". Run 2 lost step 1 (`8 x 7`) before the page
+had even attached, opening on "2 of 5".
+
+Which step is eaten depends on where the wall clock happens to sit in the
+six second cycle when the node opens, so **the scripted demo is not
+reproducible**, which is the entire reason `demo/scenario.json` exists. Step 4
+is SPEC section 14's 0:30 to 1:30 beat, the deliberate wrong finger and its
+correction, the single most important thirty seconds of the three minutes.
 
 Any child, or any presenter, who takes longer than six seconds on a question
-loses it. This is the exact command SPEC section 15 item 14 names. **The mock
-auto-skip must not fire while `--demo` holds a scripted scheduler**, the same
-way it already does not fire inside the check (`in_check` at
-`app/server.py::mock_loop`).
+loses that question. This is the exact command SPEC section 15 item 14 names.
+**The mock auto-skip must not fire while `--demo` holds a scripted scheduler**,
+the same way it already does not fire inside the check (`in_check` at
+`app/server.py::mock_loop`). It is one condition on one line.
 
 ### 2.5 BUG. Two ladders, two line files, two voices on the same moment
 
@@ -202,25 +233,51 @@ There are two complete intervention ladders running at once on every exercise.
 
 `web/course/app.js:1075` is `const tutorLine = m.tutor_line || m.tally;`. The
 tutor line wins when it exists, but it exists on only a handful of messages, so
-the server ladder's lines reach the child on every message in between. The two
-ladders are not coordinated by anything.
+the server ladder's lines reach the child on every message in between. Nothing
+coordinates the two.
 
-The visible result, straight out of the mock run, one second apart:
+On 331c4ef this was audible. One second apart in the mock run:
 
 ```
 t=7  say: "That is it. Now count the tens, then the ones."      <- tally, correct_pose
 t=8  say: "You have the pose. Now count the tens."              <- tutor, pose_ready
 ```
 
-The child is told to count the tens twice, in two different wordings, inside a
-second. (The canonical-lines pass has since reworded `pose_ready`, so the exact
-sentences differ on 554dc0d, but the double utterance is structural: both layers
-still speak on the confirmed pose.)
+The child was told to count the tens twice, in two different wordings, inside a
+second.
+
+**The canonical-lines pass has since papered over the symptom, and only the
+symptom.** It merged both line files into `lesson/tally_lines.json` and made the
+overlapping texts identical, so on e15ab97:
+
+```
+tally.phrase("correct_pose") == "Yes. Now count the fingers at the bottom, ..."
+LINES["pose_ready"]          == "Yes. Now count the fingers at the bottom, ..."
+```
+
+The page's `if (tutorLine !== lesson.said)` then swallows the repeat. Confirmed
+in the re-run: the doubled line is gone. But the dedupe is now **load-bearing on
+exact string equality between two independent code paths**, which is a rule
+nothing enforces. Change one word on either side and the double-speak is back,
+and neither file's tests would catch it.
+
+And the alignment is only partial. The two ladders still speak different words
+at overlapping times:
+
+| Moment | Server ladder says | Tutor ladder says |
+|---|---|---|
+| ~5 s idle | `hint_1`: "Look at your hands. One finger needs to move." | `hesitation_1`: "Take your time. I'm watching your hands." |
+| ~10 s | `hint_2`: "Move this finger here." | `wrong_left` / `wrong_right`, or `show` |
+
+`hint_2` and the tutor's `show` are now the same sentence, by hand.
+`hint_1` and `hesitation_1` are not. Both reach the child.
 
 `hint_level` and `hint_auto` are still computed, still latched, still put on the
 wire, and read by nobody but the server's own `first_try`. **DECISION NEEDED**:
-one ladder owns the voice. Given the tutor owns the contract, the server ladder
-should stop speaking and keep only what `Outcome.hint_level` needs.
+one ladder owns the voice. The contract says the tutor, so the server ladder
+should stop producing `reaction` lines and keep only what `Outcome.hint_level`
+needs. Keeping two ladders in step by copying strings between two files is not a
+structure that survives the weekend.
 
 ### 2.6 BUG. `tutor_line_cuts` is dead, and a parallel mechanism does its job
 
@@ -238,7 +295,23 @@ function interrupts(m) { return INTERRUPT_FIELDS.some((name) => Boolean(m && m[n
 
 Seven guessed spellings, and the one the server actually sends is not among
 them. `interrupts(m)` therefore returns false on every message ever sent, in
-both `onServerMessage` (`app.js:1078`) and `checkMessage` (`app.js:455`).
+both `onServerMessage` (`app.js:1078`) and `checkMessage` (`app.js:455`). The
+comment above it is honest about what happened: "The mark is being added on the
+server side and may not be on the message at all: every spelling it could arrive
+under is read." The page was written against a field that did not exist yet, by
+guessing, and the guess missed.
+
+**A green test covers this gap too**, the same shape as 2.3.
+`tests/test_voice.py:895` `test_the_line_marked_by_the_server_cuts_the_one_in_flight`
+is named for the server's mark and never involves the server:
+
+```python
+    Tenfold.say('Yes, that is it.', null, null, { interrupt: true });
+```
+
+It calls the page's own `say()` with the option set by hand. The option works.
+The link from `tutor_line_cuts` on the wire to that option is what is broken,
+and nothing tests it.
 
 Cutting still happens, but through a completely different route: `lineKind(m)`
 returns `"ack"` for the four states in `ACK_STATES`, and `say()` cuts on
@@ -472,21 +545,62 @@ SPEC.md is not mine to edit, so these are reported, not fixed.
 ## 4. The mock flow and the demo replay
 
 Both were driven with playwright, chromium at
-`/opt/pw-browsers/chromium-1194/chrome-linux/chrome`.
+`/opt/pw-browsers/chromium-1194/chrome-linux/chrome`, twice each: once on the
+pre-merge tree and once again on e15ab97 after main moved. The drivers are in
+the scratchpad, not committed.
 
-**`python app/server.py --mock --no-open --port 8890`**: welcome, then the check, then
-lesson → finish card. The lesson path works: five questions, the counter, the
-hearts, the finish card, 70 XP. The check is 2.1 above, and additionally its
-step-2 dot never lights, because `setStepDots(2)` lives in the `onStart` of the
-"Touch your 6 with your 6." line, which the queue drops as `queue_full` before
-it is ever spoken. The child goes from step 1 straight to step 3 on screen.
+**`python app/server.py --mock --no-open --port 8892`**: welcome, the name, the
+check, a lesson, the finish card.
 
-**`python app/server.py --mock --demo --no-open --port 8891`**: the scripted
-scenario runs end to end and reaches the finish card with 83 XP. It served four
-of its five steps, losing the retry beat, for the reason in 2.4.
+- Welcome and the child roster work. The name is stored, the view routes.
+- The check reaches its third step and accepts an answer, but the answer is
+  judged against the wrong exercise: 2.1.
+- Its step-2 dot never lights, and not for the reason 2.1 gives. `setStepDots(2)`
+  lives in the `onStart` of the "Touch your 6 with your 6." line, and the queue
+  drops that line as `queue_full` before it is ever spoken, so its side effect
+  never runs. The child goes from step 1 straight to step 3 on screen. Putting a
+  screen transition inside the `onStart` of a line the queue is allowed to drop
+  is the shape of the bug, not this one line.
+- The lesson works: five questions, the counter, the hearts, the finish card,
+  70 XP both times.
+- The counter skipped a question in the run on e15ab97 ("1 of 5" straight to
+  "3 of 5"), the mock auto-skip of 2.4 again.
 
-No page errors in either run. One `ERR_CONNECTION_RESET` on first load, before
+**`python app/server.py --mock --demo --no-open --port 8893`**: the scripted
+scenario runs end to end and reaches the finish card, 83 XP on the first tree
+and 62 on e15ab97. Four of five steps both times, a different four each time:
+2.4.
+
+No page errors in any run. One `ERR_CONNECTION_RESET` on first load, before
 the server finished binding; harmless.
+
+---
+
+## 4b. The pattern under most of this
+
+Three of the four blockers have the same shape, and it is worth naming because
+it is what parallel passes do to a codebase rather than what any one author did
+wrong.
+
+A pass lands its own end of a feature, with tests, and the tests pass. The other
+end is somebody else's file, so it is described in a comment instead of written.
+Nobody re-reads the pair, because each half has a green test.
+
+| Feature | The half that landed, tested | The half that did not | The test that passes anyway |
+|---|---|---|---|
+| the success beat | `app/tutor.py` decides it (`tests/test_live_tutor.py:1560-1658`), `app/server.py` sends it (`tests/test_server.py:56`) | `web/course/app.js` plays it | both halves of the pipe are asserted; nothing asserts a beat is ever played |
+| the line that may cut | `app/tutor.py` sets `tutor_line_cuts`, the page's `say(opts.interrupt)` honours it | the wire between them | `tests/test_voice.py:895`, which sets the option by hand |
+| the ready gate | the line and the parameter exist and are in bounds | everything else | `tests/test_opening.py:125-136`, which asserts a constant and a string |
+
+The test suite is 753 green and cannot see any of the three, because in each case
+the two ends were tested separately and the join was not tested at all. A field
+on the state message is not covered by a test that it is sent; it is covered by a
+test that something reads it.
+
+The cheapest guard, and it would have caught all three: one test that asserts
+every key in `TUTOR_FIELDS` appears somewhere in `web/course/app.js`. That is
+crude, and it is exactly the check nobody was in a position to write, because it
+spans two owners' files.
 
 ---
 
