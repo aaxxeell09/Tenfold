@@ -26,3 +26,6 @@ loop/watch-state.json
 .claude/worktrees/
 data/splits/
 dashboard/__marimo__/
+
+# per machine log written by the server, never shared
+data/tutor_log.jsonl
