@@ -183,5 +183,133 @@ the repo. Nothing to revert, and nothing was reverted.
 
 ## 6. After
 
-To be filled in by the same agent, on the same harness, after the three fixes
-land. Same file names, same pinned configuration, same 30 sample target.
+Tree `0c29a06`, run 2026-09-13 18:39:30 to 18:43:15 UTC, one page load, eight
+lesson nodes, **30 correct poses**, the sample target. Same harness, same pinned
+configuration: mock camera, muted, port 8870, the same three probes and the same
+join. The one difference is the path the probe runner puts on `sys.path`, which
+is this agent's worktree rather than the main checkout, because the measuring
+agent works in its own tree. Both are the same commit, `0c29a06`, so the code
+under the probes is the code on main.
+
+### 6.1 Breakdown, milliseconds
+
+| segment | n | median | p90 | worst | best |
+|---|---|---|---|---|---|
+| engine confirmation window | 30 | **68.1** | 69.4 | 78.5 | 68.0 |
+| server and tutor deciding | 30 | 0.4 | 0.5 | 1.8 | 0.2 |
+| publish to the page | 30 | 0.5 | 2.1 | 3.6 | -0.3 |
+| page render, DOM written | 30 | 2.0 | 2.0 | 4.0 | 1.0 |
+| page render, frame painted | 30 | 26.5 | 31.0 | 33.0 | 18.0 |
+| paced speech queue wait | 30 | **2.0** | 2.0 | 4.0 | 1.0 |
+
+The best publish time is -0.3 ms. `Date.now()` in the browser has a one
+millisecond resolution and rounds down, so a message that crosses the loopback
+in under a millisecond can be stamped on arrival at the same integer the server
+stamped it at, or one below. It is the clock's granularity, not a message
+arriving before it was sent.
+
+### 6.2 End to end
+
+| T1 | n | median | worst |
+|---|---|---|---|
+| T0 to the state message on screen | 30 | **71.0** | 81.6 |
+| T0 to the state message painted | 30 | 98 (approx) | 115 (approx) |
+| T0 to the bubble, when the bubble got it | 30 | **71.0** | 81.6 |
+| T0 to the bubble, all 30 samples | 30 | **71.0** | 81.6 |
+| T0 to the bubble painted | 30 | 96.9 | 103.9 |
+
+**Acknowledgements that reached the bubble: 30 out of 30.** Before: 6 out of 31,
+median 655.2 ms. The last row of section 3.2 read "never" for 25 of 31 samples.
+It now reads 71.0 ms for every sample in the run, and in each of the 30 the yes
+sentence is the very first thing the bubble changes to after the pose, with no
+other line in between.
+
+### 6.3 Side by side
+
+| | before | after |
+|---|---|---|
+| engine confirmation window, median | 305.7 ms | 68.1 ms |
+| server and tutor, median | 0.2 ms | 0.4 ms |
+| publish to the page, median | 0.3 ms | 0.5 ms |
+| page render to DOM, median | 1.0 ms | 2.0 ms |
+| speech queue wait, median | 349.0 ms, on the 6 that arrived | 2.0 ms |
+| T0 to the state on screen, median | 307.5 ms | 71.0 ms |
+| T0 to the bubble, median | 655.2 ms, on the 6 that arrived | 71.0 ms |
+| acknowledgement reached the bubble | 6 of 31 | 30 of 30 |
+
+### 6.4 The finding
+
+1. **The confirmation window is a quarter of what it was.** 305.7 ms to 68.1 ms.
+   `Engine._confirmed` takes `pose_confirm_frames` or `pose_confirm_ms`,
+   whichever comes first, and the mock loop hands the lesson a window every
+   33 ms, so the third matching frame arrives 67 ms after the first. That is the
+   68.1 ms measured, to within the quantisation. The 250 ms of `pose_confirm_ms`
+   never binds at this frame rate; it would bind on a camera slower than 12
+   frames a second, which this harness cannot produce.
+
+2. **The queue no longer eats the acknowledgement.** The wait from the message
+   arriving to the bubble reading the yes is 2 ms, which is the bubble being
+   written on the same task as the state. It is not that the queue got faster:
+   the line now cuts, so there is no queue in front of it. This is the number
+   the owner's report was about, and the 25 silent poses of the before run are
+   gone.
+
+3. **What is left is the browser.** 68 ms engine, under 1 ms server and tutor,
+   under 1 ms wire, 2 ms to the DOM, 26 ms to the painted frame. Of the 97 ms
+   the child waits for a painted yes, 70 percent is the confirmation window and
+   27 percent is chromium painting. Nothing in `app/tutor.py` or `app/server.py`
+   is measurable at this scale.
+
+4. **The window is no longer tight.** The mock holds the correct pose until the
+   lesson moves on 2006 ms after T0 (median). The yes now lands in the first
+   3.5 percent of that window, against 39 percent before for the six that made
+   it at all, and never for the other 25.
+
+### 6.5 Two things that surprised the measuring agent
+
+**The tutor never acknowledges anything in mock mode, and the yes on screen is
+not the tutor's.** Across the 2571 state messages of this run, not one carried a
+`tutor_line`: all 35 distinct sentences on the wire are `lesson/tally.py` lines.
+The sentence measured above as the acknowledgement is the tally phrase for the
+`correct_pose` moment, `"Yes. Now count the fingers at the bottom, the two that
+touch and the ones below."`, exactly as the before run measured the tally phrase
+of its own build. The two runs are comparable, and the improvement is real, but
+neither of them measures `pose_ack` from `app/tutor.py`, because it never fires.
+
+Watching `tutor_state` on the wire through four exercises, it goes
+`PROMPTING`, `WORKING`, `VISIBILITY_RECOVERY`, `WORKING`, `WRONG_POSE`, and
+never reaches `POSE_READY`, even while the engine reports `correct_pose`. The
+reason is geometric and is the tutor working as written: `_update_contact`
+refuses a touch whose two fingertips are further apart than
+`contact_ratio` of a palm, and `mock_fingers` in `app/server.py` draws the two
+hands at x 0.32 and x 0.68 and never brings any fingertip pair together. Fed
+through the tutor's own helpers, the nearest cross hand pair in a mock frame is
+**2.36 palms** apart against a contact distance of **0.35**, so the tutor calls
+every mock pose `no_contact`, for ever.
+
+That is correct behaviour on a real camera and a real child. On the mock it
+means the whole tutor layer is dark: no `pose_ack`, no colours, no ghost, no
+rescue card, no ladder above L0. If the mock is the fallback for a camera that
+fails on stage, the demo would run there with the tutor silent. This is not a
+latency finding and this agent owns neither file, so it is written down rather
+than fixed.
+
+**The engine and the tutor disagree for about a second on every exercise.** The
+same watch shows `state=correct_pose` arriving while `tutor_state` is `WORKING`
+and then turning to `WRONG_POSE` inside the same correct pose, which is the same
+disagreement seen from the other side: the engine has latched on the classifier
+flag while the tutor is still measuring the gap. On a real camera the two agree,
+because the fingertips really are together. It is visible here only because the
+mock's are not.
+
+### 6.6 What the after run added to the harness
+
+Nothing in `app/`, `lesson/`, `web/course/` or `tests/` was edited for this run
+either, and `audit/latency.md` is the only file in the repo that changed. The
+four harness files were copied to a second scratchpad directory, `lat_after/`,
+with the one path edit named at the top of this section. Three read only scripts
+were added beside them and none of them is in the repo: `peek.py` and `peek2.py`
+open the same websocket the page opens and print the tutor fields as they
+change, and `extra.py` prints the counts of section 6.5 from the same recorded
+run. The raw records of this run are `after_page.json`, `after_server.jsonl` and
+`after_server.log` in that directory, beside the before run's.
