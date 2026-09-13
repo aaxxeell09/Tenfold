@@ -38,7 +38,8 @@ def git(repo: Path, *args: str) -> str:
 def version_rows(metrics: dict | None, repo: Path, with_diff: bool) -> list[dict]:
     rows = []
     for v in (metrics or {}).get("versions", []):
-        row = {k: v.get(k) for k in ("tag", "version", "sha", "ts", "diagnosis", "patch_hypothesis", "patch", "expected", "gate", "spent_usd")}
+        row = {k: v.get(k) for k in ("tag", "version", "sha", "ts", "kind", "data", "diagnosis", "patch_hypothesis",
+                                     "patch", "expected", "gate", "spent_usd")}
         row["train"], row["heldout"] = slim(v.get("train")), slim(v.get("heldout"))
         sha = v.get("sha")
         if with_diff and sha and sha != "no-commit" and (v.get("version") or 0) > 0:

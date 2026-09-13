@@ -107,6 +107,16 @@ class BudgetExhausted(RuntimeError):
     """What is left under --max-cost cannot pay for the next agent call: the arm stops cleanly."""
 
 
+def data_fingerprint(path: Path) -> dict:
+    """Which dataset a version was measured on: short sha256 of the samples file and its sample count."""
+    import hashlib
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return {"sha": None, "n_samples": 0}
+    return {"sha": hashlib.sha256(raw).hexdigest()[:12], "n_samples": sum(1 for l in raw.splitlines() if l.strip())}
+
+
 class Critic:
     def __init__(self, a: argparse.Namespace):
         self.a = a
@@ -366,6 +376,7 @@ class Critic:
         a = self.a
         self.setup_worktree()
         metrics = self.load_metrics()
+        self.data = data_fingerprint(self.train_path)
         accepted = [v for v in metrics["versions"] if v.get("accepted")]
         if not accepted:
             log("no baseline: evaluating V0 on train", self.logfile)
@@ -374,9 +385,33 @@ class Critic:
                 log("FATAL: V0 evaluation failed", self.logfile)
                 return 2
             entry = {"tag": f"v0{self.suffix}", "version": 0, "sha": base["git_sha"], "train": base["metrics"],
-                     "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": "baseline"}
+                     "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": "baseline",
+                     "kind": "baseline", "data": self.data}
             if not a.dry_run and not a.skip_heldout:
                 h = self.run_eval("heldout", self.rules_src, f"v0{self.suffix}")
+                entry["heldout"] = h["metrics"] if h else None
+            if not a.dry_run:
+                metrics["versions"].append(entry)
+                self.save_metrics(metrics)
+            accepted = [entry]
+        elif (accepted[-1].get("data") or {}).get("sha") != self.data["sha"]:
+            # New captures landed: the running version's train score is stale, so the gate would compare a candidate
+            # on today's data with a baseline on yesterday's. Re-measure the running rules first, then iterate.
+            last, old = accepted[-1], accepted[-1].get("data") or {}
+            k = 1 + sum(1 for v in metrics["versions"] if v.get("kind") == "data_refresh")
+            tag = f"v{last.get('version', 0)}{self.suffix}-data{k}"
+            log(f"data refresh: dataset changed ({old.get('n_samples', '?')} -> {self.data['n_samples']} samples, "
+                f"{self.data['sha']}); re-evaluating the running version as {tag}", self.logfile)
+            res = self.run_eval("train", self.rules_src, tag, report=self.report_src)
+            if res is None:
+                log("FATAL: re-evaluation on the new data failed", self.logfile)
+                return 2
+            entry = {"tag": tag, "version": last.get("version", 0), "sha": res["git_sha"], "train": res["metrics"],
+                     "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "kind": "data_refresh",
+                     "data": self.data, "previous": last["tag"],
+                     "diagnosis": f"data refresh: {old.get('n_samples', '?')} -> {self.data['n_samples']} samples"}
+            if not a.dry_run and not a.skip_heldout:
+                h = self.run_eval("heldout", self.rules_src, tag)
                 entry["heldout"] = h["metrics"] if h else None
             if not a.dry_run:
                 metrics["versions"].append(entry)
@@ -468,7 +503,7 @@ class Critic:
                 entry = {"tag": f"v{version}{self.suffix}", "version": version, "sha": sha, "train": cand["metrics"],
                          "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": diagnosis[:300],
                          "patch": patch_summary, "patch_hypothesis": patch_hypothesis, "expected": expected, "gate": why,
-                         "spent_usd": round(self.spent, 3)}
+                         "spent_usd": round(self.spent, 3), "kind": "patch", "data": self.data}
                 if not a.skip_heldout:
                     h = self.run_eval("heldout", self.rules_src, f"v{version}{self.suffix}")
                     entry["heldout"] = h["metrics"] if h else None

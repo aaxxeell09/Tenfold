@@ -97,3 +97,19 @@ python loop/rehearse.py --nightly --mock --iterations 2   # both arms in paralle
 The canonical runner is a separate clone, `../tenfold-run`, with its own `.env`. The critic commits there
 and those commits are pushed to `main` after each run, so no human working copy ever shares a worktree
 with the loop.
+
+## Continuous: new captures in, better perception out
+
+```
+caffeinate -i ../tenfold/.venv/bin/python loop/watch.py --push --max-cost 20 --critic-args "--skip-heldout"
+```
+
+`loop/watch.py` runs in the runner clone. Every 10 minutes it rebases on `origin/main`. It runs the critic when
+the dataset changed since the last accepted version (a new capture was pushed) or when the previous cycle got a
+version accepted; otherwise it waits and spends nothing. Every version in `data/metrics.json` records the
+fingerprint of the data it was measured on (`data.sha`, `data.n_samples`). When the critic starts on a
+different dataset it first re-evaluates the running rules as a `data_refresh` version (tag `vN-dataK`), so the
+gate never compares a candidate on today's data with a baseline on yesterday's. Accepted versions and a fresh
+`data/snapshot.json` are pushed, so the dashboard shows each data refresh as its own point: the score can drop
+when harder captures arrive, then climb back as the critic adapts. The money cap holds across cycles
+(`loop/watch-state.json`); the log is `loop/watch.log`, the critic's output `loop/watch-critic.out`.

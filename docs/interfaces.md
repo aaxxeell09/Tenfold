@@ -67,8 +67,10 @@ recover frames where MediaPipe lost a hand.
   "generated_at": "2026-09-13T08:30:00+00:00",
   "best_version": "<sha of the version the app runs>",
   "informed": [
-    {"tag": "v0", "version": 0, "sha": "...", "ts": "...", "diagnosis": "baseline", "patch": null, "expected": null,
-     "gate": null, "train": METRICS, "heldout": METRICS},
+    {"tag": "v0", "version": 0, "sha": "...", "ts": "...", "kind": "baseline", "data": {"sha": "3f2a9c1b0d4e", "n_samples": 410},
+     "diagnosis": "baseline", "patch": null, "expected": null, "gate": null, "train": METRICS, "heldout": METRICS},
+    {"tag": "v0-data1", "version": 0, "kind": "data_refresh", "data": {"sha": "9b1c...", "n_samples": 608},
+     "diagnosis": "data refresh: 410 -> 608 samples", "train": METRICS, "heldout": METRICS},
     {"tag": "v1", "version": 1, "sha": "...", "ts": "...", "diagnosis": "DIAGNOSIS: ...", "patch": "...",
      "expected": "...", "gate": "exact_match 0.608 -> 0.750", "train": METRICS, "heldout": METRICS,
      "diff": "unified diff of classifier/rules.py"}

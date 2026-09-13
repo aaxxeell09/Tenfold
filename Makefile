@@ -1,7 +1,7 @@
 PY ?= .venv/bin/python
 N ?= 1
 
-.PHONY: install doctor test run demo eval eval-local eval-heldout knn loop dry-run nightly dashboard snapshot rehearse rehearse-mock
+.PHONY: install doctor test run demo eval eval-local eval-heldout knn loop dry-run nightly watch dashboard snapshot rehearse rehearse-mock
 
 install:
 	uv venv -p 3.11 .venv && uv pip install -p .venv/bin/python -r requirements.txt
@@ -38,6 +38,9 @@ dry-run:        ## diagnostic + patch + guard, prints the diff, commits nothing
 
 nightly:
 	bash loop/nightly.sh 20
+
+watch:          ## continuous loop in the runner clone: pull, iterate on new data, push accepted versions
+	caffeinate -i $(PY) loop/watch.py --push --max-cost $${MAX_COST:-20} --critic-args "--skip-heldout"
 
 dashboard:
 	$(PY) -m marimo run dashboard/loop_dashboard.py
