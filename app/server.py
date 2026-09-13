@@ -1423,8 +1423,15 @@ def encode_jpeg(frame: Any) -> bytes:
 
 
 def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None,
-                camera_name: str | None = None) -> None:
+                camera_name: str | None = None, mirror: bool = True) -> None:
     """Camera, landmarks, normalize, classifier, engine. One frame at a time.
+
+    The frame is mirrored once, here, and that one flip decides three things at
+    the same time, so they cannot drift apart: the child sees a mirror, the
+    detector gets the selfie orientation MediaPipe expects, and the hand at the
+    smaller x is the child's own left hand (SPEC.md 5.2, classifier/schema.py).
+    A camera that already mirrors its own picture would invert all three at
+    once, which is what --no-mirror is for.
 
     Every step is inside the one try, including loading the classifier and
     building the detector: those two raise on a rules file that will not import
@@ -1473,7 +1480,8 @@ def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None,
                 time.sleep(READ_RETRY_S)
                 continue
             failures = 0
-            frame = cv2.flip(frame, 1)
+            if mirror:
+                frame = cv2.flip(frame, 1)
             lesson.hub.set_frame(encode_jpeg(frame))
             window = normalizer.update(detector.detect(frame))
             verdict = classify(window)
@@ -1737,7 +1745,8 @@ def make_scheduler(demo: bool = False) -> Scheduler:
 
 
 def create_app(mock: bool = False, camera: int | None = None,
-               demo: bool = False, camera_name: str | None = None) -> web.Application:
+               demo: bool = False, camera_name: str | None = None,
+               mirror: bool = True) -> web.Application:
     """Wire the hub, the lesson and the worker thread into one aiohttp app.
 
     Split out of main so the tests can drive the whole thing in mock mode without
@@ -1761,7 +1770,7 @@ def create_app(mock: bool = False, camera: int | None = None,
     stop = threading.Event()
     worker = threading.Thread(
         target=mock_loop if mock else camera_loop,
-        args=(lesson, stop) if mock else (lesson, stop, camera, camera_name),
+        args=(lesson, stop) if mock else (lesson, stop, camera, camera_name, mirror),
         daemon=True,
         name="tenfold-capture",
     )
@@ -1802,6 +1811,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="no camera, cycle the three states every 2 s")
     parser.add_argument("--demo", action="store_true",
                         help=f"run the fixed sequence in {DEFAULT_SCENARIO}")
+    parser.add_argument("--no-mirror", action="store_true",
+                        help="the camera already mirrors its own picture, so do "
+                             "not mirror it again. Raise your left hand: if it "
+                             "shows on the right of the screen, you need this")
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
 
@@ -1810,7 +1823,7 @@ def main(argv: list[str] | None = None) -> int:
     enable_tutor()
 
     app = create_app(mock=args.mock, camera=args.camera, demo=args.demo,
-                     camera_name=args.camera_name)
+                     camera_name=args.camera_name, mirror=not args.no_mirror)
 
     url = f"http://localhost:{args.port}"
     labels = [name for name, on in (("mock", args.mock), ("demo", args.demo)) if on]
