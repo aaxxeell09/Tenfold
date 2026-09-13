@@ -1,13 +1,14 @@
 # Consolidation audit, after the morning passes
 
-Commit audited: **dd3ae9e**, which carries origin/main as of the last merge
+Commit audited: **f72df2e**, which carries origin/main as of the last merge
 before this was written.
 
-main moved five times while this was being read (331c4ef, 554dc0d, e15ab97,
-c9e8224, dd3ae9e), so every finding was re-checked at dd3ae9e by grep before
-being kept. Four were fixed under me and are marked as closed rather than
-deleted, because what changed and why is half of what a consolidation audit is
-for; two are new and exist only because of those fixes. Anything fixed and not
+main moved seven times while this was being read (331c4ef, 554dc0d, e15ab97,
+c9e8224, dd3ae9e, fbbeceb, f72df2e), so every finding was re-checked at f72df2e
+by grep before being kept. Eight were fixed under me, in whole or in half, and are marked as closed rather
+than deleted, because what changed and why is half of what a consolidation audit is
+for; two were new, found only because of those fixes, and were themselves fixed
+within the hour. Anything fixed and not
 interesting was simply dropped.
 
 That also means this is a photograph, not a guarantee. Every claim below names
@@ -71,12 +72,28 @@ competing for the machine at the time. An idle mock server polled every 20 s for
 two minutes stayed up and answered 200 every time, so there is no server that
 dies on its own.
 
-The final clean run at dd3ae9e was still in `tests/test_voice.py` when this was
-written, with **one** failure in the preceding 92 percent and no dashboard
-failures at all. I am reporting that honestly rather than rounding it to green:
-the suite is not fully verified at dd3ae9e by me, and the one outstanding F is
-unidentified. Anyone re-running it should give it a clear machine and about
-fifteen minutes.
+The final run was still in `tests/test_voice.py` when I stopped it, with **two**
+failures in the preceding 92 percent and no dashboard failures at all. I killed
+it rather than let it keep competing for the machine I was about to complain
+about. I am reporting that rather than rounding it to green: the suite
+is not fully verified at dd3ae9e by me, and that one F is unidentified.
+
+**And "clean run" turned out to be something I could not have.** While it ran,
+`ps` showed **eight** `app/server.py --mock` processes on this machine, on ports
+43943, 55855, 59303, 60921, 8896 and 8898, from the other agents' own test runs
+and worktrees, plus their pytest sessions. The suite spawns a real aiohttp server
+and a real chromium per module, so four agents sharing one box is not a
+background detail: it is most likely the whole explanation for the 50 failures
+above, for this run taking three times the 475 s of the fastest one, and for the
+one F I cannot name.
+
+That is worth someone's attention beyond this audit. **The browser tests are not
+safe to run concurrently**, and nothing in the suite says so. Four agents told to
+work in parallel will each run `make test`, and the results they get back will be
+about each other rather than about the code. `tests/test_voice.py` picks a free
+port and starts a server per module, which is correct and still not enough under
+real contention: a 20 s startup deadline and a page load are both wall clock, and
+wall clock is the shared resource.
 
 ### Not a red, but worth knowing
 
@@ -103,9 +120,15 @@ symptom.
 - Lines: `lesson/tally_lines.json:71` `gate_pose` is "Touch your 6 with your 6."
   and line 73 `gate_banner` is "That is a 6 and a 6."
 - Server: `app/server.py` passes those pairs to `start_session`.
-- Scheduler: `set_scope` (`lesson/scheduler.py:620-631`) records `self.allowed`,
-  its docstring says **"Neither one steers the draw"**, and `_choose` never reads
-  it. The only reader in the repo is `app/server.py:947`, inside `_mastered_pick`.
+- Scheduler: `set_scope` records `self.allowed`, its docstring says **"Neither
+  one steers the draw"**, and `_choose` never reads it. The only reader in the
+  repo is `_mastered_pick` in `app/server.py`.
+
+> **Do not be fooled by the grep**, as I was on the last pass. `_choose` and
+> `_draw` do call `self._allowed(key, repeat_ok=...)`, but that underscore method
+> is the never-the-same-fact-twice and never-the-same-table-twice rule. It has
+> nothing to do with `self.allowed`, the node's set of pairs. Two names one
+> character apart, one of them dead, in the function where it matters.
 
 The gate's pose step passes on `posed(m)` (`app.js:544`), which is
 `m.state === "correct_pose"`, and that is the engine's verdict on **whatever
@@ -250,51 +273,57 @@ loses that question. This is the exact command SPEC section 15 item 14 names.
 the same way it already does not fire inside the check (`in_check` at
 `app/server.py::mock_loop`). It is one condition on one line.
 
-### 2.4b BUG. The page sends `ready` and the server has no branch for it
+### 2.4b CLOSED, was a BUG. The page sent `ready` and the server had no branch for it
 
-Found on c9e8224, after the gate landed. `web/course/app.js:675`:
+`web/course/app.js` sends `{"type": "ready", "node": "check"}` when the gate's
+last step passes, from two places. `app/server.py::command` had no `ready`
+branch and no `else`, so it passed the ownership check and fell out of the
+`if/elif` chain in silence, not even a log line. It was the brief's "a message
+the page sends that the server ignores".
 
-```js
-    sendLesson({ type: "ready", node: "check" });
+**Fixed at f72df2e**, and fixed in the right shape:
+
+```python
+    def _ready(self) -> None:
+        """The page passed its gate. On a gate this ends the node; on anything
+        else it is a message from a page that is ahead of the server, logged
+        and ignored rather than dropped in silence."""
 ```
 
-`app/server.py::command` handles `start_node`, `hello`, `quit`, `check`, `next`,
-`hint`, `tts`, `speech`, `line_drop` and `repeat`. There is no `ready` branch and
-no `else`, so the message passes the ownership check and then falls out of the
-`if/elif` chain in silence. Not even a log line.
+The second half of that docstring is the part worth keeping: an unknown message
+now leaves a trace instead of vanishing, which is the general fix, not just this
+one message's.
 
-This is the brief's "a message the page sends that the server ignores", and it
-is the direct cause of 2.4c.
+### 2.4c CLOSED, was a BUG. The camera check's threshold was thrown away, twice over
 
-### 2.4c BUG. The camera check measures a threshold that is thrown away, twice over
+`docs/tutor_contract.md` 2.3 says the motion threshold "is computed once per
+server run". When I found this it was computed and then discarded, in two
+independent ways.
 
-`docs/tutor_contract.md` 2.3: "It is computed once per server run." It is not.
+**First**, `end_check()` was unreachable on the gate path: its only caller was
+`_end_session`, which fires on a node's outcome count, and the gate records no
+outcome now that it asks no question, so the child left through `quit` and the
+measurement was never closed. **Fixed**: `_quit` now closes it when the node is
+a gate.
 
-**First**, `end_check()` is never called on the gate path. `app/server.py:1257`
-calls `self.tutor.check_started()` when the node kind is `check`, which turns on
-the jitter collection. The only call to `check_ended()` is at `app/server.py:965`,
-inside `_end_session`. `_end_session` fires when the node's outcome count reaches
-its target, and **the gate records no outcome at all now that it asks no
-question**. The child leaves it through `quit`, and `_quit` (line 1330) calls
-`self.tutor.close("quit", ...)` and never `check_ended()`.
+**Second**, `TutorLink.open` called `build_tutor` unconditionally and
+`_start_node` calls `open` for every node, so each node got a new `Tutor` whose
+`motion_threshold` started at `MOTION_FLOOR` again. A threshold fixed during the
+gate could not reach the lesson after it. **Fixed at f72df2e**, in
+`TutorLink.open`:
 
-So `_jitter_on` stays true for the rest of the run and `motion_threshold` is
-never set from what was measured. It stays at `MOTION_FLOOR`.
+```python
+        # The still hands measurement of the gate fixes the tutor's motion
+        # threshold for the run, and a tutor is built per node: without this
+        # the lesson after the gate would start again on the floor.
+        measured = getattr(self.tutor, "motion_threshold", None)
+```
 
-**Second**, and this one would bite even if the first were fixed:
-`TutorLink.open` (`app/server.py:519-527`) calls `build_tutor` unconditionally,
-and `_start_node` calls `open` for **every node**. Each node therefore gets a
-brand new `Tutor`, whose `motion_threshold` starts at `MOTION_FLOOR` again. A
-threshold measured during the gate could not reach the lesson that follows it
-even if `end_check()` ran, because the object holding it is discarded when the
-lesson node starts.
+Both halves are closed. Kept here because the shape of the bug is worth
+remembering: nothing failed, nothing logged, and the only visible symptom would
+have been `effective_params.motion_threshold` reading 0.3 on every intervention
+line, which Loop 2 would have read as "the threshold does not matter".
 
-The consequence is quiet and total: the whole camera check feature, measure the
-jitter of this camera in this room and scale "the child is moving" to it, has no
-effect on any lesson. Invariant 1 runs on the hard floor for every child in every
-room. Nothing fails, nothing logs, and `effective_params.motion_threshold` on
-every `intervention` line reads 0.3 forever, which is exactly the number Loop 2
-would use to conclude the threshold does not matter.
 
 ### 2.5 BUG. Two ladders on one voice, now sharing a line file
 
@@ -750,10 +779,28 @@ start gate, a lesson, the finish card.
 - On the run at e15ab97 the success line never reached the bubble at all: the
   `exercise_shown` line cut it. 2.2.
 
-**`python app/server.py --mock --demo --no-open --port <p>`**: the scripted
-scenario runs end to end and reaches the finish card both times, 83 XP on the
-first tree and 62 on e15ab97. Four of the five steps both times, a different four
-each time. 2.4.
+**`python app/server.py --mock --demo --no-open --port <p>`**: run three times,
+last of them at the final HEAD. **The scripted scenario runs end to end every
+time and reaches the finish card**, 83 XP, 62 XP and 83 XP.
+
+It served four of its five steps every time, and not the same four:
+
+```
+pre-merge tree: ['8 × 7', '6 × 8', '6 × 6', '8 × 6']   step 4 lost
+e15ab97:        ['6 × 8', '6 × 6', '7 × 8', '8 × 6']   step 1 lost
+final HEAD:     ['8 × 7', '6 × 8', '6 × 6', '8 × 6']   step 4 lost
+```
+
+Which step goes depends on where the wall clock sits when the node opens. 2.4.
+
+**One thing the stage needs to know.** The gate now stands in front of the demo
+too, and the last of its three steps is passed by saying "I'm ready". With no
+working microphone, which is every headless browser and may well be the demo
+laptop, the way through is a Ready button that appears after
+`gate_ready_button_s`, six seconds, and has to be tapped. The driver above had
+to do exactly that before the lesson would open. Nothing is broken; it is six
+seconds and a tap that nobody has rehearsed, at the very front of a three minute
+demo.
 
 **A false alarm, recorded so nobody re-finds it.** A mock server of mine died
 mid session and the symptom, `ERR_CONNECTION_REFUSED`, matched the one that made
@@ -813,6 +860,10 @@ side *should* do.
 
 Ordered by cost if nobody touches it.
 
+0. **Name `Scheduler.allowed` something else, whatever else is decided** (2.1).
+   It sits one underscore away from `_allowed`, which is live and unrelated, in
+   the same two functions. It cost me a wrong reading on one pass and it will
+   cost the next person the same.
 1. **The gate's pose step and F10** (2.1). Exempt `kind == "check"` from the
    uniform draw, or take the gate off the scheduler. Today the gate says "Touch
    your 6 with your 6" while the engine is on another fact, so a child who obeys
@@ -823,10 +874,8 @@ Ordered by cost if nobody touches it.
 3. **The mock auto-skip under `--demo`** (2.4). One condition on one line, and
    without it `make demo` is not reproducible, which is the whole point of
    `demo/scenario.json`. Axel.
-4. **`ready` and `end_check`** (2.4b, 2.4c). The page sends a message the server
-   drops, and the camera check's threshold is both never fixed and thrown away
-   per node. Decide whether the measurement is meant to survive a node at all; if
-   it is, it cannot live on an object rebuilt per node. Axel and Ilan.
+4. ~~The camera check's threshold and the `ready` message~~ (2.4b, 2.4c).
+   **Both closed at f72df2e** while this was being written. Nothing to decide.
 5. **Which ladder speaks** (2.5). This is now the second most expensive one
    after the gate. The visual ladder pass decided Tally shows before he speaks
    and made L1 and L2 silent; the server's `hint_1..3` ladder speaks at 5 s and
@@ -853,6 +902,14 @@ Ordered by cost if nobody touches it.
     microphone waits for a way forward is a constant in the page rather than a
     bounded policy number. Small, and it will rot quietly because the fallback
     is graceful.
+
+11. **The browser tests under parallel agents** (section 1). Eight mock servers
+    from four agents were running on this machine while the final suite ran. The
+    failures a parallel agent sees from `tests/test_voice.py` are mostly about
+    the other agents. Either those tests get a marker and stay out of the default
+    `make test`, or the team accepts that a red `test_voice.py` means nothing
+    until it is re-run alone. I lost an hour to this and wrote a phantom blocker
+    before catching it.
 
 And one that is nobody's feature but everybody's problem: **a test that a field
 is sent is not a test that anything reads it** (4b). Four of the findings above
