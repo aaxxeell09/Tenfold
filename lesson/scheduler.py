@@ -61,6 +61,8 @@ FAST_SUCCESS_S = 5.0
 FAST_SUCCESSES_FOR_LEVEL_UP = 3
 LEVEL_UP_STEPS = 2
 RETRY_AFTER_EXERCISES = 2
+# At most one due fact from outside the node may be slipped into a lesson.
+MAX_OUTSIDE_REVIEWS = 1
 MASTERED_FROM = 4
 ERRORS_BEFORE_CONFIDENCE = 2
 NEW_FACT_SUCCESSES_REQUIRED = 2
@@ -444,12 +446,22 @@ class Scheduler:
         self.errors_since_confidence = 0
         self.ending_on_success = False
         self.previous_session_failures: set[str] = set()
+        # A course node scopes the session: only its pairs may open as new
+        # material, and it fixes the length. Due reviews from other nodes are
+        # still allowed in, which is the point of spaced repetition.
+        self.allowed: set[str] | None = None
+        self.orientations: dict[str, list[tuple[int, int]]] = {}
+        self.target: int | None = None
+        self.outside_reviews = 0
 
     # -- session lifecycle --
 
-    def start_session(self, now: datetime | None = None) -> dict[str, Any]:
+    def start_session(self, now: datetime | None = None,
+                      pairs: Sequence[Sequence[int]] | None = None,
+                      length: int | None = None) -> dict[str, Any]:
         moment = now or now_utc()
         self.started_at = moment
+        self.set_scope(pairs, length)
         self.state.sessions += 1
         self.session = self.state.sessions
         self.onboarding = self.session == 1
@@ -466,10 +478,33 @@ class Scheduler:
         return {
             "session": self.session,
             "onboarding": self.onboarding,
+            "target": self.target,
+            "allowed": sorted(self.allowed) if self.allowed else [],
             "steps": onboarding_steps() if self.onboarding else [],
             "plan": list(self.plan),
             "opening_fact": self.opening_fact,
         }
+
+    def set_scope(self, pairs: Sequence[Sequence[int]] | None,
+                  length: int | None) -> None:
+        """Restrict the session to one course node, or clear the restriction."""
+        self.target = length
+        if not pairs:
+            self.allowed = None
+            self.orientations = {}
+            return
+        self.allowed = set()
+        self.orientations = {}
+        for pair in pairs:
+            left, right = int(pair[0]), int(pair[1])
+            key = fact_key(left, right)
+            self.allowed.add(key)
+            self.orientations.setdefault(key, [])
+            if (left, right) not in self.orientations[key]:
+                self.orientations[key].append((left, right))
+
+    def _in_scope(self, key: str) -> bool:
+        return self.allowed is None or key in self.allowed
 
     def _failures_in(self, session: int) -> set[str]:
         return {
@@ -513,10 +548,20 @@ class Scheduler:
             return None
         if pick.is_new:
             self.new_this_session.append(pick.fact)
+        if not self._in_scope(pick.fact):
+            self.outside_reviews += 1
         self.history.append(pick)
         return pick
 
     def _owes_a_success(self) -> bool:
+        """Whether one more exercise is owed so the session ends on a success.
+
+        Never inside a course node: its length is fixed and the page scores
+        correct out of that length, so a rescue exercise would make three stars
+        arithmetically impossible.
+        """
+        if self.target is not None:
+            return False
         return bool(self.outcomes) and not self.outcomes[-1].correct \
             and not self.ending_on_success
 
@@ -552,9 +597,18 @@ class Scheduler:
             if index >= due_index:
                 yield key, REACTION_RETRY, False
 
-        # 2. the oldest due fact
-        for key in self._due_facts(now):
-            yield key, REACTION_REVIEW, False
+        # 2. the oldest due fact. Inside the node first. A due fact from another
+        # node may be slipped in, which is the whole point of spaced repetition,
+        # but at most one per node and never as the opening exercise: a lesson
+        # named after two facts has to be about those two facts.
+        due = self._due_facts(now)
+        for key in due:
+            if self._in_scope(key):
+                yield key, REACTION_REVIEW, False
+        if self.allowed is not None and index > 0 and self.outside_reviews < MAX_OUTSIDE_REVIEWS:
+            for key in due:
+                if not self._in_scope(key):
+                    yield key, REACTION_REVIEW, False
 
         # 4. the next new fact, only once the last two new ones landed first try
         if self._may_open_a_new_fact():
@@ -567,9 +621,12 @@ class Scheduler:
         for key in self._facts_at_mastery(1, 2):
             yield key, REACTION_REVIEW, False
 
-        # and finally anything already seen, so a session never stalls
+        # and finally anything in scope, so a session never stalls
         for key in fact_order(self.state):
-            if self.state.math.get(key, Record()).seen:
+            if self._in_scope(key) and self.state.math.get(key, Record()).seen:
+                yield key, REACTION_REVIEW, False
+        for key in fact_order(self.state):
+            if self._in_scope(key):
                 yield key, REACTION_REVIEW, False
 
     def _due_facts(self, now: datetime) -> list[str]:
@@ -588,7 +645,8 @@ class Scheduler:
 
     def _facts_at_mastery(self, low: int, high: int) -> list[str]:
         return [key for key in fact_order(self.state)
-                if low <= self.state.math.get(key, Record()).mastery <= high
+                if self._in_scope(key)
+                and low <= self.state.math.get(key, Record()).mastery <= high
                 and self.state.math.get(key, Record()).seen]
 
     def _may_open_a_new_fact(self) -> bool:
@@ -598,7 +656,8 @@ class Scheduler:
 
     def _next_new_fact(self) -> str | None:
         unseen = [key for key in fact_order(self.state)
-                  if not self.state.math.get(key, Record()).seen]
+                  if self._in_scope(key)
+                  and not self.state.math.get(key, Record()).seen]
         if not unseen:
             return None
         step = min(self.level_bonus, len(unseen) - 1)
@@ -615,21 +674,32 @@ class Scheduler:
         """The relief valve: a session must never stall for want of a candidate.
 
         It still respects both pick rules when any fact satisfies them, and only
-        drops the repeated factor rule when literally nothing else is legal.
+        drops the repeated factor rule when literally nothing else is legal. A
+        node with two pairs leaves no legal third choice, so the rule has to bend
+        rather than end the lesson early.
         """
-        for key in fact_order(self.state):
+        pool = [key for key in fact_order(self.state) if self._in_scope(key)]
+        for key in pool:
             if self._allowed(key):
                 left, right = self._orientation(key)
                 return Pick(key, left, right, REACTION_REVIEW)
         previous = self.history[-1].fact if self.history else None
-        for key in fact_order(self.state):
+        for key in pool:
             if key != previous:
                 left, right = self._orientation(key)
                 return Pick(key, left, right, REACTION_REVIEW)
-        return None
+        return Pick(pool[0], *self._orientation(pool[0]), REACTION_REVIEW) if pool else None
 
     def _orientation(self, key: str) -> tuple[int, int]:
-        """Alternate the two orientations of a fact across its attempts."""
+        """Alternate the two orientations of a fact across its attempts.
+
+        A course node names its orientations explicitly, for example [6, 8] and
+        [8, 6], so when one is in scope its list wins over the default pair.
+        """
+        listed = self.orientations.get(key)
+        if listed:
+            seen = len(self.state.math.get(key, Record()).attempts)
+            return listed[seen % len(listed)]
         low, high = factors_of(key)
         if low == high:
             return low, high
@@ -726,6 +796,14 @@ class Scheduler:
 
     def _stop_reason(self, now: datetime) -> str | None:
         done = len(self.outcomes)
+        # A course node fixes its own length and overrides the open session
+        # shape: five exercises for a lesson, eight for a boss.
+        if self.target is not None:
+            if done >= self.target:
+                return REACTION_END_SUCCESS
+            if (now - self.started_at).total_seconds() >= SESSION_HARD_STOP_S:
+                return REACTION_END_TIRED
+            return None
         if (now - self.started_at).total_seconds() >= SESSION_HARD_STOP_S:
             return REACTION_END_TIRED
         if done >= SESSION_MAX_EXERCISES:
@@ -823,8 +901,12 @@ class ScriptedScheduler(Scheduler):
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls(raw, state=state, now=now)
 
-    def start_session(self, now: datetime | None = None) -> dict[str, Any]:
-        started = super().start_session(now)
+    def start_session(self, now: datetime | None = None,
+                      pairs: Sequence[Sequence[int]] | None = None,
+                      length: int | None = None) -> dict[str, Any]:
+        # The scope is accepted and recorded, but the script is the script: a
+        # demo that reshuffled itself to fit the node would not be a demo.
+        started = super().start_session(now, pairs=pairs, length=length)
         # The demo never plays the onboarding, whatever the stored state says.
         self.onboarding = bool(self.scenario.get("onboarding", False))
         started["onboarding"] = self.onboarding

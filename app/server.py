@@ -88,7 +88,10 @@ LESSON_KEY: web.AppKey = web.AppKey("lesson")
 STOP_KEY: web.AppKey = web.AppKey("stop")
 
 WEB_DIR = REPO_ROOT / "web"
-INDEX = WEB_DIR / "tenfold.html"
+COURSE_DIR = WEB_DIR / "course"
+INDEX = COURSE_DIR / "index.html"
+# Five exercises for a lesson, eight for a boss, matching web/course/levels.js.
+NODE_LENGTH = {"lesson": 5, "boss": 8}
 
 DEFAULT_PORT = 8000
 VIDEO_FPS = 20.0
@@ -147,7 +150,7 @@ def moment_of(update: Update, hands_seen: int) -> str:
 def build_message(update: Update, fingers: list[dict[str, Any]],
                   hands_seen: int, reaction: str | None = None,
                   pick: Pick | None = None, hint_level: int = 0,
-                  session: int = 0) -> dict[str, Any]:
+                  session: int = 0, node: str | None = None) -> dict[str, Any]:
     context = {"hint": update.hint, "answer": update.answer,
                "exercise": update.exercise.title}
     # A reaction from the scheduler outranks the screen state: it is the thing
@@ -165,9 +168,14 @@ def build_message(update: Update, fingers: list[dict[str, Any]],
         "fingers": fingers,
         "reason": pick.reason if pick else None,
         "reaction": reaction,
+        "hint": dict(update.hint),
         "hint_level": hint_level,
         "fact": pick.fact if pick else None,
         "session": session,
+        # Which course node this belongs to. The page drops anything that is not
+        # the node it started, so a message left over from before can never be
+        # rendered in the middle of a lesson.
+        "node": node,
     }
 
 
@@ -233,10 +241,14 @@ class Lesson:
     goes through the one lock here.
     """
 
-    def __init__(self, engine: Engine, hub: Hub, scheduler: Scheduler) -> None:
+    def __init__(self, engine: Engine, hub: Hub,
+                 make_scheduler: Callable[[bool], Scheduler]) -> None:
         self.engine = engine
         self.hub = hub
-        self.scheduler = scheduler
+        self.make_scheduler = make_scheduler
+        self.scheduler = make_scheduler(False)
+        self.learner = self.scheduler.state
+        self.demo_played = False
         self._lock = threading.Lock()
         self._fingers: list[dict[str, Any]] = []
         self._hands_seen = 0
@@ -252,6 +264,13 @@ class Lesson:
         self.unknown_since: float | None = None
         self.recorded = False
         self.finished = False
+        self.node: dict[str, Any] | None = None
+        self.correct = 0
+        self.demo_available = False
+        # Nothing is scored, recorded or advanced until somebody starts a
+        # session, so the mock loop cannot write into the learner record while
+        # the child is still looking at the course map.
+        self.running = False
 
     # -- pushing --
 
@@ -259,15 +278,23 @@ class Lesson:
         self.hub.publish(build_message(
             update, self._fingers, self._hands_seen, reaction=reaction,
             pick=self.pick, hint_level=self.hint_level,
-            session=self.scheduler.session))
+            session=self.scheduler.session,
+            node=(self.node or {}).get("id")))
         self._last_push = time.monotonic()
 
     def start(self) -> None:
+        """Ready, but idle.
+
+        No session begins here. The course shell starts a node, and a bare client
+        says hello; either way the session is scoped by whoever asked for it.
+        Starting an open session at boot used to write its outcomes into the
+        learner record, so every fact it touched then came back as a due review
+        inside the first node the child opened.
+        """
         with self._lock:
-            started = self.scheduler.start_session(now_utc())
-            self.trace("session_start", started)
             self.engine.start()
-            self._advance()
+            self.hub.publish(build_message(
+                self.engine.snapshot(), [], 0, session=0))
 
     def _advance(self) -> None:
         """Load the next exercise, or end the session. Call with the lock held."""
@@ -295,13 +322,19 @@ class Lesson:
         metrics = self.scheduler.metrics()
         self.trace("session_end", {**metrics, **summary.to_dict()})
         self.hub.publish({
-            "type": "session_end",
+            "type": "node_end" if self.node else "session_end",
+            "node_id": (self.node or {}).get("id"),
+            "correct": self.correct,
+            "total": len(self.scheduler.outcomes),
             "state": self.scheduler.state.to_dict(),
             "metrics": metrics,
             "summary": summary.to_dict(),
             "tally": tally.phrase(summary.reason,
                                   {"tomorrow": _fact_title(summary.tomorrow)}),
         })
+        self.node = None
+        self.pick = None
+        self.running = False
 
     # -- from the camera thread --
 
@@ -310,7 +343,7 @@ class Lesson:
         with self._lock:
             self._fingers = fingers
             self._hands_seen = hands_seen
-            if self.finished:
+            if self.finished or not self.running:
                 return
             update = self.engine.observe(gesture, now)
             reaction = self._reaction(gesture, update, now)
@@ -355,7 +388,11 @@ class Lesson:
     def command(self, message: dict[str, Any]) -> None:
         kind = message.get("type")
         with self._lock:
-            if kind == "hello":
+            if kind == "start_node":
+                self._start_node(message.get("node") or {}, message.get("state"))
+            elif kind == "quit":
+                self._quit()
+            elif kind == "hello":
                 self._hello(message.get("state"))
             elif kind == "check":
                 self._check(_as_int(message.get("value")))
@@ -372,25 +409,70 @@ class Lesson:
         counted as a failure either: mastery only moves on an actual pose or
         math error, so skipping costs the child nothing.
         """
+        if not self.running:
+            return
         if self.pick is not None and not self.recorded:
             self._record(correct=False, given=None)
         self._advance()
 
-    def _hello(self, raw: Any) -> None:
-        """The page hands over what it kept in localStorage."""
-        if self.finished or self.scheduler.outcomes:
-            return                      # a session is already running, keep it
-        self.scheduler.state = LearnerState.from_dict(raw, now=now_utc())
-        started = self.scheduler.start_session(now_utc())
-        self.trace("session_start", started)
+    def _start_node(self, node: dict[str, Any], raw: Any) -> None:
+        """Begin a course node: its pairs scope the session, its kind its length."""
+        pairs = [list(pair) for pair in node.get("pairs") or []]
+        length = int(node.get("count") or NODE_LENGTH.get(node.get("kind", "lesson"), 5))
+        if raw is not None:
+            self.learner = LearnerState.from_dict(raw, now=now_utc())
+
+        self.scheduler = self._new_scheduler()
+
+        self.node = dict(node)
+        self.correct = 0
         self.finished = False
+        self.running = True
+        started = self.scheduler.start_session(now_utc(), pairs=pairs, length=length)
+        started["node"] = node.get("id")
+        self.trace("node_start", started)
+        self._advance()
+
+    def _new_scheduler(self) -> Scheduler:
+        """A fresh session on the same learner. The demo plays its fixed
+        sequence once, on the first session of the run."""
+        scripted = self.demo_available and not self.demo_played
+        self.demo_played = self.demo_played or scripted
+        scheduler = self.make_scheduler(scripted)
+        scheduler.state = self.learner
+        return scheduler
+
+    def _quit(self) -> None:
+        """The child left the lesson. Nothing is recorded, nothing is scored."""
+        self.node = None
+        self.pick = None
+        self.finished = True
+        self.running = False
+
+    def _hello(self, raw: Any) -> None:
+        """A client with no course shell: open session, no node, no length."""
+        self.learner = LearnerState.from_dict(raw, now=now_utc())
+        if self.node is not None or self.scheduler.outcomes:
+            return                      # a node is already running, keep it
+        self.scheduler = self._new_scheduler()
+        self.finished = False
+        self.running = True
+        self.trace("session_start", self.scheduler.start_session(now_utc()))
         self._advance()
 
     def _check(self, value: int | None) -> None:
+        if not self.running:
+            return
         update = self.engine.check(value)
         if update is None or self.pick is None:
             return
         correct = update.state == "answer_correct"
+        # What counts for the node stars is the answer, first try. Fixing a
+        # finger on the way is how the input works, not a mistake: a child who
+        # corrects their hand and then answers right has earned the point.
+        # The pose error still lands on pose mastery through the outcome below.
+        if correct and not self.math_error:
+            self.correct += 1
         reaction = None if correct else answer_reaction(self.pick.result, value)
         if not correct:
             self.math_error = True
@@ -580,6 +662,11 @@ def make_app(lesson: Lesson) -> web.Application:
             raise web.HTTPNotFound(text=f"missing {INDEX}")
         return web.FileResponse(INDEX, headers={"Cache-Control": "no-store"})
 
+    def course_file(path: Path) -> Any:
+        async def handler(request: web.Request) -> web.StreamResponse:
+            return web.FileResponse(path, headers={"Cache-Control": "no-store"})
+        return handler
+
     async def video(request: web.Request) -> web.StreamResponse:
         response = web.StreamResponse(headers={
             "Content-Type": "multipart/x-mixed-replace; boundary=frame",
@@ -587,7 +674,7 @@ def make_app(lesson: Lesson) -> web.Application:
         })
         await response.prepare(request)
         try:
-            while True:
+            while not request.transport or not request.transport.is_closing():
                 jpeg = hub.frame()
                 if jpeg:
                     await response.write(
@@ -596,7 +683,12 @@ def make_app(lesson: Lesson) -> web.Application:
                         + jpeg + b"\r\n"
                     )
                 await asyncio.sleep(1 / VIDEO_FPS)
-        except (asyncio.CancelledError, ConnectionResetError, ConnectionAbortedError):
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Any way a viewer can go away has to end this loop. A stream that
+            # keeps writing to a closed socket piles up until the server stops
+            # answering new requests, which looks like the page hanging.
             pass
         return response
 
@@ -617,8 +709,12 @@ def make_app(lesson: Lesson) -> web.Application:
                     continue
                 try:
                     lesson.command(json.loads(raw.data))
-                except (json.JSONDecodeError, AttributeError):
+                except json.JSONDecodeError:
                     log.warning("server: ignored a malformed command")
+                except Exception:
+                    # A bad command must never take the socket down with it: the
+                    # child would be left looking at a frozen lesson.
+                    log.exception("server: command failed")
         finally:
             pumping.cancel()
             hub.unsubscribe(queue)
@@ -628,8 +724,13 @@ def make_app(lesson: Lesson) -> web.Application:
     app.router.add_get("/", index)
     app.router.add_get("/video", video)
     app.router.add_get("/ws", websocket)
-    if WEB_DIR.exists():
-        app.router.add_static("/web", WEB_DIR, name="web")
+    # The course shell asks for styles.css, levels.js and app.js next to the
+    # page, so each file is routed by name. Naming them one by one rather than
+    # serving the directory keeps path traversal off the table entirely.
+    if COURSE_DIR.exists():
+        for item in sorted(COURSE_DIR.iterdir()):
+            if item.is_file() and item.name != "index.html":
+                app.router.add_get(f"/{item.name}", course_file(item))
     app[LESSON_KEY] = lesson
     return app
 
@@ -653,7 +754,8 @@ def create_app(mock: bool = False, camera: int | None = None,
     a camera, a browser or a port.
     """
     hub = Hub()
-    lesson = Lesson(Engine(), hub, make_scheduler(demo))
+    lesson = Lesson(Engine(), hub, make_scheduler)
+    lesson.demo_available = demo
     lesson.trace = make_tracer()
     stop = threading.Event()
     worker = threading.Thread(

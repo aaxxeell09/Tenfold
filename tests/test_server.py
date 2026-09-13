@@ -42,7 +42,7 @@ def test_build_message_carries_everything_the_page_renders():
 
     assert set(message) == {"type", "state", "exercise", "tally", "wrong", "match",
                             "answer", "reasoning", "fingers", "reason", "reaction",
-                            "hint_level", "fact", "session"}
+                            "hint", "hint_level", "fact", "session", "node"}
     assert message["state"] == "wrong_pose"
     assert message["exercise"] == "8 x 7"
     assert message["wrong"] == [{"hand": "right", "number": 9}]
@@ -104,8 +104,8 @@ def test_the_page_is_served_at_the_root():
             response = await client.get("/")
             assert response.status == 200
             body = await response.text()
-            assert "Tenfold.connect" in body
-            assert 'src="/video"' in body
+            assert 'id="course"' in body, "the course shell is the page now"
+            assert 'src="app.js' in body and 'src="levels.js' in body
         finally:
             await client.close()
             await srv.close()
@@ -134,7 +134,8 @@ def test_the_websocket_pushes_the_lesson_and_takes_commands():
         srv, client = await _client(app)
         try:
             ws = await client.ws_connect("/ws")
-            first = await asyncio.wait_for(ws.receive_json(), timeout=5)
+            await ws.send_json({"type": "hello", "state": None})
+            first = await _await_fact(ws)
             assert first["type"] == "state"
             assert first["exercise"]
 
@@ -164,6 +165,7 @@ def test_the_mock_reaches_the_three_states():
         srv, client = await _client(app)
         try:
             ws = await client.ws_connect("/ws")
+            await ws.send_json({"type": "hello", "state": None})
             seen = set()
             deadline = asyncio.get_running_loop().time() + 12
             while asyncio.get_running_loop().time() < deadline:
@@ -177,6 +179,17 @@ def test_the_mock_reaches_the_three_states():
             await client.close()
             await srv.close()
     run(scenario())
+
+
+async def _await_fact(ws, timeout: float = 6.0):
+    """The first message carrying an exercise, once a session is under way."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        message = await asyncio.wait_for(ws.receive_json(), timeout=timeout)
+        if message.get("fact"):
+            return message
+    raise AssertionError("no exercise ever arrived")
 
 
 async def _await_state(ws, state: str, timeout: float = 6.0):
@@ -242,6 +255,54 @@ def test_a_session_ends_with_the_state_for_the_page_to_store():
             assert end["metrics"]["session"] == 1
             assert end["summary"]["reason"] in ("end_success", "end_tired")
             assert end["tally"]
+            await ws.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_the_course_assets_are_served_next_to_the_page():
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            for name, needle in (("/levels.js", "recordLesson"),
+                                 ("/app.js", "TenfoldLevels"),
+                                 ("/styles.css", ".lesson")):
+                response = await client.get(name)
+                assert response.status == 200, name
+                assert needle in await response.text(), name
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_a_node_scopes_the_session_to_its_pairs_and_length():
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            ws = await client.ws_connect("/ws")
+            await ws.send_json({"type": "start_node", "state": None, "node": {
+                "id": "u1-l1", "kind": "lesson", "pairs": [[6, 6], [7, 7]]}})
+            facts, end = [], None
+            deadline = asyncio.get_running_loop().time() + 25
+            while asyncio.get_running_loop().time() < deadline:
+                message = await asyncio.wait_for(ws.receive_json(), timeout=5)
+                if message["type"] == "node_end":
+                    end = message
+                    break
+                if (message["type"] == "state" and message.get("fact")
+                        and message.get("node") == "u1-l1"):
+                    if not facts or facts[-1] != message["fact"]:
+                        facts.append(message["fact"])
+                        await ws.send_json({"type": "next"})
+            assert end is not None, "the node never ended"
+            assert end["node_id"] == "u1-l1"
+            assert end["total"] == 5, "a lesson is five exercises"
+            assert set(facts) <= {"6x6", "7x7"}, facts
             await ws.close()
         finally:
             await client.close()

@@ -570,3 +570,79 @@ def test_the_pick_rules_hold_even_when_almost_nothing_is_known():
         assert not shared, (
             f"factor {shared} three times at {i}: "
             f"{[p.fact for p in picks[:i + 1]]}")
+
+
+# --- course nodes ------------------------------------------------------------
+
+
+def test_a_node_scopes_new_material_to_its_own_pairs():
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    picks = []
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        picks.append(pick)
+        engine.record(answered(pick), now=T0)
+    assert {p.fact for p in picks} <= {"6x6", "7x7"}
+    assert engine.next_exercise(T0) is None, "a lesson is exactly five exercises"
+
+
+def test_a_boss_node_is_eight_exercises():
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[7, 8], [8, 9], [9, 9], [6, 10]], length=8)
+    count = 0
+    while engine.next_exercise(T0) is not None and count < 20:
+        count += 1
+        engine.record(answered(engine.history[-1]), now=T0)
+    assert count == 8
+
+
+def test_a_node_never_adds_a_rescue_exercise():
+    """The page scores correct out of the node length, so the length is fixed."""
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    count = 0
+    while engine.next_exercise(T0) is not None and count < 20:
+        count += 1
+        engine.record(answered(engine.history[-1], correct=False), now=T0)
+    assert count == 5, "all five failed, and still exactly five"
+
+
+def test_a_node_uses_the_orientations_it_lists():
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 8], [8, 6]], length=4)
+    seen = set()
+    for _ in range(4):
+        pick = engine.next_exercise(T0)
+        seen.add((pick.left, pick.right))
+        engine.record(answered(pick), now=T0)
+    assert seen == {(6, 8), (8, 6)}
+
+
+def test_a_node_with_one_orientation_never_flips_it():
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[9, 6]], length=3)
+    for _ in range(3):
+        pick = engine.next_exercise(T0)
+        assert (pick.left, pick.right) == (9, 6)
+        engine.record(answered(pick), now=T0)
+
+
+def test_a_due_review_from_another_node_may_be_inserted():
+    """Spaced repetition is the point: an old fact can come back mid lesson."""
+    state = learner(sessions=3, **{"10x10": 1})
+    state.fact("10x10").due_session = 4
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    facts = []
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        facts.append(pick.fact)
+        engine.record(answered(pick), now=T0)
+    assert "10x10" in facts, facts

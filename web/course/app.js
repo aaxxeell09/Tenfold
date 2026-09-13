@@ -163,85 +163,331 @@
     document.body.classList.toggle("is-locked", view !== "map");
   }
 
-  function startLesson(id) {
-    const node = L.findNode(id);
-    lesson = { node, qs: L.questions(node, Date.now() % 100000), i: 0, hearts: 5, correct: 0, selected: null, checked: false, t0: Date.now(), hit: false };
-    openNode = null;
-    show("lesson");
-    renderLesson();
+  // ---------- the camera lesson ----------
+  // The multiple choice lesson is gone. A node now opens the practice view: the
+  // mirrored camera, the finger numbers drawn over it, Tally bottom left, and an
+  // answer given out loud or typed. app/server.py drives it through
+  // lesson/scheduler.py, scoped to node.pairs; this file only renders and counts.
+
+  const MOOD = {
+    exercise_shown: "ready", waiting_pose: "ready", wrong_pose: "almost",
+    correct_pose: "thinking", waiting_answer: "thinking",
+    answer_correct: "happy", answer_wrong: "almost",
+  };
+
+  function tallySvg() {
+    return `<svg class="tally-art" viewBox="0 0 120 120" aria-hidden="true">
+      <g class="tally-fingers">
+        <rect x="28" y="16" width="13" height="42" rx="6.5" fill="#ffd7a8"/>
+        <rect x="45" y="10" width="13" height="48" rx="6.5" fill="#ffd7a8"/>
+        <rect x="62" y="13" width="13" height="45" rx="6.5" fill="#ffd7a8"/>
+        <rect x="79" y="22" width="13" height="36" rx="6.5" fill="#ffd7a8"/>
+      </g>
+      <rect x="6" y="52" width="26" height="13" rx="6.5" fill="#ffc894"
+            transform="rotate(-24 19 58)"/>
+      <rect x="24" y="50" width="72" height="60" rx="22" fill="#ffc894"/>
+      <g class="tally-face">
+        <g class="tally-eyes">
+          <circle class="eye" cx="48" cy="74" r="5.5" fill="#3c2a1e"/>
+          <circle class="eye" cx="72" cy="74" r="5.5" fill="#3c2a1e"/>
+          <path class="eye-shut" d="M42 75q6-7 12 0M66 75q6-7 12 0" fill="none"
+                stroke="#3c2a1e" stroke-width="4" stroke-linecap="round"/>
+          <path class="eye-slit" d="M42 74h12M66 74h12" fill="none"
+                stroke="#3c2a1e" stroke-width="4" stroke-linecap="round"/>
+        </g>
+        <path class="mouth" fill="none" stroke="#3c2a1e" stroke-width="4"
+              stroke-linecap="round" d="M50 91q10 8 20 0"/>
+      </g>
+    </svg>`;
   }
 
-  function renderLesson() {
-    const s = lesson;
-    const q = s.qs[s.i];
-    const done = s.i + (s.checked ? 1 : 0);
-    const right = s.checked && q.options[s.selected] === q.answer;
-    const kicker = q.type === "tens" ? "Count the tens" : s.node.kind === "boss" ? "Boss fight" : "New fact";
-    const options = q.options.map((v, i) => {
-      let cls = "option";
-      if (s.checked && v === q.answer) cls += " is-right";
-      else if (s.checked && i === s.selected) cls += " is-wrong";
-      else if (!s.checked && i === s.selected) cls += " is-selected";
-      return `<button class="${cls}" data-action="pick" data-i="${i}"><kbd>${i + 1}</kbd>${v}</button>`;
-    }).join("");
-    let foot;
-    if (!s.checked) {
-      foot = `<div class="lesson-foot"><div class="lesson-foot-inner">
-        <span class="skip-hint">Pick an answer, or press 1 to 4</span>
-        <button class="btn ${s.selected === null ? "btn-disabled" : ""}" data-action="check">Check</button></div></div>`;
-    } else {
-      foot = `<div class="lesson-foot ${right ? "is-right" : "is-wrong"}"><div class="lesson-foot-inner">
-        <div class="verdict"><div class="verdict-badge">${right ? ICON.check.replace('stroke="#fff"', 'stroke="#58a700"') : ICON.close.replace('stroke="currentColor"', 'stroke="#ea2b2b"')}</div>
-          <div><h2>${right ? pick(["Nice!", "Awesome!", "You got it!", "Great job!"]) : "Correct answer:"}</h2><p>${right ? q.hint : `${q.answer} · ${q.hint}`}</p></div></div>
-        <button class="btn ${right ? "" : "btn-red"}" data-action="continue">Continue</button></div></div>`;
+  function setMood(mood) {
+    const el = $(".tally");
+    if (el) el.dataset.mood = mood;
+  }
+
+  // ---------- speech ----------
+  function speak(text) {
+    if (!("speechSynthesis" in window) || !text) return;
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      utterance.lang = "en-US";
+      utterance.rate = 0.95;
+      utterance.pitch = 1.15;
+      const talk = (on) => { const t = $(".tally"); if (t) t.classList.toggle("is-talking", on); };
+      utterance.onstart = () => talk(true);
+      utterance.onend = () => talk(false);
+      utterance.onerror = () => talk(false);
+      window.speechSynthesis.speak(utterance);
+    } catch (e) { /* a browser without speech still shows the sentence */ }
+  }
+
+  // ---------- voice answers ----------
+  const voice = { recognition: null, wanted: false, running: false, last: null, at: 0 };
+  const ONES = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
+  const TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
+  const TENS = { twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
+
+  function parseNumber(text) {
+    const tokens = String(text || "").toLowerCase().replace(/[^a-z0-9\s-]/g, " ").split(/[\s-]+/).filter(Boolean);
+    let value = 0, started = false;
+    for (const token of tokens) {
+      if (/^\d+$/.test(token)) return Number(token);
+      if (token in TEENS) { value += TEENS[token]; started = true; continue; }
+      if (token in TENS) { value += TENS[token]; started = true; continue; }
+      if (token in ONES) { value += ONES[token]; started = true; continue; }
+      if (token === "hundred") { value = (value || 1) * 100; started = true; continue; }
+      if (token === "and" && started) continue;
+      if (started) return value;
     }
-    const context = q.type === "tens" ? "Use your fingers" : `Unit ${L.findNode(s.node.id).unitIndex + 1} · ${s.node.title}`;
+    return started ? value : null;
+  }
+
+  function setupVoice() {
+    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Recognition || voice.recognition) return;
+    const recognition = new Recognition();
+    recognition.lang = "en-US";
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.onstart = () => { voice.running = true; markMic(); };
+    recognition.onend = () => { voice.running = false; markMic(); if (voice.wanted) setTimeout(startVoice, 300); };
+    recognition.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") { voice.wanted = false; markMic("denied"); }
+    };
+    recognition.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        const text = e.results[i][0].transcript.trim();
+        const heard = $(".heard");
+        if (heard) heard.textContent = text ? `heard: ${text}` : "";
+        if (e.results[i].isFinal) submitSpoken(text);
+      }
+    };
+    voice.recognition = recognition;
+  }
+
+  function markMic(forced) {
+    const mic = $(".mic");
+    if (!mic) return;
+    mic.hidden = !voice.recognition;
+    mic.classList.toggle("is-on", voice.running && !forced);
+    mic.classList.toggle("is-denied", forced === "denied");
+  }
+
+  function startVoice() {
+    if (!voice.recognition || voice.running || !voice.wanted) return;
+    try { voice.recognition.start(); } catch (e) { /* already starting */ }
+  }
+
+  function stopVoice() {
+    voice.wanted = false;
+    if (voice.recognition && voice.running) { try { voice.recognition.stop(); } catch (e) { /* done */ } }
+  }
+
+  function listenWhile(state) {
+    if (!voice.recognition) return;
+    const should = state === "correct_pose" || state === "waiting_answer";
+    if (should === voice.wanted) return;
+    voice.wanted = should;
+    if (should) startVoice(); else stopVoice();
+  }
+
+  function submitSpoken(text) {
+    const value = parseNumber(text);
+    if (value === null || !lesson) return;
+    const now = Date.now();
+    if (value === voice.last && now - voice.at < 1500) return;
+    voice.last = value; voice.at = now;
+    setTyped(String(value).slice(0, 3));
+    sendLesson({ type: "check", value });
+  }
+
+  // ---------- socket ----------
+  let socket = null;
+  let socketReady = false;
+
+  function connect(onOpen) {
+    if (socket && socketReady) { onOpen(); return; }
+    socket = new WebSocket(`ws://${location.host}/ws`);
+    socket.onopen = () => { socketReady = true; onOpen(); };
+    socket.onmessage = (e) => onServerMessage(JSON.parse(e.data));
+    socket.onclose = () => { socketReady = false; socket = null; };
+    socket.onerror = () => { socketReady = false; };
+  }
+
+  function sendLesson(payload) {
+    if (socket && socketReady) socket.send(JSON.stringify(payload));
+  }
+
+  function onServerMessage(m) {
+    if (!lesson) return;
+    if (m.type === "node_end") {
+      if (m.node_id && m.node_id !== lesson.node.id) return;
+      lesson.correct = m.correct;
+      lesson.total = m.total || lesson.total;
+      lesson.endTally = m.tally;
+      return finish(false);
+    }
+    if (m.type !== "state" || m.node !== lesson.node.id) return;
+    const fresh = m.state !== lesson.last;
+    if (fresh && m.state === "answer_wrong" && lesson.hearts !== null) {
+      lesson.hearts -= 1;
+      lesson.hit = true;
+      if (lesson.hearts <= 0) { sendLesson({ type: "quit" }); return finish(true); }
+    }
+    if (fresh && m.fact && m.fact !== lesson.fact) { lesson.fact = m.fact; lesson.done += 1; }
+    lesson.last = m.state;
+    renderPractice(m);
+    listenWhile(m.state);
+    if (m.tally && m.tally !== lesson.said) { lesson.said = m.tally; speak(m.tally); }
+  }
+
+  // ---------- the view ----------
+  function startLesson(id) {
+    const node = L.findNode(id);
+    const total = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
+    lesson = {
+      node, total, correct: 0, done: 0, fact: null, last: null, said: null,
+      hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", t0: Date.now(),
+    };
+    openNode = null;
+    show("lesson");
+    setupVoice();
+    shellPractice();
+    connect(() => sendLesson({
+      type: "start_node",
+      state: null,
+      node: { id: node.id, kind: node.kind, pairs: node.pairs, count: total },
+    }));
+  }
+
+  function shellPractice() {
+    const s = lesson;
+    const hearts = s.hearts === null ? "" :
+      `<div class="hearts" aria-label="${s.hearts} hearts">${ICON.heart}${s.hearts}</div>`;
     $("#lesson").innerHTML = `
       <div class="lesson-top">
         <button class="icon-btn" data-action="quit" aria-label="Quit lesson">${ICON.close}</button>
-        <div class="bar lesson-bar"><div class="bar-fill" style="width:${(done / s.qs.length) * 100}%"></div></div>
-        <div class="hearts${s.hit ? " is-hit" : ""}" aria-label="${s.hearts} hearts">${ICON.heart}${s.hearts}</div>
+        <div class="bar lesson-bar"><div class="bar-fill" style="width:0%"></div></div>
+        ${hearts}
       </div>
-      <div class="lesson-scroll"><div class="lesson-body">
-        <div class="lesson-kicker">${ICON.spark}${kicker}</div>
-        <h1>${q.type === "tens" ? "How many tens?" : "Select the answer"}</h1>
-        <div class="prompt-card${s.checked ? (right ? " is-right" : " is-wrong") : ""}">
-          <div class="prompt${q.prompt.length > 12 ? " is-long" : ""}">${q.prompt}</div>
-          <small>${context}</small>
+      <div class="practice">
+        <div class="practice-stage">
+          <img class="practice-video" src="/video" alt="">
+          <svg class="practice-overlay" viewBox="0 0 1.333 1" preserveAspectRatio="none"></svg>
+          <div class="practice-head"><span class="practice-exercise">Getting ready</span>
+            <span class="practice-why"></span></div>
+          <div class="practice-reasoning" hidden></div>
+          <div class="tally" data-mood="ready">${tallySvg()}<p class="tally-say">Show me both hands.</p></div>
+          <div class="practice-answer">
+            <button class="mic" type="button" data-action="mic" hidden aria-label="say the answer">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" aria-hidden="true">
+                <rect x="9" y="2" width="6" height="11" rx="3"></rect>
+                <path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v4"></path>
+              </svg>
+            </button>
+            <span class="typed"></span><span class="caret"></span>
+            <div class="heard"></div>
+          </div>
         </div>
-        <div class="options${s.checked ? " is-checked" : ""}">${options}</div>
-      </div></div>
-      ${foot}`;
-    s.hit = false;
+      </div>`;
+    markMic();
+  }
+
+  function fitOverlay() {
+    const stage = $(".practice-stage"), video = $(".practice-video"), overlay = $(".practice-overlay");
+    if (!stage || !video || !overlay) return 4 / 3;
+    const W = stage.clientWidth, H = stage.clientHeight;
+    const ratio = (video.naturalWidth && video.naturalHeight) ? video.naturalWidth / video.naturalHeight : 4 / 3;
+    const w = Math.min(W, H * ratio), h = w / ratio;
+    overlay.setAttribute("viewBox", `0 0 ${ratio} 1`);
+    overlay.style.cssText = `left:${(W - w) / 2}px;top:${(H - h) / 2}px;width:${w}px;height:${h}px`;
+    return ratio;
+  }
+
+  function renderPractice(m) {
+    const s = lesson;
+    const bar = $("#lesson .bar-fill");
+    if (bar) bar.style.width = `${Math.min(100, (s.done ? s.done - 1 : 0) / s.total * 100)}%`;
+    const hearts = $("#lesson .hearts");
+    if (hearts && s.hearts !== null) {
+      hearts.innerHTML = ICON.heart + s.hearts;
+      if (s.hit) { hearts.classList.add("is-hit"); setTimeout(() => hearts.classList.remove("is-hit"), 420); s.hit = false; }
+    }
+    const title = $(".practice-exercise");
+    if (title) title.textContent = (m.exercise || "").replace(" x ", " × ") || "Getting ready";
+    const why = $(".practice-why");
+    if (why) why.textContent = s.done ? `${Math.min(s.done, s.total)} of ${s.total}` : "";
+    const say = $(".tally-say");
+    if (say) say.textContent = m.tally || "";
+    setMood(m.reaction === "cannot_see" ? "squint" : (MOOD[m.state] || "ready"));
+    $(".practice-stage").dataset.state = m.state;
+
+    const band = $(".practice-reasoning");
+    if (band) {
+      const lines = m.reasoning || [];
+      band.hidden = lines.length === 0;
+      band.innerHTML = lines.map((line, i) => `<div style="animation-delay:${i * 300}ms">${line}</div>`).join("");
+    }
+    drawFingers(m);
+  }
+
+  function drawFingers(m) {
+    const overlay = $(".practice-overlay");
+    if (!overlay) return;
+    const span = fitOverlay();
+    overlay.replaceChildren();
+    const NS = "http://www.w3.org/2000/svg";
+    const key = (f) => `${f.hand}:${f.number}`;
+    const wrong = new Set((m.wrong || []).map(key));
+    const match = new Set((m.match || []).map(key));
+    // The ghost is the finger the child should be using: hint level 2 and up
+    // rings it, because naming a number is not enough when you are seven.
+    const hint = m.hint || {};
+    const ghost = (m.hint_level >= 2 && hint.hand && hint.move_to) ? `${hint.hand}:${hint.move_to}` : null;
+
+    for (const finger of m.fingers || []) {
+      const id = key(finger);
+      const colour = wrong.has(id) ? "#ff9600" : match.has(id) ? "#58cc02" : "#ffffff";
+      if (id === ghost) {
+        const ring = document.createElementNS(NS, "circle");
+        ring.setAttribute("class", "ghost");
+        ring.setAttribute("cx", finger.x * span); ring.setAttribute("cy", finger.y);
+        ring.setAttribute("r", 0.055);
+        overlay.appendChild(ring);
+      }
+      const circle = document.createElementNS(NS, "circle");
+      circle.setAttribute("cx", finger.x * span); circle.setAttribute("cy", finger.y);
+      circle.setAttribute("r", 0.036);
+      circle.setAttribute("fill", "rgba(11,13,16,0.72)");
+      circle.setAttribute("stroke", colour);
+      circle.setAttribute("stroke-width", 0.006);
+      overlay.appendChild(circle);
+      const text = document.createElementNS(NS, "text");
+      text.setAttribute("x", finger.x * span); text.setAttribute("y", finger.y + 0.019);
+      text.setAttribute("fill", colour);
+      text.textContent = finger.number;
+      overlay.appendChild(text);
+    }
+  }
+
+  function setTyped(value) {
+    if (!lesson) return;
+    lesson.typed = value;
+    const el = $(".typed");
+    if (el) el.textContent = value;
   }
 
   function pick(list) {
     return list[Math.floor(Math.random() * list.length)];
   }
 
-  function check() {
-    const s = lesson;
-    if (!s || s.checked || s.selected === null) return;
-    s.checked = true;
-    const q = s.qs[s.i];
-    if (q.options[s.selected] === q.answer) s.correct += 1;
-    else { s.hearts -= 1; s.hit = true; }
-    renderLesson();
-  }
-
-  function next() {
-    const s = lesson;
-    if (!s || !s.checked) return;
-    if (s.hearts <= 0 || s.i + 1 >= s.qs.length) return finish(s.hearts <= 0);
-    s.i += 1;
-    s.selected = null;
-    s.checked = false;
-    renderLesson();
-  }
-
   function finish(outOfHearts) {
     const s = lesson;
-    const total = s.qs.length;
+    stopVoice();
+    const total = s.total;
     const res = L.recordLesson(progress, s.node.id, s.correct, total, today());
     progress = res.progress;
     save();
@@ -251,7 +497,9 @@
     const acc = Math.round((s.correct / total) * 100);
     const fail = outOfHearts || res.stars === 0;
     const title = outOfHearts ? "Out of hearts" : fail ? "Almost there" : s.node.kind === "boss" ? "Boss defeated!" : res.stars === 3 ? "Perfect lesson!" : "Lesson complete!";
-    const sub = fail ? "Get 3 of 5 right to earn a star and unlock the next level." : res.unlocked ? "A new level is waiting for you." : "Keep going for all three stars.";
+    const need = Math.ceil(total * 0.6);
+    const sub = fail ? `Get ${need} of ${total} right to earn a star and unlock the next level.`
+      : res.unlocked ? "A new level is waiting for you." : "Keep going for all three stars.";
     $("#finish").className = `finish${fail ? " is-fail" : ""}`;
     $("#finish").innerHTML = `
       ${fail ? "" : confetti()}
@@ -295,6 +543,9 @@
   }
 
   function backToMap() {
+    if (lesson) sendLesson({ type: "quit" });
+    stopVoice();
+    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     lesson = null;
     show("map");
     renderAll();
@@ -326,13 +577,9 @@
       renderAll();
       toast(`${ICON.chest("done")}+${res.xpGained} XP from the chest`);
       setTimeout(() => { justUnlocked = null; }, 900);
-    } else if (action === "pick" && lesson && !lesson.checked) {
-      lesson.selected = Number(el.dataset.i);
-      renderLesson();
-    } else if (action === "check") {
-      check();
-    } else if (action === "continue") {
-      next();
+    } else if (action === "mic") {
+      voice.wanted = !voice.wanted;
+      if (voice.wanted) startVoice(); else stopVoice();
     } else if (action === "quit" || action === "home") {
       backToMap();
     } else if (action === "retry") {
@@ -355,25 +602,57 @@
       }
       return;
     }
-    if (e.key >= "1" && e.key <= "4" && !lesson.checked) {
-      lesson.selected = Number(e.key) - 1;
-      renderLesson();
+    // The keyboard is the fallback for the voice: type the answer, Enter sends.
+    if (e.key >= "0" && e.key <= "9") {
+      if (lesson.typed.length < 3) setTyped(lesson.typed + e.key);
+    } else if (e.key === "Backspace") {
+      setTyped(lesson.typed.slice(0, -1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (lesson.checked) next(); else check();
+      if (lesson.typed.length === 0) return;
+      sendLesson({ type: "check", value: Number(lesson.typed) });
+      setTyped("");
+    } else if (e.key === "n") {
+      setTyped("");
+      sendLesson({ type: "next" });
     } else if (e.key === "Escape") {
       backToMap();
     }
   });
 
   // ---------- boot ----------
+  // The right panel card becomes a live thumbnail once the camera answers, and
+  // stays a drawing when the page is opened without the server behind it.
+  function watchCamera() {
+    const art = $(".panel-camera-art");
+    const copy = $(".panel-camera h3");
+    const note = $(".panel-camera p");
+    if (!art) return;
+    const probe = new Image();
+    probe.onload = () => {
+      art.innerHTML = "";
+      art.appendChild(probe);
+      art.classList.add("is-live");
+      if (copy) copy.textContent = "Tally is watching";
+      if (note) note.textContent = "Your hands are on camera. Start a lesson and count with them.";
+    };
+    probe.alt = "";
+    probe.src = "/video";
+  }
+
   document.querySelectorAll("[data-icon]").forEach((el) => {
     const icon = ICON[el.dataset.icon];
     if (typeof icon === "string") el.innerHTML = icon;
   });
   if (params.get("dev") === "1") document.querySelectorAll(".dev-reset").forEach((el) => { el.hidden = false; });
+  // A small seam for the browser tests: the number parser and the voice state
+  // are the two pieces worth driving from outside.
+  window.Tenfold = { parseNumber, voice };
+
   show("map");
   renderAll();
+  watchCamera();
+  window.addEventListener("resize", () => { if (lesson) fitOverlay(); });
   const current = L.currentNode(progress);
   if (current) {
     const el = document.querySelector(`[data-node="${current.id}"]`);

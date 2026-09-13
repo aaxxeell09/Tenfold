@@ -377,6 +377,8 @@ F6. Overnight ablation: a blind critic (no failure data, diagnosis prompt gets o
 
 F7. Atome's student-model loop (per-child error diagnosis and teaching-strategy memory) is the README roadmap "second loop", not built this weekend.
 
+F7 bis. Reversed on 2026-09-13: the student model is built this weekend after all, as `lesson/scheduler.py`, and drives the course nodes of `web/course/` through `app/server.py`. Mastery per pose and per fact, spaced repetition, session shaping and the reproducible demo scenario are in scope; the second Weave loop over teaching strategy is not.
+
 ---
 
 <!-- /autoplan PHASE 1: CEO REVIEW (SELECTIVE EXPANSION, subagent-only: Codex not installed) -->
