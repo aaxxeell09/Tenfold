@@ -1,13 +1,14 @@
 # Consolidation audit, after the morning passes
 
-Commit audited: **fbbeceb**, which carries origin/main as of the last merge
+Commit audited: **f72df2e**, which carries origin/main as of the last merge
 before this was written.
 
-main moved six times while this was being read (331c4ef, 554dc0d, e15ab97,
-c9e8224, dd3ae9e, fbbeceb), so every finding was re-checked at fbbeceb by grep
-before being kept. Six were fixed under me, in whole or in half, and are marked as closed rather
+main moved seven times while this was being read (331c4ef, 554dc0d, e15ab97,
+c9e8224, dd3ae9e, fbbeceb, f72df2e), so every finding was re-checked at f72df2e
+by grep before being kept. Eight were fixed under me, in whole or in half, and are marked as closed rather
 than deleted, because what changed and why is half of what a consolidation audit is
-for; two are new and exist only because of those fixes. Anything fixed and not
+for; two were new, found only because of those fixes, and were themselves fixed
+within the hour. Anything fixed and not
 interesting was simply dropped.
 
 That also means this is a photograph, not a guarantee. Every claim below names
@@ -266,59 +267,56 @@ loses that question. This is the exact command SPEC section 15 item 14 names.
 the same way it already does not fire inside the check (`in_check` at
 `app/server.py::mock_loop`). It is one condition on one line.
 
-### 2.4b BUG. The page sends `ready` and the server has no branch for it
+### 2.4b CLOSED, was a BUG. The page sent `ready` and the server had no branch for it
 
-Found on c9e8224, after the gate landed. `web/course/app.js:675`:
+`web/course/app.js` sends `{"type": "ready", "node": "check"}` when the gate's
+last step passes, from two places. `app/server.py::command` had no `ready`
+branch and no `else`, so it passed the ownership check and fell out of the
+`if/elif` chain in silence, not even a log line. It was the brief's "a message
+the page sends that the server ignores".
 
-```js
-    sendLesson({ type: "ready", node: "check" });
-```
-
-`app/server.py::command` handles `start_node`, `hello`, `quit`, `check`, `next`,
-`hint`, `tts`, `speech`, `line_drop` and `repeat`. There is no `ready` branch and
-no `else`, so the message passes the ownership check and then falls out of the
-`if/elif` chain in silence. Not even a log line.
-
-Still true at fbbeceb, where the page sends it from two places
-(`app.js:697` and `app.js:709`). It was the direct cause of the first half of
-2.4c, which has since been fixed another way, by closing the measurement in
-`_quit`. So `ready` is now a message the page sends, the server drops, and
-nothing depends on: the cheapest of all the findings here to resolve, in either
-direction.
-
-### 2.4c BUG. The camera check's threshold is still thrown away, once instead of twice
-
-`docs/tutor_contract.md` 2.3: "It is computed once per server run." It is not.
-
-**The first half is fixed at fbbeceb.** When I found this, `end_check()` was
-unreachable on the gate path: the only caller was `_end_session`, which fires on
-a node's outcome count, and the gate records no outcome now that it asks no
-question, so the child left through `quit` and the measurement was never closed.
-`app/server.py:1368` now does it, with a docstring that says exactly why:
+**Fixed at f72df2e**, and fixed in the right shape:
 
 ```python
-        if self.gate and self.running:
-            self.tutor.check_ended()
+    def _ready(self) -> None:
+        """The page passed its gate. On a gate this ends the node; on anything
+        else it is a message from a page that is ahead of the server, logged
+        and ignored rather than dropped in silence."""
 ```
 
-**The second half stands, and it is the one that decides whether the feature
-does anything.** `TutorLink.open` (`app/server.py:519-527`) calls `build_tutor`
-unconditionally, and `_start_node` calls `open` for **every node**. Each node
-gets a brand new `Tutor`, whose `motion_threshold` starts at `MOTION_FLOOR`
-again. `grep -n motion_threshold app/server.py` returns nothing at all: the
-server never reads the value, never carries it, and has nowhere to put it.
+The second half of that docstring is the part worth keeping: an unknown message
+now leaves a trace instead of vanishing, which is the general fix, not just this
+one message's.
 
-So the threshold is now correctly measured and correctly fixed, on an object
-that is discarded when the child leaves the gate and the first lesson node
-begins. Every lesson still runs on the hard floor, invariant 1 is still scaled
-to no particular camera in no particular room, and
-`effective_params.motion_threshold` on every `intervention` line still reads 0.3,
-which is exactly the number Loop 2 would use to conclude the threshold does not
-matter.
+### 2.4c CLOSED, was a BUG. The camera check's threshold was thrown away, twice over
 
-The fix is not in `app/tutor.py`: the tutor is right to own the number. It is
-that the number has to outlive the object, the way `learner_factors` already
-does through `read_factors` and the learner record.
+`docs/tutor_contract.md` 2.3 says the motion threshold "is computed once per
+server run". When I found this it was computed and then discarded, in two
+independent ways.
+
+**First**, `end_check()` was unreachable on the gate path: its only caller was
+`_end_session`, which fires on a node's outcome count, and the gate records no
+outcome now that it asks no question, so the child left through `quit` and the
+measurement was never closed. **Fixed**: `_quit` now closes it when the node is
+a gate.
+
+**Second**, `TutorLink.open` called `build_tutor` unconditionally and
+`_start_node` calls `open` for every node, so each node got a new `Tutor` whose
+`motion_threshold` started at `MOTION_FLOOR` again. A threshold fixed during the
+gate could not reach the lesson after it. **Fixed at f72df2e**, in
+`TutorLink.open`:
+
+```python
+        # The still hands measurement of the gate fixes the tutor's motion
+        # threshold for the run, and a tutor is built per node: without this
+        # the lesson after the gate would start again on the floor.
+        measured = getattr(self.tutor, "motion_threshold", None)
+```
+
+Both halves are closed. Kept here because the shape of the bug is worth
+remembering: nothing failed, nothing logged, and the only visible symptom would
+have been `effective_params.motion_threshold` reading 0.3 on every intervention
+line, which Loop 2 would have read as "the threshold does not matter".
 
 
 ### 2.5 BUG. Two ladders on one voice, now sharing a line file
@@ -866,13 +864,8 @@ Ordered by cost if nobody touches it.
 3. **The mock auto-skip under `--demo`** (2.4). One condition on one line, and
    without it `make demo` is not reproducible, which is the whole point of
    `demo/scenario.json`. Axel.
-4. **The camera check's threshold** (2.4c). Closing the measurement in `_quit`
-   landed while this was being written, so it is now measured and fixed
-   correctly, on a `Tutor` that `TutorLink.open` rebuilds for the next node.
-   Decide whether the measurement is meant to survive a node; if it is, it has
-   to outlive the object, the way `learner_factors` already does. Axel and Ilan.
-   And `ready` (2.4b) is now a message the page sends twice, the server drops,
-   and nothing depends on: delete it or handle it.
+4. ~~The camera check's threshold and the `ready` message~~ (2.4b, 2.4c).
+   **Both closed at f72df2e** while this was being written. Nothing to decide.
 5. **Which ladder speaks** (2.5). This is now the second most expensive one
    after the gate. The visual ladder pass decided Tally shows before he speaks
    and made L1 and L2 silent; the server's `hint_1..3` ladder speaks at 5 s and
