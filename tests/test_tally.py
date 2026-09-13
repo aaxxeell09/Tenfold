@@ -64,3 +64,68 @@ def test_the_signature_matches_the_tutor_fallback():
     ctx = {"exercise": "8 x 7", "detected": None, "child": "Axel",
            "operands": (8, 7), "answer": 56}
     assert tally.phrase(eng.EVENT_ANSWER_CORRECT, ctx) == "Yes. 56 is exactly right."
+
+
+# --- a fact the child has never met is not a review --------------------------
+
+NEVER_MET = {"exercise": "8 x 9", "seen": False}
+MET_BEFORE = {"exercise": "8 x 9", "seen": True}
+
+
+def test_a_widened_fact_never_met_takes_the_neutral_launch_line():
+    """A lesson fills its count from the whole range, so it can serve a fact for
+    the first time. It is announced, not reviewed."""
+    text = tally.phrase("review", NEVER_MET)
+    assert text == "Show me 8 times 9 with your hands."
+    assert "again" not in text and "met before" not in text
+
+
+def test_a_fact_never_met_has_no_subtitle():
+    assert tally.subtitle("review", NEVER_MET) is None
+    assert tally.subtitle("retry", NEVER_MET) is None
+
+
+def test_a_fact_met_before_keeps_its_review_wording_and_its_subtitle():
+    assert tally.phrase("review", MET_BEFORE) == "Here is 8 x 9 again."
+    assert tally.subtitle("review", MET_BEFORE) == "Here is 8 x 9 again."
+    assert tally.phrase("retry", MET_BEFORE) == "Let us try 8 x 9 again. You were close."
+    assert tally.subtitle("retry", MET_BEFORE) == "Let us try 8 x 9 again. You were close."
+
+
+def test_a_context_that_says_nothing_keeps_the_wording_it_always_had():
+    """Every caller that knows nothing about the history gets today's line."""
+    assert tally.phrase("review", {"exercise": "8 x 9"}) == "Here is 8 x 9 again."
+    assert tally.phrase("review") == tally.PHRASES["review"]
+
+
+def test_the_node_own_new_fact_is_still_announced_as_new():
+    """New material is taught inside the node and says so. Only the wording that
+    claims a past meeting is withheld."""
+    assert tally.phrase("next_new", NEVER_MET) == "A brand new one: 8 x 9. Ready?"
+    assert tally.subtitle("next_new", NEVER_MET) == "A brand new one: 8 x 9. Ready?"
+    assert tally.phrase("level_up", NEVER_MET) == tally.PHRASES["level_up"]
+
+
+def test_the_launch_line_is_read_from_the_shared_table():
+    """It is not copied into this file: one sentence, one home."""
+    assert tally.LAUNCH == "Show me {a} times {b} with your hands."
+
+
+def test_the_operands_are_found_however_the_caller_names_them():
+    for ctx in ({"a": 8, "b": 9}, {"left": 8, "right": 9}, {"operands": (8, 9)},
+                {"exercise": "8 x 9"}):
+        assert tally.phrase("review", {**ctx, "seen": False}) == \
+            "Show me 8 times 9 with your hands."
+
+
+def test_a_never_met_fact_with_no_numbers_falls_back_to_a_neutral_line():
+    """No launch line can be built without the two factors, and a placeholder
+    must never reach the child, so a neutral line already in the table is used."""
+    text = tally.phrase("review", {"seen": False})
+    assert text == tally.PHRASES["exercise_shown"]
+    assert "{" not in text and "met before" not in text
+
+
+def test_only_a_pick_moment_can_carry_a_subtitle():
+    assert tally.subtitle("answer_correct", MET_BEFORE) is None
+    assert tally.subtitle("", MET_BEFORE) is None

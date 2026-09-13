@@ -39,13 +39,16 @@ whole range of tables to fill its length:
   different question from 7 on the left with 6 on the right.
 
 New material stays inside the node: the widened part of a lesson is practice of
-facts the child has already met, never the place where a fact is taught.
+facts the child has already met, never the place where a fact is taught. The
+widening can still reach a fact the child has never met, which is practice and
+not new material, so every Pick carries seen: the phrase layer needs it to stop
+announcing a first meeting as a review, and the mastery gate ignores it.
 """
 
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterable, Sequence
 
@@ -357,13 +360,23 @@ class LearnerState:
 
 @dataclass(frozen=True)
 class Pick:
-    """One exercise, and why Tally chose it."""
+    """One exercise, and why Tally chose it.
+
+    is_new is new material: a fact the node is teaching now, which is what the
+    mastery gate counts. seen is a plainer thing, and the two are not the same
+    question: a widened fact is never new material, yet the child may never have
+    met it, and announcing it as a review would be a small lie. seen says the
+    child has attempted this fact before, so the phrase layer can tell the two
+    apart. It defaults to True, which is what every caller that builds a Pick by
+    hand means, the scripted demo included: their wording stays as it was.
+    """
 
     fact: str
     left: int
     right: int
     reason: str
     is_new: bool = False
+    seen: bool = True
 
     @property
     def pose(self) -> str:
@@ -375,7 +388,8 @@ class Pick:
 
     def to_dict(self) -> dict[str, Any]:
         return {"fact": self.fact, "left": self.left, "right": self.right,
-                "pose": self.pose, "reason": self.reason, "is_new": self.is_new}
+                "pose": self.pose, "reason": self.reason, "is_new": self.is_new,
+                "seen": self.seen}
 
 
 @dataclass
@@ -648,13 +662,17 @@ class Scheduler:
             pick = self._mastered_pick() or self._any_pick()
             if pick is None:
                 return None
-            pick = Pick(pick.fact, pick.left, pick.right, REACTION_CONFIDENCE)
+            pick = Pick(pick.fact, pick.left, pick.right, REACTION_CONFIDENCE,
+                        seen=self._met_before(pick.fact))
             self.history.append(pick)
             return pick
 
         pick = self._choose(moment)
         if pick is None:
             return None
+        # Read before the attempt is recorded, so it says what the child knew
+        # when the question was asked.
+        pick = replace(pick, seen=self._met_before(pick.fact))
         if pick.is_new:
             self.new_this_session.append(pick.fact)
             self.level_bonus = 0              # the step is spent once it is served
@@ -662,6 +680,15 @@ class Scheduler:
             self.outside_reviews += 1
         self.history.append(pick)
         return pick
+
+    def _met_before(self, key: str) -> bool:
+        """Whether the child has ever attempted this fact.
+
+        Only the history says it. A fact carries the same answer wherever it was
+        drawn from, the node or the wider range, so this never looks at scope.
+        """
+        record = self.state.math.get(key)
+        return bool(record and record.seen)
 
     def _owes_a_success(self) -> bool:
         """Whether one more exercise is owed so the session ends on a success.
@@ -1061,7 +1088,10 @@ class ScriptedScheduler(Scheduler):
         self.script = [
             Pick(fact=str(step["fact"]), left=int(step["left"]), right=int(step["right"]),
                  reason=str(step.get("reason", REACTION_REVIEW)),
-                 is_new=bool(step.get("is_new", False)))
+                 is_new=bool(step.get("is_new", False)),
+                 # The script is the script, down to the wording: a scripted
+                 # step is served as written, so seen stays at its default.
+                 seen=bool(step.get("seen", True)))
             for step in scenario.get("exercises", [])
         ]
         self.cursor = 0
