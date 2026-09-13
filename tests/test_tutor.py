@@ -165,3 +165,51 @@ def test_traced_op_is_per_instance(monkeypatch):
     monkeypatch.setattr(b, "_call", lambda event, ctx: "from b")
     assert a._traced_call("intro", {}) == "from a"
     assert b._traced_call("intro", {}) == "from b"
+
+
+# ---------- the prompt, the reply and what Weave records ----------
+
+
+def test_prompt_carries_tallys_line_and_the_hint():
+    ctx = {"hint": {"move_from": 9, "move_to": 8}, "answer": None, "exercise": "7 x 8"}
+    line = tally.phrase("wrong_right_finger", ctx)
+    system, user = tmod.build_messages("wrong_right_finger", ctx, line)
+    assert system["role"] == "system" and "wrong" in system["content"]
+    assert line in user["content"] and "from 9 to 8" in user["content"] and "7 x 8" in user["content"]
+
+
+def test_clean_reply_keeps_the_first_spoken_line():
+    assert tmod.clean_reply('<think>hmm</think>\n\n"Almost! Move your left finger to 7."\nextra') == \
+        "Almost! Move your left finger to 7."
+    assert tmod.clean_reply(None) == ""
+
+
+def test_call_records_model_usage_and_latency(monkeypatch):
+    sent = {}
+
+    class Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"model": "served/model", "usage": {"prompt_tokens": 90, "completion_tokens": 12},
+                    "choices": [{"message": {"content": "That is it, count the tens."}}]}
+
+    def post(url, headers, timeout, json):
+        sent.update(url=url, headers=headers, body=json)
+        return Resp()
+
+    monkeypatch.setattr(tmod.httpx, "post", post)
+    t = tmod.Tutor(fallback=tally.phrase, api_key="k", project="team/tenfold", model="m")
+    line = t._call("correct_pose", {"exercise": "8 x 8"})
+    assert line == "That is it, count the tens." and sent["headers"]["OpenAI-Project"] == "team/tenfold"
+    assert tally.phrase("correct_pose", {"exercise": "8 x 8"}) in sent["body"]["messages"][1]["content"]
+    record = tmod.as_record(line)
+    assert record["model"] == "served/model" and record["usage"]["completion_tokens"] == 12
+    assert isinstance(record["latency_ms"], int)
+
+
+def test_kill_switch_keeps_the_fallback(monkeypatch):
+    monkeypatch.setenv("TENFOLD_TUTOR", "0")
+    t = tmod.Tutor(fallback=tally.phrase, api_key="k")
+    assert not t.enabled and t.phrase("intro") == tally.phrase("intro")
