@@ -71,9 +71,10 @@ competing for the machine at the time. An idle mock server polled every 20 s for
 two minutes stayed up and answered 200 every time, so there is no server that
 dies on its own.
 
-The final run at dd3ae9e was still in `tests/test_voice.py` when this was
-written, with **one** failure in the preceding 92 percent and no dashboard
-failures at all. I am reporting that rather than rounding it to green: the suite
+The final run was still in `tests/test_voice.py` when I stopped it, with **two**
+failures in the preceding 92 percent and no dashboard failures at all. I killed
+it rather than let it keep competing for the machine I was about to complain
+about. I am reporting that rather than rounding it to green: the suite
 is not fully verified at dd3ae9e by me, and that one F is unidentified.
 
 **And "clean run" turned out to be something I could not have.** While it ran,
@@ -774,10 +775,28 @@ start gate, a lesson, the finish card.
 - On the run at e15ab97 the success line never reached the bubble at all: the
   `exercise_shown` line cut it. 2.2.
 
-**`python app/server.py --mock --demo --no-open --port <p>`**: the scripted
-scenario runs end to end and reaches the finish card both times, 83 XP on the
-first tree and 62 on e15ab97. Four of the five steps both times, a different four
-each time. 2.4.
+**`python app/server.py --mock --demo --no-open --port <p>`**: run three times,
+last of them at the final HEAD. **The scripted scenario runs end to end every
+time and reaches the finish card**, 83 XP, 62 XP and 83 XP.
+
+It served four of its five steps every time, and not the same four:
+
+```
+pre-merge tree: ['8 × 7', '6 × 8', '6 × 6', '8 × 6']   step 4 lost
+e15ab97:        ['6 × 8', '6 × 6', '7 × 8', '8 × 6']   step 1 lost
+final HEAD:     ['8 × 7', '6 × 8', '6 × 6', '8 × 6']   step 4 lost
+```
+
+Which step goes depends on where the wall clock sits when the node opens. 2.4.
+
+**One thing the stage needs to know.** The gate now stands in front of the demo
+too, and the last of its three steps is passed by saying "I'm ready". With no
+working microphone, which is every headless browser and may well be the demo
+laptop, the way through is a Ready button that appears after
+`gate_ready_button_s`, six seconds, and has to be tapped. The driver above had
+to do exactly that before the lesson would open. Nothing is broken; it is six
+seconds and a tap that nobody has rehearsed, at the very front of a three minute
+demo.
 
 **A false alarm, recorded so nobody re-finds it.** A mock server of mine died
 mid session and the symptom, `ERR_CONNECTION_REFUSED`, matched the one that made
