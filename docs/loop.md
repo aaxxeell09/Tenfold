@@ -15,7 +15,10 @@ is the commit the live app runs. `data/metrics.json` has train and held-out metr
 rejected patches with the reason (`rejected` list). Rejections are part of the loop: an agent that never gets
 told no is not being measured.
 
-Weave: project `tenfold` holds `tenfold-train-vN` evaluations and every critic call (`critic.diagnose`,
+Weave: project `tenfold` holds one evaluation per measured version, labelled `tenfold-train-<tag> <run>
+<verdict>`: `v0 ... baseline`, `vN-candidate ... candidate` for every patch the gate measured, and
+`vN ... accepted` again for each one it accepted, so the comparison to show is `v0 baseline` against the latest
+`accepted`. It also holds every critic call (`critic.diagnose`,
 `critic.patch`, `critic.guard_agent`, `critic.guard_code`, `critic.metric_gate`, `critic.rejected_patch`,
 `critic.heartbeat`). Project `tenfold-heldout`, on a different W&B account, holds `tenfold-heldout-vN`.
 
@@ -34,7 +37,10 @@ What happens inside `loop/critic.py`:
    `loop/train_eval.py`, and a critic-only `CLAUDE.md`. No spec, no held-out data, no eval pipeline, no `.env`,
    no git tools.
 2. Diagnostic agent: reads the train report (per-class accuracy, ten worst samples as fingertip distances),
-   writes one diagnosis and one hypothesis.
+   writes one diagnosis and one hypothesis. With `--text-agents wandb` (or `TENFOLD_TEXT_AGENTS=wandb` in
+   `.env`) this agent and the guard agent run on W&B Inference (Qwen3 235B, served on CoreWeave, billed to W&B
+   credits, traced in Weave with token usage); each call is kept as `loop/transcripts/diag-N.json`. The patch
+   agent stays on Claude Code because it needs tools.
 3. Patch agent: edits `rules.py` only, may run `python loop/train_eval.py` (train metrics and failing samples,
    before and after its edit; `--sweep NAME=v1,v2,...` scores several values of a constant in one call, each with the metric gate's
    verdict from `loop/gate.py`, the same code the critic decides with; it starts with `--sweep-all`, every

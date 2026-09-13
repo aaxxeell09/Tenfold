@@ -9,8 +9,12 @@
   maxturns / maxturns_noedit   stops with error_max_turns after (or without) an edit
 Costs: FAKE_CLAUDE_COST per call (default 0.5), FAKE_CLAUDE_PATCH_COST for the patch agent (default the same).
 A call whose cost exceeds --max-budget-usd stops with error_max_budget_usd, like the real CLI, after its edits.
-FAKE_CLAUDE_GUARD=need_account makes the guard agent approve only when it was shown the patch agent's account.
+FAKE_CLAUDE_GUARD: need_account approves only when shown the patch agent's account; sly_reject rejects with a
+sentence that contains the word "approve".
 Prints stream-json like the real CLI so the transcript audit and text extraction are exercised.
+
+With --inference it stands in for W&B Inference instead: the prompt arrives on stdin, the reply is one
+OpenAI-style chat completion JSON with a usage block, and only the diagnostic and guard agents are served.
 """
 import json
 import os
@@ -20,9 +24,37 @@ import time
 from pathlib import Path
 
 mode = os.environ.get("FAKE_CLAUDE_PATCH", "good")
-prompt = sys.argv[sys.argv.index("-p") + 1] if "-p" in sys.argv else ""
+inference = "--inference" in sys.argv
+prompt = sys.stdin.read() if inference else (sys.argv[sys.argv.index("-p") + 1] if "-p" in sys.argv else "")
 budget = float(sys.argv[sys.argv.index("--max-budget-usd") + 1]) if "--max-budget-usd" in sys.argv else None
 base_cost = float(os.environ.get("FAKE_CLAUDE_COST", "0.5"))
+
+
+def text_agent_reply(p: str) -> str | None:
+    """Replies of the two agents that need no tools; None for anything else."""
+    if p.startswith("You are the diagnostic agent"):
+        return ("DIAGNOSIS: near_contact windows are classified as contact (near:7x8 at 0.50).\n"
+                "HYPOTHESIS: CONTACT_THRESHOLD is too permissive.\nEVIDENCE: synth00030 closest pair dist 0.42")
+    if p.startswith("You are the guard agent"):
+        account = p.split("PATCH AGENT'S ACCOUNT:", 1)[-1].split("DIFF:", 1)[0]
+        guard_mode = os.environ.get("FAKE_CLAUDE_GUARD")
+        if guard_mode == "need_account" and "HYPOTHESIS:" not in account:
+            return "VERDICT: REJECT | Rule 1 | no account of the edit | fix: explain the measured cause"
+        if guard_mode == "sly_reject":
+            return "VERDICT: REJECT | Rule 2 | I would approve a general fix, not this memorised value | fix: derive it"
+        return "VERDICT: APPROVE | the patch only tightens the contact threshold named in the diagnosis"
+    return None
+
+
+if inference:
+    reply = text_agent_reply(prompt)
+    if reply is None:
+        print(json.dumps({"error": "the fake inference endpoint only serves the diagnostic and guard agents"}))
+        sys.exit(2)
+    print(json.dumps({"model": "fake/qwen", "choices": [{"message": {"role": "assistant", "content": reply}}],
+                      "usage": {"prompt_tokens": len(prompt) // 4, "completion_tokens": len(reply) // 4,
+                                "total_tokens": (len(prompt) + len(reply)) // 4}}))
+    sys.exit(0)
 
 
 def emit(text: str, tool_input: dict | None = None, cost: float = base_cost) -> None:
@@ -40,15 +72,8 @@ def emit(text: str, tool_input: dict | None = None, cost: float = base_cost) -> 
 
 
 rules = Path("classifier/rules.py")
-if prompt.startswith("You are the diagnostic agent"):
-    emit("DIAGNOSIS: near_contact windows are classified as contact (near:7x8 at 0.50).\n"
-         "HYPOTHESIS: CONTACT_THRESHOLD is too permissive.\nEVIDENCE: synth00030 closest pair dist 0.42")
-elif prompt.startswith("You are the guard agent"):
-    account = prompt.split("PATCH AGENT'S ACCOUNT:", 1)[-1].split("DIFF:", 1)[0]
-    if os.environ.get("FAKE_CLAUDE_GUARD") == "need_account" and "HYPOTHESIS:" not in account:
-        emit("VERDICT: REJECT | Rule 1 | no account of the edit | fix: explain the measured cause")
-    else:
-        emit("VERDICT: APPROVE | the patch only tightens the contact threshold named in the diagnosis")
+if text_agent_reply(prompt) is not None:
+    emit(text_agent_reply(prompt))
 else:
     patch_cost = float(os.environ.get("FAKE_CLAUDE_PATCH_COST", str(base_cost)))
     if mode == "hang":

@@ -4,9 +4,11 @@
     python eval/run_eval.py --split heldout                    # ../tenfold-heldout/test.jsonl, project tenfold-heldout
     python eval/run_eval.py --split train --local              # no W&B at all
     python eval/run_eval.py --split train --rules /path/rules.py --tag candidate --out eval/results/x.json
+    python eval/run_eval.py --split train --tag v1 --run 0913-0214 --verdict accepted --gate "exact_match 0.458 -> 0.487"
 
 The held-out split uses WANDB_API_KEY_HELDOUT (a different account than the critic's) and is always launched
-by the critic as a subprocess whose environment never reaches the critic.
+by the critic as a subprocess whose environment never reaches the critic. --run and --verdict only change how
+the evaluation is labelled in Weave, so runs that reuse a tag stay apart and the accepted version stands out.
 """
 from __future__ import annotations
 
@@ -146,7 +148,13 @@ def print_table(metrics: dict, split: str, tag: str) -> None:
                                              for k, v in slices.items() if v["exact_match"] is not None))
 
 
-def publish_weave(split: str, tag: str, rows: list[dict], metrics: dict, sha: str) -> str | None:
+def display_name(split: str, tag: str, run: str | None = None, verdict: str | None = None) -> str:
+    """What the Weave evaluations list shows: the tag, then the run and the verdict when known."""
+    return " ".join(p for p in (f"tenfold-{split}-{tag}", run, verdict) if p)
+
+
+def publish_weave(split: str, tag: str, rows: list[dict], metrics: dict, sha: str, run: str | None = None,
+                  verdict: str | None = None, gate: str | None = None) -> str | None:
     """Publish one weave.Evaluation with the precomputed predictions. Returns a URL-ish name or None."""
     if not os.environ.get("WANDB_API_KEY"):
         print("weave: no WANDB_API_KEY, not publishing (use --local to silence this)", file=sys.stderr)
@@ -178,14 +186,17 @@ def publish_weave(split: str, tag: str, rows: list[dict], metrics: dict, sha: st
         ev = weave.Evaluation(name=f"tenfold-{split}-{tag}", dataset=dataset,
                               scorers=[mk(n) for n in ("exact_match", "contact_accuracy", "false_unknown",
                                                         "negative_rejection", "near_contact_accuracy")])
-        with weave.attributes({"git_sha": sha, "split": split, "tag": tag, "hold_level": json.dumps(
-                {k: v for k, v in metrics.items() if k != "per_class"})}):
-            asyncio.run(ev.evaluate(model, __weave={"display_name": f"tenfold-{split}-{tag}"}))
+        attributes = {"git_sha": sha, "split": split, "tag": tag, "hold_level": json.dumps(
+            {k: v for k, v in metrics.items() if k != "per_class"})}
+        attributes.update({k: v for k, v in (("run", run), ("verdict", verdict), ("gate", gate)) if v})
+        shown = display_name(split, tag, run, verdict)
+        with weave.attributes(attributes):
+            asyncio.run(ev.evaluate(model, __weave={"display_name": shown}))
         try:
             weave.finish()
         except Exception:
             pass
-        return f"{project}/tenfold-{split}-{tag}"
+        return f"{project}/{shown}"
     except Exception as e:  # publishing is never allowed to break the loop
         print(f"weave: publish failed ({type(e).__name__}: {e}); local metrics are still valid", file=sys.stderr)
         return None
@@ -197,6 +208,9 @@ def main() -> int:
     ap.add_argument("--rules", default=str(REPO / "classifier" / "rules.py"))
     ap.add_argument("--samples")
     ap.add_argument("--tag", default="v0")
+    ap.add_argument("--run", help="critic run id, appended to the Weave display name (e.g. 0913-0214)")
+    ap.add_argument("--verdict", help="accepted, candidate, baseline...: appended to the Weave display name")
+    ap.add_argument("--gate", help="the metric gate's reason, stored as an attribute")
     ap.add_argument("--local", action="store_true", help="never talk to W&B")
     ap.add_argument("--out", help="JSON result path (default eval/results/<split>-<tag>.json)")
     ap.add_argument("--report", default=str(REPO / "eval" / "last_train_report.json"))
@@ -224,9 +238,9 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     result = {"split": args.split, "tag": args.tag, "git_sha": sha, "rules": str(args.rules),
               "ts": datetime.now(timezone.utc).isoformat(), "metrics": metrics,
-              "errors": sum(1 for r in rows if r.get("error"))}
+              "errors": sum(1 for r in rows if r.get("error")), "run": args.run, "verdict": args.verdict}
     if not args.local:
-        result["weave"] = publish_weave(args.split, args.tag, rows, metrics, sha)
+        result["weave"] = publish_weave(args.split, args.tag, rows, metrics, sha, args.run, args.verdict, args.gate)
     out.write_text(json.dumps(result, indent=2))
 
     if args.split == "train":

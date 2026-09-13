@@ -514,3 +514,48 @@ def test_run_eval_and_train_report_carry_conditions(tmp_path):
     assert json.loads((repo / "eval" / "last_train_report.json").read_text())["metrics"]["per_slice"] == slices
     te = _train_eval(repo)
     assert te.returncode == 0 and "by condition: angle=" in te.stdout, te.stdout + te.stderr
+
+
+# ---------- verdicts, text agents on W&B Inference, evaluation labels ----------
+
+def test_verdict_parsing_needs_an_explicit_approve_line():
+    from loop.critic import approved
+    assert approved("VERDICT: APPROVE | general fix")
+    assert approved("**VERDICT: APPROVE** | general fix")
+    assert not approved("VERDICT: REJECT | Rule 2 | I would approve a general fix | fix: derive it")
+    assert not approved("I approve this patch")  # no verdict line at all
+    assert not approved("")
+
+
+def test_a_rejection_that_mentions_approve_is_a_rejection(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    monkeypatch.setenv("FAKE_CLAUDE_GUARD", "sly_reject")
+    p = run_critic(repo, "--skip-heldout")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "rejected: GUARD_REJECT agent: VERDICT: REJECT | Rule 2" in p.stdout and commits_by_critic(repo) == []
+
+
+def test_text_agents_run_on_inference_and_the_patch_agent_on_claude(tmp_path):
+    repo = make_repo(tmp_path)
+    p = run_critic(repo, "--skip-heldout", "--text-agents", "wandb", "--mock-inference", str(FAKE))
+    assert p.returncode == 0 and "ACCEPTED v1" in p.stdout, p.stdout + p.stderr
+    t = repo / "loop" / "transcripts"
+    diag = json.loads((t / "diag-1.json").read_text())
+    assert diag["backend"] == "wandb" and diag["usage"]["total_tokens"] > 0
+    assert "CONTACT_THRESHOLD" in diag["prompt"]  # no Read tool on this backend: rules.py travels in the prompt
+    assert json.loads((t / "guard-1.json").read_text())["backend"] == "wandb"
+    assert (t / "patch-1-1.jsonl").exists()
+    m = json.loads((repo / "data" / "metrics.json").read_text())
+    assert m["versions"][1]["spent_usd"] == 0.5  # only the patch agent spent Anthropic money
+
+
+def test_accepted_version_is_published_again_under_its_own_label(tmp_path):
+    repo = make_repo(tmp_path)
+    assert "ACCEPTED v1" in run_critic(repo, "--skip-heldout").stdout
+    t = repo / "loop" / "transcripts"
+    cand = json.loads((t / "train-v1-candidate.json").read_text())
+    acc = json.loads((t / "train-v1.json").read_text())
+    assert cand["verdict"] == "candidate" and acc["verdict"] == "accepted"
+    assert acc["run"] and acc["run"] == cand["run"]
+    assert acc["metrics"]["exact_match"] == cand["metrics"]["exact_match"]
+    assert json.loads((repo / "eval" / "last_train_report.json").read_text())["tag"] == "v1-candidate"

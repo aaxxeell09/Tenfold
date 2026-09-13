@@ -65,6 +65,20 @@ GUARD_RESERVE_USD = 0.5  # held back from the patch agent so the edit it leaves 
 MIN_PATCH_USD = 1.0  # below this a patch session cannot measure and edit
 DIAG_MIN_USD = 0.5
 ITERATION_MIN_USD = DIAG_MIN_USD + MIN_PATCH_USD + GUARD_RESERVE_USD
+# The diagnostic and guard agents read text and write text, so they can run on W&B Inference (served on CoreWeave,
+# billed to W&B credits, traced with token usage in Weave). The patch agent needs tools and stays on Claude Code.
+WANDB_INFERENCE_URL = "https://api.inference.wandb.ai/v1"
+TEXT_AGENT_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+
+
+def approved(verdict: str) -> bool:
+    """Only an explicit "VERDICT: APPROVE" line counts; a rejection that mentions the word approve does not."""
+    for line in verdict.splitlines():
+        line = line.strip().strip("*` ").upper()
+        if line.startswith("VERDICT:"):
+            head = line[len("VERDICT:"):].split("|", 1)[0].strip().strip("*` ")
+            return head == "APPROVE"
+    return False
 
 
 def now() -> str:
@@ -130,7 +144,8 @@ class Critic:
         self.report_src = (self.tmp / "blind-report.json") if a.blind else self.repo / REPORT_REL
         self.train_path = Path(a.train_samples).resolve() if a.train_samples else self.repo / "data" / "samples.jsonl"
         self.logfile = None if a.dry_run else self.repo / "loop" / ("nightly-blind.log" if a.blind else "nightly.log")
-        self.spent = 0.0  # USD reported by the agents' result events
+        self.spent = 0.0  # USD reported by the agents' result events (Claude Code only; W&B Inference is not counted)
+        self.run_id = datetime.now(timezone.utc).strftime("%m%d-%H%M")  # labels this run's evaluations in Weave
         self.env = {k: v for k, v in os.environ.items() if not k.endswith("_HELDOUT")}
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         if self.env.get("ANTHROPIC_API_KEY") or self.env.get("ANTHROPIC_AUTH_TOKEN"):
@@ -261,8 +276,13 @@ class Critic:
             raise BudgetExhausted("before the diagnostic agent")
         report_path = self.worktree / REPORT_REL
         report = report_path.read_text()[:20000] if report_path.exists() else "{}"
-        text, rc = self.run_claude(self.prompt("diagnostic", train_eval_name=f"tenfold-train-{self.tag_prev}", report=report),
-                                   DIAG_TOOLS, self.tmp / f"diag-{iteration}{self.suffix}.jsonl", 8, budget)
+        prompt = self.prompt("diagnostic", train_eval_name=f"tenfold-train-{self.tag_prev}", report=report)
+        if self.a.text_agents == "wandb":
+            rules = (self.worktree / RULES_REL).read_text()
+            prompt += f"\n\nclassifier/rules.py (no tools on this backend, so the file is here):\n```python\n{rules}\n```\n"
+            text = self.run_text_agent(prompt, self.tmp / f"diag-{iteration}{self.suffix}.json", max_tokens=700)
+            return text or "DIAGNOSIS: unavailable (W&B Inference call failed).\nHYPOTHESIS: none."
+        text, rc = self.run_claude(prompt, DIAG_TOOLS, self.tmp / f"diag-{iteration}{self.suffix}.jsonl", 8, budget)
         if rc == 401:
             raise CriticAuthError(text)
         if rc == 126:
@@ -287,11 +307,57 @@ class Critic:
     def guard_agent(self, iteration: int, diagnosis: str, diff: str, account: str) -> str:
         if self.a.blind:
             return "VERDICT: APPROVE | blind arm has no diagnosis to check against"
-        text, rc = self.run_claude(self.prompt("guard", diagnosis=diagnosis, account=account, diff=diff[:12000]), "",
-                                   self.tmp / f"guard-{iteration}{self.suffix}.jsonl", 2, self.remaining())
+        prompt = self.prompt("guard", diagnosis=diagnosis, account=account, diff=diff[:12000])
+        if self.a.text_agents == "wandb":
+            text = self.run_text_agent(prompt, self.tmp / f"guard-{iteration}{self.suffix}.json", max_tokens=300)
+            return text or "VERDICT: REJECT | guard agent unavailable (W&B Inference call failed) | fix: retry"
+        text, rc = self.run_claude(prompt, "", self.tmp / f"guard-{iteration}{self.suffix}.jsonl", 2, self.remaining())
         if rc == 401:
             raise CriticAuthError(text)
         return text if rc == 0 and text else f"VERDICT: REJECT | guard agent unavailable (rc={rc}) | fix: retry"
+
+    def run_text_agent(self, prompt: str, transcript: Path, max_tokens: int) -> str:
+        """One chat completion on W&B Inference (or the mock), kept with its token usage in `transcript`.
+        Returns "" after three failed tries; the caller turns that into an unavailable diagnosis or a rejection."""
+        record: dict = {"backend": "wandb", "model": self.a.text_model, "prompt": prompt}
+        for attempt in range(3):
+            try:
+                resp = self.inference(prompt, max_tokens)
+                text = str(resp["choices"][0]["message"]["content"] or "").split("</think>")[-1].strip()
+                record.update(response=text, usage=resp.get("usage"), served_model=resp.get("model"))
+                record.pop("error", None)
+                transcript.write_text(json.dumps(record, indent=2))
+                return text
+            except Exception as e:  # network, rate limit, malformed reply: retry, never crash the loop
+                record["error"] = f"{type(e).__name__}: {e}"[:400]
+                if not self.a.mock_inference:
+                    time.sleep(5 * (attempt + 1))
+        transcript.write_text(json.dumps(record, indent=2))
+        log(f"W&B Inference unavailable after 3 tries: {record['error']}", self.logfile)
+        return ""
+
+    @maybe_weave_op("critic.inference")
+    def inference(self, prompt: str, max_tokens: int) -> dict:
+        """OpenAI-style chat completion (model, choices, usage) from W&B Inference, the same endpoint as Tally."""
+        if self.a.mock_inference:
+            p = subprocess.run([sys.executable, str(Path(self.a.mock_inference).resolve()), "--inference"],
+                               input=prompt, capture_output=True, text=True, timeout=60)
+            if p.returncode != 0:
+                raise RuntimeError((p.stdout or p.stderr)[-300:])
+            return json.loads(p.stdout)
+        import httpx
+        key = os.environ.get("WANDB_API_KEY")
+        if not key:
+            raise RuntimeError("WANDB_API_KEY is not set (and --local disables W&B Inference)")
+        headers = {"Authorization": f"Bearer {key}"}
+        if os.environ.get("WANDB_INFERENCE_PROJECT"):
+            headers["OpenAI-Project"] = os.environ["WANDB_INFERENCE_PROJECT"]
+        base = (os.environ.get("WANDB_INFERENCE_BASE_URL") or WANDB_INFERENCE_URL).rstrip("/")
+        r = httpx.post(f"{base}/chat/completions", headers=headers, timeout=120, json={
+            "model": self.a.text_model, "max_tokens": max_tokens, "temperature": 0.2,
+            "messages": [{"role": "user", "content": prompt}]})
+        r.raise_for_status()
+        return r.json()
 
     @maybe_weave_op("critic.guard_code")
     def guard_code(self, transcript: Path) -> list[str]:
@@ -300,10 +366,15 @@ class Critic:
         return [l for l in p.stdout.splitlines() if l.startswith("GUARD_REJECT ") or l.startswith("GUARD_ERROR")]
 
     # ---------- evaluation and gate ----------
-    def run_eval(self, split: str, rules: Path, tag: str, report: Path | None = None) -> dict | None:
+    def run_eval(self, split: str, rules: Path, tag: str, report: Path | None = None, verdict: str | None = None,
+                 gate: str | None = None) -> dict | None:
         out = self.tmp / f"{split}-{tag}.json"
         cmd = [sys.executable, str(self.repo / "eval" / "run_eval.py"), "--split", split, "--rules", str(rules),
-               "--tag", tag, "--out", str(out)]
+               "--tag", tag, "--out", str(out), "--run", self.run_id]
+        if verdict:
+            cmd += ["--verdict", verdict]
+        if gate:
+            cmd += ["--gate", gate]
         if split == "train":
             cmd += ["--report", str(report or self.tmp / f"report-{tag}.json")]
         if self.a.local:
@@ -380,7 +451,7 @@ class Critic:
         accepted = [v for v in metrics["versions"] if v.get("accepted")]
         if not accepted:
             log("no baseline: evaluating V0 on train", self.logfile)
-            base = self.run_eval("train", self.rules_src, f"v0{self.suffix}", report=self.report_src)
+            base = self.run_eval("train", self.rules_src, f"v0{self.suffix}", report=self.report_src, verdict="baseline")
             if base is None:
                 log("FATAL: V0 evaluation failed", self.logfile)
                 return 2
@@ -402,7 +473,7 @@ class Critic:
             tag = f"v{last.get('version', 0)}{self.suffix}-data{k}"
             log(f"data refresh: dataset changed ({old.get('n_samples', '?')} -> {self.data['n_samples']} samples, "
                 f"{self.data['sha']}); re-evaluating the running version as {tag}", self.logfile)
-            res = self.run_eval("train", self.rules_src, tag, report=self.report_src)
+            res = self.run_eval("train", self.rules_src, tag, report=self.report_src, verdict="data-refresh")
             if res is None:
                 log("FATAL: re-evaluation on the new data failed", self.logfile)
                 return 2
@@ -465,7 +536,7 @@ class Critic:
                 rejects = self.guard_code(transcript)
                 if not rejects:
                     verdict = self.guard_agent(it, diagnosis, diff, account)
-                    if "APPROVE" not in verdict.upper():
+                    if not approved(verdict):
                         rejects = [f"GUARD_REJECT agent: {verdict.strip()[:300]}"]
                 if rejects:
                     log(f"patch attempt {attempt} rejected: " + " || ".join(r[:160] for r in rejects), self.logfile)
@@ -483,7 +554,7 @@ class Critic:
                     return 0
                 cand_tag = f"v{version}{self.suffix}-candidate"
                 cand_report = self.tmp / f"report-{cand_tag}.json"
-                cand = self.run_eval("train", self.worktree / RULES_REL, cand_tag, report=cand_report)
+                cand = self.run_eval("train", self.worktree / RULES_REL, cand_tag, report=cand_report, verdict="candidate")
                 if cand is None:
                     log("train eval failed; iteration abandoned", self.logfile)
                     break
@@ -500,6 +571,9 @@ class Critic:
                 sha = self.commit(version, diagnosis, patch_summary, expected)
                 if cand_report.exists():
                     shutil.copy(cand_report, self.report_src)
+                # publish the accepted version under its own label, so Weave tells it apart from rejected candidates
+                self.run_eval("train", self.rules_src, f"v{version}{self.suffix}",
+                              report=self.tmp / f"report-v{version}{self.suffix}.json", verdict="accepted", gate=why)
                 entry = {"tag": f"v{version}{self.suffix}", "version": version, "sha": sha, "train": cand["metrics"],
                          "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": diagnosis[:300],
                          "patch": patch_summary, "patch_hypothesis": patch_hypothesis, "expected": expected, "gate": why,
@@ -543,12 +617,21 @@ def main() -> int:
     ap.add_argument("--heldout-samples")
     ap.add_argument("--max-turns", type=int, default=45)
     ap.add_argument("--timeout", type=int, default=1500)
+    ap.add_argument("--text-agents", choices=["claude", "wandb"], default=None,
+                    help="backend of the diagnostic and guard agents (default TENFOLD_TEXT_AGENTS, else claude)")
+    ap.add_argument("--text-model", default=None,
+                    help="W&B Inference model for those agents (default TENFOLD_TEXT_AGENT_MODEL, else Qwen3 235B)")
+    ap.add_argument("--mock-inference", help="script that stands in for W&B Inference (tests)")
     ap.add_argument("--max-cost", type=float, default=None,
                     help="stop this arm once the agents have spent this many USD (default TENFOLD_MAX_COST_USD or 40)")
     a = ap.parse_args()
     repo = Path(a.repo).resolve()
     load_env(repo / ".env")
     a.model = a.model or os.environ.get("TENFOLD_CRITIC_MODEL", "claude-sonnet-5")
+    a.text_agents = a.text_agents or os.environ.get("TENFOLD_TEXT_AGENTS") or "claude"
+    if a.text_agents not in ("claude", "wandb"):
+        raise SystemExit(f"TENFOLD_TEXT_AGENTS must be claude or wandb, got {a.text_agents!r}")
+    a.text_model = a.text_model or os.environ.get("TENFOLD_TEXT_AGENT_MODEL") or TEXT_AGENT_MODEL
     if a.max_cost is None:
         a.max_cost = float(os.environ.get("TENFOLD_MAX_COST_USD", "40"))
     if a.blind:
