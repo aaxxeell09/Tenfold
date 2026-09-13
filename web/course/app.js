@@ -281,13 +281,18 @@
   function checked() { try { return sessionStorage.getItem("tenfold.checked") === "1"; } catch (e) { return false; } }
 
   // ---------- start check: three steps, the camera advances them ----------
+  // The export sheet shows the three steps as three frames side by side; the screen has
+  // one, and the step it is on is its data-step. Every class the export puts on a frame
+  // for the state being shown goes on that one frame here, at the moment it is true:
+  // detected, banner, matched, check, heard, result, mapin.
+  function checkFrame() { return $("#check .frame"); }
   function startCheck() {
     if (checkRun) return;
     const root = $("#check");
+    const frame = checkFrame();
     checkRun = { step: 1, lit: 0, timers: [], done: false, typed: "", said: null };
-    root.className = "checkview view";
-    root.dataset.step = "1";
-    $("#check-mic").hidden = true;
+    frame.className = "frame";
+    frame.dataset.step = "1";
     checkSay("Show me both hands.");
     setTally($("#check-tally"), "ready");
     setStepDots(1);
@@ -328,13 +333,13 @@
   function later(ms, fn) { if (checkRun) checkRun.timers.push(setTimeout(fn, ms)); }
   function checkMessage(m) {
     const run = checkRun;
-    const root = $("#check");
+    const frame = checkFrame();
     if (!run || m.type !== "state") return;
-    drawFingers(m, root);
+    drawFingers(m, $("#check .stage"));
     const hands = new Set((m.fingers || []).map((f) => f.hand)).size;
     if (run.step === 1) {
-      if (hands === 2 && !root.classList.contains("detected")) {
-        root.classList.add("detected");
+      if (hands === 2 && !frame.classList.contains("detected")) {
+        frame.classList.add("detected");
         // the child is past this step the moment both hands are there, whatever Tally
         // is still saying: the acknowledgement rides the event, the next instruction
         // waits its turn in the queue instead of a clock that can run ahead
@@ -344,11 +349,11 @@
           $$("#check .practice-overlay [data-number]").forEach((el) => { if (Number(el.dataset.number) <= 10 && Number(el.dataset.number) >= n) el.classList.add("lit"); });
           run.lit = n;
         }));
-        checkSay("Perfect.", { onStart: () => { root.classList.add("check"); setTally($("#check-tally"), "happy"); } });
+        checkSay("Perfect.", { onStart: () => { frame.classList.add("check"); setTally($("#check-tally"), "happy"); } });
         checkSay("Touch your 6 with your 6.", {
           still: () => checkRun === run && run.step === 2,
           onStart: () => {
-            root.dataset.step = "2"; root.classList.remove("check"); setStepDots(2);
+            frame.dataset.step = "2"; frame.classList.remove("check"); setStepDots(2);
             setTally($("#check-tally"), "thinking");
           },
         });
@@ -359,18 +364,17 @@
     if (run.step === 2) {
       if (m.state === "correct_pose" || m.state === "waiting_answer") {
         run.step = 3; run.said = null;
-        root.classList.add("matched", "banner", "check");
-        $("#check-banner").textContent = "That is a 6 and a 6.";
+        frame.classList.add("matched", "banner", "check");
+        $("#check .banner-top").textContent = "That is a 6 and a 6.";
         setTally($("#check-tally"), "happy");
         checkSay("Yes, that's it.");
         // no microphone in this browser, or one that was refused: say so and
-        // show the digits in the pill, which is the only answer field here. The mic
-        // opens with the question, never before it.
+        // show the digits in the pill, which is the only answer field here. The pill
+        // belongs to step 3, so it comes up with the question and never before it.
         checkSay(canHear() ? "Say the answer." : "Type the answer.", {
           still: () => checkRun === run && !run.done,
           onStart: () => {
-            root.dataset.step = "3"; root.classList.remove("check", "banner"); setStepDots(3);
-            $("#check-mic").hidden = false;
+            frame.dataset.step = "3"; frame.classList.remove("check", "banner"); setStepDots(3);
             $("#check-miclabel").textContent = micLabel();
             setTally($("#check-tally"), "ready");
             listenWhile("correct_pose");
@@ -382,8 +386,9 @@
       return;
     }
     if (run.step === 3 && m.state === "answer_correct") {
-      root.classList.add("heard", "result", "check");
-      $("#check-result").textContent = m.answer;
+      frame.classList.add("heard", "result", "check");
+      // the export's own id: the frame wears "result" as a state class, so .result is not it
+      $("#result").textContent = m.answer;
       $("#check-miclabel").textContent = "Thirty six";
       run.done = true;
       gateVoice(false);
@@ -395,8 +400,9 @@
   function checkEnd() {
     const run = checkRun;
     if (!run) return;
-    // the path opens when Tally has finished saying so, not on a clock
-    checkSay("Your path is open.", { after: closeCheck });
+    // the path opens when Tally has finished saying so, not on a clock. The export
+    // slides its practice path in on that line, and behind it is the same path
+    checkSay("Your path is open.", { onStart: () => checkFrame().classList.add("mapin"), after: closeCheck });
   }
   function closeCheck() {
     if (!checkRun) return;
