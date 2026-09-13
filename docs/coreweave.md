@@ -13,8 +13,8 @@ W&B Report with the same evidence: https://wandb.ai/ilan-sainteagathe-synthetic-
 
 ## 1. Tally's voice in the live app
 
-`app/server.py` builds every Tally line through `make_phrase()`. With `WANDB_API_KEY` set, that is
-`lesson.tutor.Tutor(fallback=tally.phrase).phrase`: Tally's fixed phrase is returned at once, and the model's line
+`app/server.py` builds every Tally line through `PHRASE`, and its `main()` calls `enable_tutor()`. With
+`WANDB_API_KEY` set, `PHRASE` becomes `lesson.tutor.Tutor(fallback=tally.phrase).phrase`: Tally's fixed phrase is returned at once, and the model's line
 is fetched in a background thread and shown on the next update of the same moment. The model gets the moment and
 Tally's own line, and says the same thing in its own words, keeping every number (`lesson.tutor.build_messages`).
 `TENFOLD_TUTOR=0` keeps the fixed phrases for a stage with no network.
@@ -81,7 +81,6 @@ python loop/snapshot.py
 ```
 
 **For Axel (his files).**
-- `app/server.py`: `make_phrase()` and `Lesson.phrase` are new; `build_message` takes `phrase=`, default `tally.phrase`. Tests in `tests/test_server_tutor.py`.
 - The model's line replaces the fixed phrase within the same moment, and `web/course/app.js` speaks every new line, so the voice can cut the first sentence. If it sounds jarring on the demo speaker, speak only the model line when it arrives within the window, or run the demo with `TENFOLD_TUTOR=0`.
 - The model once added a direction that Tally's line did not give ("move your right finger down a little"); `keeps_numbers` does not catch that.
 - README "Sponsor tools" (SPEC section 16): the table at the top of this file is ready to paste.
