@@ -71,12 +71,27 @@ competing for the machine at the time. An idle mock server polled every 20 s for
 two minutes stayed up and answered 200 every time, so there is no server that
 dies on its own.
 
-The final clean run at dd3ae9e was still in `tests/test_voice.py` when this was
+The final run at dd3ae9e was still in `tests/test_voice.py` when this was
 written, with **one** failure in the preceding 92 percent and no dashboard
-failures at all. I am reporting that honestly rather than rounding it to green:
-the suite is not fully verified at dd3ae9e by me, and the one outstanding F is
-unidentified. Anyone re-running it should give it a clear machine and about
-fifteen minutes.
+failures at all. I am reporting that rather than rounding it to green: the suite
+is not fully verified at dd3ae9e by me, and that one F is unidentified.
+
+**And "clean run" turned out to be something I could not have.** While it ran,
+`ps` showed **eight** `app/server.py --mock` processes on this machine, on ports
+43943, 55855, 59303, 60921, 8896 and 8898, from the other agents' own test runs
+and worktrees, plus their pytest sessions. The suite spawns a real aiohttp server
+and a real chromium per module, so four agents sharing one box is not a
+background detail: it is most likely the whole explanation for the 50 failures
+above, for this run taking three times the 475 s of the fastest one, and for the
+one F I cannot name.
+
+That is worth someone's attention beyond this audit. **The browser tests are not
+safe to run concurrently**, and nothing in the suite says so. Four agents told to
+work in parallel will each run `make test`, and the results they get back will be
+about each other rather than about the code. `tests/test_voice.py` picks a free
+port and starts a server per module, which is correct and still not enough under
+real contention: a 20 s startup deadline and a page load are both wall clock, and
+wall clock is the shared resource.
 
 ### Not a red, but worth knowing
 
@@ -853,6 +868,14 @@ Ordered by cost if nobody touches it.
     microphone waits for a way forward is a constant in the page rather than a
     bounded policy number. Small, and it will rot quietly because the fallback
     is graceful.
+
+11. **The browser tests under parallel agents** (section 1). Eight mock servers
+    from four agents were running on this machine while the final suite ran. The
+    failures a parallel agent sees from `tests/test_voice.py` are mostly about
+    the other agents. Either those tests get a marker and stay out of the default
+    `make test`, or the team accepts that a red `test_voice.py` means nothing
+    until it is re-run alone. I lost an hour to this and wrote a phantom blocker
+    before catching it.
 
 And one that is nobody's feature but everybody's problem: **a test that a field
 is sent is not a test that anything reads it** (4b). Four of the findings above
