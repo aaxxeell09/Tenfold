@@ -204,7 +204,9 @@ def wrong_pose_harness(params: object | None = None) -> Harness:
 
 # Keys of the product that live in the same file without being tutor timings.
 # The tutor never reads them, so they are allowed here and nowhere else.
-NON_TUTOR_PARAMS = frozenset({"live_sample_windows"})
+# live_sample_windows sizes the perception buffer; gate_ready_button_s is how
+# long the page waits before the Ready button of a gate with no microphone.
+NON_TUTOR_PARAMS = frozenset({"live_sample_windows", "gate_ready_button_s"})
 
 
 def test_params_file_has_exactly_the_contract_keys() -> None:
