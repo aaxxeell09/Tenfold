@@ -1364,6 +1364,11 @@ class Tutor:
                                hand=hand, shows=shows, wants=wants)
         return PoseReading(name=READ_SEARCHING, gap=gap, pair=pair)
 
+    @property
+    def reading(self) -> PoseReading:
+        """What the tutor thinks it is looking at, as of the last observation."""
+        return self._reading
+
     def _expected_numbers(self) -> tuple[int, int]:
         """The number each hand is asked for, in the kinder of the two readings.
 
@@ -1587,9 +1592,10 @@ class Tutor:
         if not visibility:
             self._taught += 1
         self._suppressed = None
-        if not visibility and level >= 2:
-            # The colours are up. The table measures hint_2_delay from here, on
-            # this pair alone: a different wrong pair is a different problem.
+        if not visibility and level == 2:
+            # The colours are up, and only L2 puts them up. The table measures
+            # hint_2_delay from here, on this pair alone: a different wrong pair
+            # is a different problem, and the steps above are not the colours.
             self._colours_since = self._ped
             self._colours_pair = self._reading.pair
         if not visibility and level >= 2 and self._hint.get("hand"):
