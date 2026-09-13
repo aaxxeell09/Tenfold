@@ -166,8 +166,14 @@ FRAME_PARAMS = ("pose_confirm_frames",)
 # recovery_grace_ms is the hush after the hands come back into frame. It is the
 # machine apologising for its own blind spell, not patience with a child, so it
 # is the same for every child and in every mode: read as written, clamped only.
+# visibility_prompt_ms is how long the opening waits, with the placement zones
+# up and nothing else, before Tally calls the hands into frame.
+# gate_step_pause_ms is the page's: the beat it holds after a gate step passes
+# so the child hears the confirmation before the next instruction. The tutor
+# reads it only to hand it over, bounded like everything else.
 MS_PARAMS = ("pose_confirm_ms", "ack_delay_ms", "check_step_min_ms",
-             "answer_first_number_ms", "pose_ready_delay_ms", "recovery_grace_ms")
+             "answer_first_number_ms", "pose_ready_delay_ms", "recovery_grace_ms",
+             "visibility_prompt_ms", "gate_step_pause_ms")
 LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
 # The success beat, in milliseconds: how long the celebration itself runs, and
 # how long the silence after it lasts before the next exercise is announced.
@@ -199,6 +205,13 @@ POSE_READY_KEY = "pose_ready"
 # acknowledgement, so a file without it re-prompts the exercise and no more.
 RECOVERY_LINE_KEY = "hands_back"
 LAUNCH_KEY = "launch"
+# The opening call for hands that are not in frame yet. It is a child's line,
+# not the reminder of a camera failure, so it has its own key and its own clock.
+HANDS_PROMPT_KEY = "hands_come_here"
+# Lines the page says and the tutor never renders: the three steps of the start
+# gate. They live in the same file because Tally has one voice, and the server
+# hands them to the page rather than the page writing them out again.
+PAGE_LINE_KEYS = ("gate_ready",)
 # The lines of the older lesson path, lesson/tally.py, which keeps no text of
 # its own. They live in the same file because Tally has one voice and one place
 # to keep it; the live tutor never says them and never has to have them.
@@ -216,7 +229,8 @@ LESSON_LINE_KEYS = (
 # Lines the file may carry and does not have to. "next_one" closes the success
 # beat, and lesson/tally_lines.json does not have it yet: until it does the beat
 # hands the page no second line at all rather than a line nobody wrote.
-OPTIONAL_LINE_KEYS = ("next_one", ACK_LINE_KEY, RECOVERY_LINE_KEY) + LESSON_LINE_KEYS
+OPTIONAL_LINE_KEYS = (("next_one", ACK_LINE_KEY, RECOVERY_LINE_KEY,
+                       HANDS_PROMPT_KEY) + PAGE_LINE_KEYS + LESSON_LINE_KEYS)
 NEXT_LINE_KEY = "next_one"
 
 # The success beat. The page plays the parts in this order inside success_ms,
@@ -981,7 +995,13 @@ class Tutor:
         if situation in VISIBILITY_PROBLEMS:
             return self._visibility(moment, situation, held)
 
-        # 2. A pose problem that has outlived its grace.
+        # 2. Nothing is taught to hands that are not steadily in frame. The pose
+        # may still be the one remembered from before they left, and the ladder
+        # never climbs on a memory: no hands, no step, however long they are away.
+        if not self._hands_ok:
+            return None
+
+        # 3. A pose problem that has outlived its grace.
         if situation in POSE_PROBLEMS:
             if not self._past_initial_silence() or self.in_recovery:
                 return None
@@ -992,7 +1012,7 @@ class Tutor:
                 return None
             return self._escalate(moment, situation)
 
-        # 3. The pose is right. Counting is the only thing left to nudge towards,
+        # 4. The pose is right. Counting is the only thing left to nudge towards,
         # so this branch never falls through to the opener below.
         if situation == SIT_CORRECT:
             if self._answered or not self._past_initial_silence():
@@ -1009,7 +1029,7 @@ class Tutor:
                 return said
             return None
 
-        # 4. Both hands are in frame and the classifier cannot read a pose: the
+        # 5. Both hands are in frame and the classifier cannot read a pose: the
         # child is frozen, or holding something that is not a 6-10 pose at all.
         # SPEC.md section 9: numbers in white, no judgement, then one nudge.
         if self._level > 1 or not self._past_initial_silence():
@@ -1040,9 +1060,17 @@ class Tutor:
             return None
         if situation == SIT_NO_HANDS:
             visual_at = self.effective("no_hands_visual")
-            voice_at = self.effective("no_hands_voice")
+            # The opening is its own moment: the exercise has been asked and the
+            # hands have never been in frame, so Tally calls them in with a
+            # child's line of his own, on the opening clock. Once the hands have
+            # been seen, losing them is the camera failing and the usual
+            # visibility reminder is the right thing to say.
+            opening = not self._hands_ever
+            voice_at = (self.effective("visibility_prompt_ms") / MS_PER_S if opening
+                        else self.effective("no_hands_voice"))
             if held >= voice_at and self._visibility_voiced < budget:
-                line = self._visibility_line("visibility_none")
+                line = self._visibility_line(HANDS_PROMPT_KEY if opening
+                                             else "visibility_none")
                 said = self._offer(moment, 1, line, situation, REASON_HANDS_LOST,
                                    ("no_hands_voice", "min_verbal_gap"),
                                    visibility=True)
@@ -1113,8 +1141,11 @@ class Tutor:
                            rescue=True)
 
     def _gate_level(self, target: int) -> int:
-        """L3 and L4 are barred until their own clock on the exercise has run."""
-        elapsed = self._ped - self._ex_start_ped
+        """L3 and L4 are barred until their own clock on the exercise has run.
+
+        That clock is the ladder's, which only runs with both hands in frame.
+        """
+        elapsed = self._ladder_ped
         if target >= 4 and elapsed < self.effective("rescue_delay"):
             target = 3
         if target >= 3 and elapsed < self.effective("hint_2_delay"):
@@ -1419,7 +1450,12 @@ class Tutor:
             self._log_decision(REASON_NO_ENGAGEMENT, None)
 
     def _past_initial_silence(self) -> bool:
-        return self._ped - self._prompt_end_ped >= self.effective("initial_silence")
+        """Has the child had their thinking silence with both hands in frame.
+
+        It is read off the ladder clock, so the silence starts when the hands
+        arrive and not when the exercise was announced to an empty frame.
+        """
+        return self._ladder_ped >= self.effective("initial_silence")
 
     def _say(self, line: str | None, moment: float) -> None:
         if line is None:
@@ -1514,7 +1550,10 @@ class Tutor:
             self._correction_since = None
             self._level = 0
         if self._state == VISIBILITY_RECOVERY:
-            self._lost = True
+            # Hands that have never been in frame are not lost hands: the
+            # opening has its own call and its own order, and welcoming back
+            # hands that never arrived would talk over it.
+            self._lost = self._hands_ever
             return
         if not self._lost or situation in VISIBILITY_PROBLEMS or not self._hands_ok:
             return
@@ -1615,16 +1654,33 @@ class Tutor:
         return max(0, frames - required)
 
     def _update_hands(self, hands_seen: int, moment: float) -> None:
+        self._advance_ladder_clock()
         both = hands_seen >= 2
         tolerance = self._tolerance(self._frames(self.effective("hands_visible_stable")))
         if both == self._hands_ok:
             self._hands_misses = 0
+            self._hands_ever = self._hands_ever or self._hands_ok
             return
         self._hands_misses += 1
         if self._hands_misses > tolerance:
             self._hands_ok = both
             self._hands_misses = 0
             self._hands_since = moment
+        self._hands_ever = self._hands_ever or self._hands_ok
+
+    def _advance_ladder_clock(self) -> None:
+        """The ladder's own clock, which runs only with both hands in frame.
+
+        The opening order is the exercise, then the hands, then the thinking
+        silence, then the ladder. Time spent with the hands out of frame is the
+        camera's problem and it advances nothing: initial_silence and the gates
+        of L3 and L4 are all read off this clock, so a child who put their hands
+        down comes back to the step they left, not three steps further on.
+        """
+        step = self._ped - self._ped_mark
+        self._ped_mark = self._ped
+        if step > 0 and self._hands_ok and self._open:
+            self._ladder_ped += step
 
     def _update_contact(self, obs: Observation) -> None:
         """Is what the classifier calls a touch really a touch.
@@ -1918,6 +1974,9 @@ class Tutor:
         self._queued: list[tuple[float, str]] = []
         self._lost = False
         self._recover_until: float | None = None
+        self._ladder_ped = 0.0
+        self._ped_mark = self._ped
+        self._hands_ever = False
         self._beat: dict[str, Any] | None = None
         self._answered = False
         self._answer_correct = False
