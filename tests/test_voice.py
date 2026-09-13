@@ -1273,9 +1273,17 @@ def test_the_tts_pair_is_sent_with_no_speech_synthesis_at_all(page):
     quiet_tts(tab)
     tab.evaluate("() => { window.__sent.length = 0; }")
     feed(tab, node, state="wrong_pose", tutor_line="Your right hand needs 7.")
-    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=10000)
-    assert tab.text_content("#lesson .say") == "Your right hand needs 7."
-    assert [m["speaking"] for m in sent(tab, "tts")] == [True, False]
+    # one line at a time: this one waits for the beat after whatever was still playing
+    tab.wait_for_function(
+        "document.querySelector('#lesson .say').textContent === 'Your right hand needs 7.'",
+        timeout=15000)
+    # with no engine a line still stands for as long as it takes to read, so its pair
+    # closes a beat later: wait for the pair this line opened to close
+    tab.wait_for_function("""() => {
+      const pairs = window.__sent.filter((m) => m.type === 'tts').map((m) => m.speaking);
+      return pairs.length >= 2 && pairs[pairs.length - 2] === true && pairs[pairs.length - 1] === false;
+    }""", timeout=20000)
+    assert [m["speaking"] for m in sent(tab, "tts")][-2:] == [True, False]
     assert errors == []
 
 
@@ -1406,7 +1414,8 @@ EXPORT_VISUALS = [
     ({"kind": "ghost", "hand": "right", "from": 9, "to": 7}, "circle.ghost", None),
     ({"kind": "rescue_card", "tens": 5, "units": 6, "total": 56}, None, None),
     ({"kind": "placement_zones"}, "rect.zone-box", None),
-    ({"kind": "finger_numbers"}, "text.num.lit", (0.70, 0.50)),
+    # finger_numbers is the supportive mode reminder: every fingertip, not one target
+    ({"kind": "finger_numbers"}, "text.num.lit", None),
 ]
 
 CENTRE = r"""
