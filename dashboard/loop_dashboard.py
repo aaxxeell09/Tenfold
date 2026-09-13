@@ -303,61 +303,31 @@ def _(compare, explorer, informed, snap):
 
 
 @app.cell
-def _(best_version, checks, comparable, compare, em, icon, informed, missing, mo, names_for, pill, pts, refused,
-      refused_known, retro_summary, snap, unverified, when):
+def _(best_version, checks, comparable, compare, em, informed, missing, mo, names_for, pill, unverified, when):
+    # the hero tells the story and gives one number, the one the hands demo right below lets you see
     _names = names_for(informed)
     _scored = [v for v in informed if em(v.get("train")) is not None]
     _last = _scored[-1] if _scored else None
     _in_use = best_version or _last
     _in_use_name = _names.get((_in_use or {}).get("tag"), "the rule in use")
     if compare and checks["compare"]:
-        _a, _b = compare["a"], compare["b"]
-        _holds, _near_holds = compare.get("holds"), compare.get("near_holds")
+        _a, _b, _near_holds = compare["a"], compare["b"], compare.get("near_holds")
     else:
         _first = next((v for v in _scored if comparable(v, _last)), None) if _last else None
         _pairable = _first is not None and _first is not _last
         _a = ((_first or {}).get("train") or {}) if _pairable else {}
         _b = (_last or {}).get("train") or {}
-        _holds, _near_holds = _b.get("n_holds"), None
-
-    def _out_of_100(key):
-        x, y = _a.get(key), _b.get(key)
-        if y is None:
-            return '<span class="tf-from">n/a</span>'
-        now = f'{y * 100:.0f}<span class="tf-unit">out of 100</span>'
-        return now if x is None else f'<span class="tf-from">{x * 100:.0f}</span><span class="tf-arrow">→</span>{now}'
-
-    def _gain(key):
-        x, y = _a.get(key), _b.get(key)
-        if y is None:
-            return ""
-        if x is None:
-            return pill("comparison not verified", "warn")
-        return pill(pts(y - x), "good" if y > x else ("bad" if y < x else "neutral"))
-
-    def _kpi(label, value, foot, badge=""):
-        return (f'<div class="tf-kpi"><div class="tf-kpi-top"><span class="tf-kpi-label">{label}</span>{badge}</div>'
-                f'<div class="tf-kpi-value">{value}</div><div class="tf-kpi-foot">{foot}</div></div>')
-
-    _retro = snap.get("retrospective_validation") or {}
-    _rs = retro_summary(_retro)
-    _kept = sum(1 for v in informed if v.get("kind") == "patch")
-    _spend = sum(v.get("spent_usd") or 0 for v in informed if v.get("kind") == "patch")
-    _kpis = "".join([
-        _kpi("Gestures the app reads right", _out_of_100("exact_match"),
-             f"before the AI → now · {_holds} practice gestures" if _holds else "practice gestures", _gain("exact_match")),
-        _kpi("Hands that almost touch, read right", _out_of_100("near_contact_accuracy"),
-             f"the hardest case · {_near_holds} practice gestures" if _near_holds else "the hardest case", _gain("near_contact_accuracy")),
-        _kpi("Retrospective evaluation", _rs["gain"] if _rs else '<span class="tf-from">not run</span>',
-             (f"{_rs['a']} → {_rs['b']} on {_retro.get('holds')} gestures kept aside · not certain yet" if _rs else "gestures kept aside"),
-             pill("not verified", "warn") if _retro and not checks["retro"] else ""),
-        _kpi("AI changes tested",
-             f'{_kept}<span class="tf-unit">kept</span> <span class="tf-from">·</span> '
-             + (f'{len(refused)}<span class="tf-unit">refused</span>' if refused_known else '<span class="tf-unit">refusals not recorded</span>'),
-             f"${_spend:.2f} of AI time" if _spend else ""),
-    ])
+        _near_holds = None
+    _x, _y = _a.get("near_contact_accuracy"), _b.get("near_contact_accuracy")
+    _headline = (
+        f'<div class="tf-headline"><div class="tf-headline-value"><span class="tf-from">{_x * 100:.0f}</span>'
+        f'<span class="tf-arrow">→</span>{_y * 100:.0f}<span class="tf-unit">out of 100</span></div>'
+        '<div class="tf-headline-text"><span><b>hands that almost touch, read right</b> before and after the AI loop</span>'
+        f'<span class="tf-quiet">on {f"{_near_holds} practice gestures" if _near_holds else "practice recordings"} · '
+        '<a href="#evidence">see the limits</a></span></div></div>'
+    ) if _x is not None and _y is not None else ""
     _limits = [f"missing: {m}" for m in missing] + [f"not verified: {u}" for u in unverified]
-    _limits_html = (f'<div class="tf-limits"><span class="tf-label">Limits of this snapshot</span>'
+    _limits_html = (f'<div class="tf-limits" style="margin-top:18px"><span class="tf-label">Limits of this snapshot</span>'
                     f'{"".join(pill(l, "warn") for l in _limits)}</div>') if _limits else ""
     _status = pill(f"Rule in use: {_in_use_name} · {when(_in_use.get('ts'))}", "dark", dot=True) if _in_use else ""
     mo.Html(
@@ -368,9 +338,7 @@ def _(best_version, checks, comparable, compare, em, icon, informed, missing, mo
         '<h1 class="tf-h1">An AI loop that teaches an app to <em>read</em> children\'s hands.</h1>'
         '<p class="tf-sub-hero">Kids answer a multiplication by touching two fingertips in front of the camera. '
         'Before it can check the answer, the app has to see which fingers touch.</p></div>'
-        f'{_limits_html}<div class="tf-kpis">{_kpis}</div>'
-        f'<div class="tf-measure">{icon("info", 16)}<span>A gesture counts as read right only if the app gets both fingers '
-        'and the touch right. These are scores of the app, not grades of children.</span></div></div>'
+        f'{_headline}{_limits_html}</div>'
     )
     return
 
@@ -805,6 +773,66 @@ def _(ACCENT, BAD, GOOD, INK, INK2, alt, checks, explorer, icon, kicker, limits,
 
 
 @app.cell
+def _(checks, comparable, compare, em, icon, informed, mo, pill, pts, refused, refused_known, retro_summary, section, snap):
+    # the four numbers come after the story, once the reader knows what a gesture read right is
+    _scored = [v for v in informed if em(v.get("train")) is not None]
+    _last = _scored[-1] if _scored else None
+    if compare and checks["compare"]:
+        _a, _b = compare["a"], compare["b"]
+        _holds, _near_holds = compare.get("holds"), compare.get("near_holds")
+    else:
+        _first = next((v for v in _scored if comparable(v, _last)), None) if _last else None
+        _pairable = _first is not None and _first is not _last
+        _a = ((_first or {}).get("train") or {}) if _pairable else {}
+        _b = (_last or {}).get("train") or {}
+        _holds, _near_holds = _b.get("n_holds"), None
+
+    def _out_of_100(key):
+        x, y = _a.get(key), _b.get(key)
+        if y is None:
+            return '<span class="tf-from">n/a</span>'
+        now = f'{y * 100:.0f}<span class="tf-unit">out of 100</span>'
+        return now if x is None else f'<span class="tf-from">{x * 100:.0f}</span><span class="tf-arrow">→</span>{now}'
+
+    def _gain(key):
+        x, y = _a.get(key), _b.get(key)
+        if y is None:
+            return ""
+        if x is None:
+            return pill("comparison not verified", "warn")
+        return pill(pts(y - x), "good" if y > x else ("bad" if y < x else "neutral"))
+
+    def _kpi(label, value, foot, badge=""):
+        return (f'<div class="tf-kpi"><div class="tf-kpi-top"><span class="tf-kpi-label">{label}</span>{badge}</div>'
+                f'<div class="tf-kpi-value">{value}</div><div class="tf-kpi-foot">{foot}</div></div>')
+
+    _retro = snap.get("retrospective_validation") or {}
+    _rs = retro_summary(_retro)
+    _kept = sum(1 for v in informed if v.get("kind") == "patch")
+    _spend = sum(v.get("spent_usd") or 0 for v in informed if v.get("kind") == "patch")
+    _kpis = "".join([
+        _kpi("Gestures the app reads right", _out_of_100("exact_match"),
+             f"before the AI → now · {_holds} practice gestures" if _holds else "practice gestures", _gain("exact_match")),
+        _kpi("Hands that almost touch, read right", _out_of_100("near_contact_accuracy"),
+             f"the hardest case · {_near_holds} practice gestures" if _near_holds else "the hardest case", _gain("near_contact_accuracy")),
+        _kpi("Retrospective evaluation", _rs["gain"] if _rs else '<span class="tf-from">not run</span>',
+             (f"{_rs['a']} → {_rs['b']} on {_retro.get('holds')} gestures kept aside · not certain yet" if _rs else "gestures kept aside"),
+             pill("not verified", "warn") if _retro and not checks["retro"] else ""),
+        _kpi("AI changes tested",
+             f'{_kept}<span class="tf-unit">kept</span> <span class="tf-from">·</span> '
+             + (f'{len(refused)}<span class="tf-unit">refused</span>' if refused_known else '<span class="tf-unit">refusals not recorded</span>'),
+             f"${_spend:.2f} of AI time" if _spend else ""),
+    ])
+    mo.vstack([
+        section("results", 5, "Results so far", "What the loop changed, <em>in four numbers</em>."),
+        mo.Html(f'<div class="tf"><div class="tf-kpis" style="margin-top:0">{_kpis}</div>'
+                f'<div class="tf-measure">{icon("info", 16)}<span>A gesture counts as read right only if the app gets both fingers '
+                'and the touch right. These are scores of the app, not grades of children.</span></div></div>'),
+    ], gap=1)
+    return
+
+
+@app.cell
 def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, icon, informed, math, mo, names_for, pct, pill, pts, retro_summary,
       section, snap):
     _retro = snap.get("retrospective_validation") or {}
@@ -891,7 +919,7 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, icon, informed, math, mo
               "Every check above evaluates gesture recognition, not children's learning outcomes."),
     ]
     mo.vstack([
-        section("evidence", 5, "Limits of the evidence", "Where we stand, <em>honestly</em>.",
+        section("evidence", 6, "Limits of the evidence", "Where we stand, <em>honestly</em>.",
                 "Training gains, the retrospective evaluation and independent evaluation are kept apart."),
         mo.Html(f'<div class="tf"><div class="tf-ladder">{"".join(_rungs)}</div></div>'),
     ], gap=1)

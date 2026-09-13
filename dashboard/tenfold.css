@@ -94,6 +94,15 @@
 .tf-chart-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px;
   font-size: 12px; color: var(--tf-muted); }
 .tf-sub-hero { font-size: 18px; line-height: 1.5; color: var(--tf-ink-2); max-width: 60ch; margin: 0; }
+.tf-headline { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 32px; margin-top: 30px; padding: 22px 28px;
+  border: 1px solid var(--tf-line); border-radius: 16px; background: #fff; }
+.tf-headline-value { font: 500 60px/1 var(--tf-mono); letter-spacing: -0.04em; color: var(--tf-ink); white-space: nowrap; }
+.tf-headline-value .tf-from { color: var(--tf-faint); }
+.tf-headline-value .tf-arrow { color: var(--tf-faint); font-size: 0.6em; margin: 0 0.15em; vertical-align: 0.15em; }
+.tf-headline-value .tf-unit { font: 500 16px var(--marimo-text-font); letter-spacing: 0; color: var(--tf-muted); margin-left: 8px; }
+.tf-headline-text { display: flex; flex-direction: column; gap: 6px; font-size: 18px; line-height: 1.4; color: var(--tf-ink-2); max-width: 54ch; }
+.tf-headline-text b { color: var(--tf-ink); font-weight: 600; }
+.tf-headline a { color: var(--tf-accent-ink); text-decoration: none; }
 .tf-steps { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 14px; color: var(--tf-ink-2); }
 .tf-step { display: inline-flex; align-items: center; gap: 8px; }
 .tf-step b { width: 22px; height: 22px; border-radius: 50%; background: var(--tf-accent); color: #fff; display: grid;
