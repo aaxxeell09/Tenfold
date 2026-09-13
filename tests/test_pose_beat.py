@@ -48,14 +48,27 @@ def pose(left: int, right: int, contact: bool = True) -> GestureState:
                         confidence=0.9)
 
 
-def fingers(hands: int = 2) -> list[dict[str, object]]:
+def fingers(hands: int = 2, gesture: GestureState | None = None,
+            gap: float = 0.0) -> list[dict[str, object]]:
+    """Fingertips as app/server.py sends them, in frame fractions.
+
+    When the gesture claims a contact the two named tips are put where a real
+    touch puts them, a hair apart, because the tutor measures the distance now
+    and a pose held a hand's width apart is not a pose.
+    """
     names = {0: (), 1: ("left",), 2: ("left", "right")}[hands]
     out: list[dict[str, object]] = []
     for hand in names:
-        base = 0.3 if hand == "left" else 0.7
+        base = 0.45 if hand == "left" else 0.55
         for number in range(6, 11):
             out.append({"hand": hand, "number": number, "x": base,
                         "y": 0.5 + 0.02 * (number - 6)})
+    if gesture is not None and gesture.contact and hands == 2:
+        touching = {("left", gesture.left): 0.5, ("right", gesture.right): 0.5 + gap}
+        for tip in out:
+            where = touching.get((tip["hand"], tip["number"]))
+            if where is not None:
+                tip["x"], tip["y"] = where, 0.5
     return out
 
 
@@ -107,7 +120,7 @@ class Harness:
         for _ in range(int(round(seconds * FPS))):
             self.clock.t += STEP
             self.last = self.tutor.observe(
-                Observation(gesture=gesture, fingers=fingers(hands),
+                Observation(gesture=gesture, fingers=fingers(hands, gesture),
                             hands_seen=hands), self.clock.t)
             if self.last.tutor_line:
                 said.append((round(self.clock.t, 3), self.last.tutor_line,

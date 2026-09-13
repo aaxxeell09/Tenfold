@@ -65,6 +65,10 @@ MOTION_MULTIPLIER = 4.0
 # the fallback below works from fingertip coordinates, which are frame fractions,
 # so it divides by a nominal palm to land in the same unit.
 NOMINAL_PALM = 0.1
+# A hand held to the camera spans about one and a half palms from the thumb tip
+# to the little finger tip. It is how the palm is recovered from the fingertips
+# alone, until app/server.py sends the measurement it already has.
+TIP_SPREAD_PALMS = 1.5
 SMOOTHING_OLD = 0.8
 SMOOTHING_NEW = 0.2
 SCHEDULE_GLOBALS_ONLY = 4           # tutor_observations 0..4: factors forced to 1.0
@@ -147,6 +151,10 @@ DURATION_PARAMS = (
     "no_engagement_pause", "pose_memory",
 )
 COUNT_PARAMS = ("max_unsolicited_verbal", "max_visibility_reminders")
+# Shape of the world, not patience: how close two fingertips have to be, as a
+# fraction of a palm, before the tutor believes they are touching. Read as
+# written and clamped, like every other measurement.
+RATIO_PARAMS = ("contact_ratio",)
 FACTOR_PARAMS = ("supportive_mode_factor", "independent_mode_factor")
 # Latency parameters. They are how fast the machine answers, not how patient
 # Tally is, so no learner factor and no mode factor ever scales them: they are
@@ -168,7 +176,7 @@ LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
 # factor ever scales them. Only the clamp applies.
 BEAT_PARAMS = ("success_beat_ms", "next_pause_ms")
 REQUIRED_PARAMS = ((("fps",) + DURATION_PARAMS + COUNT_PARAMS + FACTOR_PARAMS)
-                   + LATENCY_PARAMS + BEAT_PARAMS)
+                   + LATENCY_PARAMS + BEAT_PARAMS + RATIO_PARAMS)
 MS_PER_S = 1000.0
 
 LINE_KEYS = (
@@ -351,6 +359,12 @@ class Observation:
     hands_seen: int = 0
     hint: Mapping[str, Any] | None = None
     motion: float | None = None
+    # Palm width in the same units as the fingertip coordinates, which is the
+    # frame fraction app/server.py already works in. It is what makes a
+    # fingertip distance mean something at any distance from the camera. When
+    # the server does not send it the tutor estimates it from the fingertips
+    # themselves, which is good enough to tell a touch from ten centimetres.
+    palm: float | None = None
 
 
 @dataclass(frozen=True)
@@ -514,6 +528,8 @@ class Tutor:
         self._hands_ok = False
         self._hands_misses = 0
         self._hands_since = 0.0
+        self._contact_ok = True
+        self._contact_frames = 0
 
         # session and node
         self._node: Any = None
@@ -588,7 +604,8 @@ class Tutor:
             # no learner factor, no mode factor, and the clamp is still the
             # last step. This is the path INDEPENDENT mode may not touch.
             return float(_clamp(raw, low, high))
-        if key == "fps" or key in FACTOR_PARAMS or key in LATENCY_PARAMS:
+        if (key == "fps" or key in FACTOR_PARAMS or key in LATENCY_PARAMS
+                or key in RATIO_PARAMS):
             return raw
         if key in COUNT_PARAMS:
             return float(_clamp(round(raw * self._help_factor), low, high))
@@ -869,6 +886,7 @@ class Tutor:
         self._update_motion(motion, moment)
         self._collect_jitter(motion, obs, moment)
         self._update_hands(obs.hands_seen, moment)
+        self._update_contact(obs)
         self._update_pose(obs, moment)
         # The acknowledgement reads the raw clock, never a pedagogical one: the
         # child who just reached the pose is moving, and movement must not hold
@@ -1108,6 +1126,11 @@ class Tutor:
                visibility: bool = False, rescue: bool = False) -> str | None:
         """Apply the anti nag limits, then deliver or drop. Never queue."""
         if line is None:
+            # A silent step of the ladder. Nothing is spoken, so no verbal gate
+            # applies and no verbal budget is spent, but the step is taken: the
+            # level climbs, the drawing changes and the log records it.
+            self._deliver(moment, level, None, solicited=False, reason=reason,
+                          keys=keys, problem=problem, visibility=visibility)
             return None
         if self._last_line_ped is not None:
             if self._ped - self._last_line_ped < self.effective("min_verbal_gap"):
@@ -1170,31 +1193,34 @@ class Tutor:
 
     def _ladder_line(self, level: int, situation: str | None = None,
                      asked: bool = False) -> str | None:
+        """What the ladder says at this level, and None where it only shows.
+
+        Tally shows before he speaks. L1 puts the numbers on the fingertips and
+        L2 colours the two fingers that matter, both without a word; L3 is the
+        first level with a voice and says the correction; L4 walks the whole
+        thing through. Help the child asked for is always answered in words:
+        silence in reply to a question is not patience.
+        """
         situation = situation or self._situation_now
         if level >= RESCUE_LEVEL:
             return self._render("rescue", tens=self._tens,
                                 tens_value=self._tens * 10, u1=self._u1,
                                 u2=self._u2, units=self._units,
                                 total=self._result)
+        if asked and level <= 1:
+            # Help the child asked for is worth more than a nudge: the first
+            # concrete step, on the hand they start from.
+            return self._render("hesitation_2", a=self._a)
+        if level < 3 and not asked:
+            # L1 and L2 are shown, not said.
+            return None
         if situation == SIT_NO_CONTACT:
             return self._render("not_touching")
         if situation == SIT_SWAPPED:
             # The two numbers are right and each is on the other hand, so the
             # line that says which number belongs where is the swap advice.
             return self._render("wrong_both", a=self._a, b=self._b)
-        if asked and level <= 1:
-            # Help the child asked for is worth more than a nudge: the first
-            # concrete step, on the hand they start from.
-            return self._render("hesitation_2", a=self._a)
-        if level >= 3:
-            # Without a hint there is no fingertip to point at, so showing is
-            # meaningless and the nudge is all that is left.
-            if (self._hint or {}).get("hand"):
-                return self._render("show")
-            return self._render("hesitation_1")
-        if level == 2:
-            return self._correction_line()
-        return self._render("hesitation_1")
+        return self._correction_line()
 
     def _correction_line(self) -> str | None:
         """Name the hand, or the two hands, holding a finger nobody asked for."""
@@ -1240,18 +1266,17 @@ class Tutor:
             # No orange, no ghost, no pointed finger while the grace runs: the
             # child gets their bearings back before anything is corrected.
             return {"kind": "finger_numbers"} if self._level >= 1 else None
-        if situation == SIT_WRONG and self._level >= 1 and hint.get("hand"):
+        if situation == SIT_WRONG and self._level >= 2 and hint.get("hand"):
             if self._level >= 3:
+                # L3: the ghost finger moves from the wrong finger to the right
+                # one, and this is the level where Tally speaks as well.
                 return {"kind": "ghost", "hand": hint["hand"],
                         "from": hint.get("move_from"), "to": hint.get("move_to")}
-            if self._level == 2:
-                return {"kind": "correction", "wrong_hand": hint["hand"],
-                        "expected_finger": hint.get("move_to")}
-            return {"kind": "pulse_finger", "hand": hint["hand"],
-                    "finger": hint.get("move_to")}
+            # L2: colour on the two fingers that matter, and still no voice.
+            return {"kind": "correction", "wrong_hand": hint["hand"],
+                    "expected_finger": hint.get("move_to")}
         if situation != SIT_CORRECT and self._level >= 1:
-            # Numbers, no judgement: the L1 alternative of contract section 4.2,
-            # and all an unreadable or untouching pose can be told.
+            # L1: the numbers on every fingertip, no judgement and no word.
             return {"kind": "finger_numbers"}
         if (self._mode == SUPPORTIVE and self._now is not None
                 and self._now - self._ex_start < SUPPORTIVE_VISUAL_S):
@@ -1601,6 +1626,77 @@ class Tutor:
             self._hands_misses = 0
             self._hands_since = moment
 
+    def _update_contact(self, obs: Observation) -> None:
+        """Is what the classifier calls a touch really a touch.
+
+        classifier/rules.py owns the contact flag and nobody here may edit it,
+        so this is a second opinion taken from the fingertips themselves: the
+        two tips the classifier named have to be within contact_ratio of a palm
+        of each other, and to stay there for pose_confirm_frames frames, before
+        the pose counts as made. Anything wider is NO_CONTACT, whatever the
+        flag says, because a pose held ten centimetres apart teaches nothing.
+
+        When the fingertips are not in the observation there is nothing to
+        measure and the flag is taken as it comes: this refuses a bad touch, it
+        never invents one.
+        """
+        measured = self._tip_distance(obs)
+        if measured is None:
+            self._contact_ok = True
+            self._contact_frames = 0
+            return
+        distance, palm = measured
+        if distance <= self.effective("contact_ratio") * palm:
+            self._contact_frames += 1
+        else:
+            self._contact_frames = 0
+        self._contact_ok = self._contact_frames >= int(self.effective("pose_confirm_frames"))
+
+    def _tip_distance(self, obs: Observation) -> tuple[float, float] | None:
+        """The gap between the two named fingertips, and the palm it is read in."""
+        gesture = obs.gesture
+        if gesture is None or gesture.left is None or gesture.right is None:
+            return None
+        tips = {(str(f.get("hand")), f.get("number")): (f.get("x"), f.get("y"))
+                for f in obs.fingers}
+        here = tips.get(("left", int(gesture.left)))
+        there = tips.get(("right", int(gesture.right)))
+        if here is None or there is None:
+            return None
+        try:
+            distance = math.hypot(float(here[0]) - float(there[0]),
+                                  float(here[1]) - float(there[1]))
+        except (TypeError, ValueError):
+            return None
+        palm = self._palm(obs)
+        if not math.isfinite(distance) or palm <= 0:
+            return None
+        return distance, palm
+
+    def _palm(self, obs: Observation) -> float:
+        """The palm width the server sent, or the best estimate of it."""
+        if isinstance(obs.palm, (int, float)) and not isinstance(obs.palm, bool):
+            palm = float(obs.palm)
+            if math.isfinite(palm) and palm > 0:
+                return palm
+        spreads: list[float] = []
+        for hand in ("left", "right"):
+            points = [(f.get("x"), f.get("y")) for f in obs.fingers
+                      if str(f.get("hand")) == hand]
+            if len(points) < 2:
+                continue
+            try:
+                widest = max(math.hypot(float(a[0]) - float(b[0]),
+                                        float(a[1]) - float(b[1]))
+                             for a in points for b in points)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(widest) and widest > 0:
+                spreads.append(widest)
+        if not spreads:
+            return NOMINAL_PALM
+        return (sum(spreads) / len(spreads)) / TIP_SPREAD_PALMS
+
     def _update_pose(self, obs: Observation, moment: float) -> None:
         key = self._key_of(obs.gesture)
         if key is None:
@@ -1651,7 +1747,7 @@ class Tutor:
         left, right, contact = key
         if frozenset((left, right)) != frozenset((self._a, self._b)):
             return SIT_WRONG
-        if contact:
+        if contact and self._contact_ok:
             return SIT_CORRECT
         if self._a != self._b and (left, right) == (self._b, self._a):
             return SIT_SWAPPED

@@ -48,14 +48,21 @@ def pose(left: int, right: int, contact: bool = True) -> GestureState:
                         confidence=0.9)
 
 
-def fingers(hands: int = 2) -> list[dict[str, object]]:
+def fingers(hands: int = 2,
+            gesture: GestureState | None = None) -> list[dict[str, object]]:
+    """Fingertips as app/server.py sends them, a real touch when one is claimed."""
     names = {0: (), 1: ("left",), 2: ("left", "right")}[hands]
     out: list[dict[str, object]] = []
     for hand in names:
-        base = 0.3 if hand == "left" else 0.7
+        base = 0.45 if hand == "left" else 0.55
         for number in range(6, 11):
             out.append({"hand": hand, "number": number, "x": base,
                         "y": 0.5 + 0.02 * (number - 6)})
+    if gesture is not None and gesture.contact and hands == 2:
+        touching = {("left", gesture.left), ("right", gesture.right)}
+        for tip in out:
+            if (tip["hand"], tip["number"]) in touching:
+                tip["x"], tip["y"] = 0.5, 0.5
     return out
 
 
@@ -102,7 +109,7 @@ class Harness:
         for _ in range(int(round(seconds * FPS))):
             self.clock.t += STEP
             self.last = self.tutor.observe(
-                Observation(gesture=gesture, fingers=fingers(hands),
+                Observation(gesture=gesture, fingers=fingers(hands, gesture),
                             hands_seen=hands, hint=hint), self.clock.t)
             self.visuals.append(self.last.tutor_visual)
             if self.last.tutor_line:
@@ -181,13 +188,16 @@ def test_the_ladder_starts_again_at_zero_when_the_window_closes() -> None:
     assert said == [BACK, RELAUNCH]
     assert harness.tutor.in_recovery is False
     assert harness.last.intervention_level == 0
+    assert harness.last.tutor_visual is None
     # The clock of the wrong pose starts at the close of the window, so the
-    # first correction lands wrong_pose_prompt after it and not before.
-    early = harness.feed(WRONG_POSE_PROMPT - 0.4, gesture=pose(8, 9, False), hint=HINT)
-    assert early == []
+    # ladder takes its first step wrong_pose_prompt after it and not before.
+    harness.feed(WRONG_POSE_PROMPT - 0.4, gesture=pose(8, 9, False), hint=HINT)
+    assert harness.last.intervention_level == 0
     late = harness.feed(1.0, gesture=pose(8, 9, False), hint=HINT)
-    assert late, "the ladder has to climb again once the grace is over"
     assert harness.last.intervention_level == 1
+    # L1 shows and does not speak, so the step is a drawing and not a line.
+    assert late == []
+    assert harness.last.tutor_visual == {"kind": "finger_numbers"}
 
 
 def test_a_recovery_inside_the_opening_silence_opens_no_second_window() -> None:
@@ -198,7 +208,7 @@ def test_a_recovery_inside_the_opening_silence_opens_no_second_window() -> None:
     ordinary rules only, and lands well before the moment a stacked window
     would have allowed it, which is recovery plus grace plus wrong_pose_prompt.
     """
-    harness = Harness(params_with(min_verbal_gap=3.0))
+    harness = Harness()
     harness.feed(0.5)
     said = harness.feed(2.0, hands=0)
     assert harness.tutor.state_fields()["tutor_state"] == VISIBILITY_RECOVERY
@@ -207,16 +217,15 @@ def test_a_recovery_inside_the_opening_silence_opens_no_second_window() -> None:
     assert harness.tutor.in_recovery is False
     recovered_at = harness.clock.t
 
-    corrected_at: float | None = None
-    while corrected_at is None and harness.clock.t < 12.0:
-        lines = harness.feed(0.2, gesture=pose(8, 9, False), hint=HINT)
+    climbed_at: float | None = None
+    while climbed_at is None and harness.clock.t < 12.0:
+        harness.feed(0.2, gesture=pose(8, 9, False), hint=HINT)
         # Not once does a window open behind the opening silence.
         assert harness.tutor.in_recovery is False
-        if lines:
-            corrected_at = harness.clock.t
-    assert corrected_at is not None, "the ladder never climbed at all"
-    assert harness.last.intervention_level == 1
-    assert corrected_at < recovered_at + GRACE_S + WRONG_POSE_PROMPT
+        if harness.last.intervention_level >= 1:
+            climbed_at = harness.clock.t
+    assert climbed_at is not None, "the ladder never climbed at all"
+    assert climbed_at < recovered_at + GRACE_S + WRONG_POSE_PROMPT
 
 
 def test_the_window_is_the_parameter() -> None:
