@@ -136,6 +136,34 @@ that would teach it the most are exactly the ones it labelled wrong.
 
 So it is a separate arm: `split` is `live`, not `train`, and it is never merged into train without passing the
 held-out gate. The mixing rule, how much of it enters an evaluation and under what weight, is Ilan's to decide.
+Decided on 2026-09-13: it enters only as a hidden gate (below), never as training data.
+
+## Hidden gate
+
+Measured on 2026-09-13: v1, v2 and v3 each won on train (0.487, 0.497, 0.500), but on the retrospective validation
+holds v2 and v3 fell back below v1 (0.467, then 0.461 and 0.461). Each was a single constant nudged for a few train
+windows. The train gate alone accepts that, so a second stage now runs after it.
+
+```
+TENFOLD_VALIDATION_SAMPLES=../tenfold-validation/retro-seed42/validation.jsonl
+TENFOLD_LIVE_SAMPLES=data/live_samples.jsonl
+```
+
+- With either variable set, `loop/critic.py` scores the running version on that set at the start of a run (again
+  whenever the file changes), then every candidate that passed the train gate. `loop/gate.py check_hidden` refuses
+  a candidate whose exact_match falls on any hidden set, or that could not be scored there.
+- Hidden evaluations are local only (`run_eval.py --local`), written to `../tenfold-validation/loop-runs/`, outside
+  the repo and the critic worktree. Both variables are removed from the agents' environment, and the patch agent's
+  `train_eval.py` knows nothing of this stage.
+- A refusal is logged with its numbers in `loop/nightly.log`. `data/metrics.json` keeps the scores under `hidden`,
+  which `loop/snapshot.py` does not export, and the rejection reason and the Weave op carry only the set's name.
+- The live windows are weakly labelled (every version scored 1.000 on the first 154), so today they catch a patch
+  that breaks poses real children already got right, nothing more. The validation holds are now used to select, so
+  they are no longer an untouched measurement either: report them as a gate, never as held-out.
+- The train report also carries `failures_by_class` (failed windows and failed holds per class, a hold failing when
+  half or fewer of its windows match), and `worst_samples` takes failures from each failing class in turn, so the
+  diagnostic agent sees the negatives (`transition` was at 0.26 on train) instead of the first positives only.
+
 ## Validation rétrospective, participants non identifiés
 
 ```

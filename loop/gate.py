@@ -2,6 +2,9 @@
 patch agent can pick a change that passes before it edits. A candidate is accepted only if, on train, against the
 last accepted version: exact_match strictly improves, no class and no capture condition loses more than 5 points,
 and false_unknown_rate rises by at most 2 points.
+
+check_hidden is the second stage, run by loop/critic.py only after check passes: on each hidden set (the validation
+holds, the real-lesson windows), which the agents never see, exact_match may not fall at all.
 """
 from __future__ import annotations
 
@@ -38,3 +41,16 @@ def check(prev: dict | None, cand: dict) -> tuple[bool, str]:
     if fu is not None and pfu is not None and fu > pfu + FALSE_UNKNOWN_RISE + EPS:
         return False, f"false_unknown_rate rose {pfu:.3f} -> {fu:.3f} (limit +0.02)"
     return True, f"exact_match {pe:.3f} -> {ce:.3f}"
+
+
+def check_hidden(name: str, prev: dict | None, cand: dict | None) -> tuple[bool, str]:
+    """One hidden set: a candidate whose exact_match falls there is refused, and so is one that could not be scored.
+    A train gain that costs a hidden set is a fit to the train holds, not a better classifier."""
+    if cand is None or cand.get("exact_match") is None:
+        return False, f"{name} could not be measured"
+    if prev is None or prev.get("exact_match") is None:
+        return True, f"{name} {cand['exact_match']:.3f} (no earlier measurement)"
+    pe, ce = prev["exact_match"], cand["exact_match"]
+    if ce < pe - EPS:
+        return False, f"{name} exact_match fell {pe:.3f} -> {ce:.3f}"
+    return True, f"{name} {pe:.3f} -> {ce:.3f}"
