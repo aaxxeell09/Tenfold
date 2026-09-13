@@ -179,6 +179,9 @@ print("RESULT", change("agent words", "+def wrist_motion(window: Window) -> floa
 print("RESULT", effect("agent words", "+AMBIGUITY_MARGIN = 0.025  # gap"))
 print("RESULT", effect("Raised `UNKNOWN_THRESHOLD` from 0.5 to 0.525", ""))
 print("RESULT", change("a patch nobody recognises", "+x = 1"))
+print("RESULT", effect("agent words", "+def pair_separation_trend(window: Window) -> float:"))
+print("RESULT", effect("Lowered PAIR_DRIFT_THRESHOLD from 0.05 to 0.0475, the only change", ""))
+print("RESULT", effect("Lowered SOME_NEW_LIMIT from 0.3 to 0.2", "") + " | " + defs["technical"]("Lowered SOME_NEW_LIMIT from 0.3 to 0.2", ""))
 """
     env = {**os.environ, "MPLBACKEND": "Agg", "PYTHONPATH": str(REPO)}
     env.pop("WANDB_API_KEY", None)
@@ -191,6 +194,9 @@ print("RESULT", change("a patch nobody recognises", "+x = 1"))
     assert "whole short clip" in results[2]
     assert results[3] == "The app answers only when it sees both hands clearly"
     assert results[4] == "a patch nobody recognises"  # unknown changes fall back to the agent's own words
+    assert "keep moving apart" in results[5]
+    assert results[6] == "Fingertips moving apart a little more slowly now also count as leaving a gesture"
+    assert results[7] == "A setting of the rule was fine-tuned | some_new_limit 0.3 → 0.2"  # values once, not twice
 
 
 def test_dashboard_page_text_is_english():
