@@ -42,7 +42,48 @@ def full_snapshot() -> dict:
         "a": {"commit": "a" * 40, "rules_sha256": "0" * 64, "exact_match": 0.436, "ci95": [0.31, 0.55]},
         "b": {"commit": v1.get("sha") or "b" * 40, "rules_sha256": "1" * 64, "exact_match": 0.467, "ci95": [0.34, 0.58]},
         "paired": {"holds": 55, "mean_difference": 0.03, "ci95": [0.0, 0.08], "better": 2, "worse": 0, "unchanged": 53}}
+    left = [[0.30 + 0.01 * i, 0.50 + 0.005 * i] for i in range(21)]
+    right = [[0.55 + 0.01 * i, 0.50 + 0.005 * i] for i in range(21)]
+    answers = [{"threshold": round(0.1 + 0.0125 * i, 4), "method": "6-10", "left": 6, "right": 10,
+                "contact": 0.1 + 0.0125 * i > 0.317} for i in range(33)]
+    rows = [{"value": value, "exact_match": 0.492 + d, "exact_match_unordered": 0.492 + d, "contact_accuracy": 0.86,
+             "false_unknown_rate": 0.047, "negative_rejection_accuracy": 0.36, "near_contact_accuracy": 0.73 + d,
+             "per_class": {"near:6x10": 0.7 + d, "6x6": 0.67}, "gate": "PASS" if d > 0 else "FAIL",
+             "why": "exact_match 0.492 -> 0.497" if d > 0 else "no improvement"}
+            for value, d in ((0.25, -0.01), (0.2826, 0.005), (0.2975, 0.0))]
+    snap["explorer"] = {
+        "data": "train side only", "data_sha": "448d3292a217", "windows": 483, "rules_sha256": "2" * 64,
+        "constants": {"CONTACT_THRESHOLD": 0.2975, "UNKNOWN_THRESHOLD": 0.525},
+        "gate_base": {"tag": "v2", "exact_match": 0.492, "near_contact_accuracy": 0.73, "false_unknown_rate": 0.047,
+                      "per_class": {"near:6x10": 0.7, "6x6": 0.67}},
+        "sweep": {"CONTACT_THRESHOLD": {"current": 0.2975, "rows": rows}},
+        "examples": [{"class": "near:6x10", "id": "s1", "hold_id": "h1", "angle": "front", "distance": "far",
+                      "label": {"method": "6-10", "left": 6, "right": 10, "contact": False}, "left": left, "right": right,
+                      "fingers": [6, 7, 8, 9, 10], "tip_index": [4, 8, 12, 16, 20],
+                      "tip_distances": [[0.317 + 0.1 * (i + j) for j in range(5)] for i in range(5)], "mean_scale": 0.25,
+                      "confidence": 0.99, "running": {"method": "6-10", "left": 6, "right": 10, "contact": False},
+                      "answers_by_contact_threshold": answers}]}
     return snap
+
+
+def test_snapshot_explorer_is_computed_from_the_train_file_with_the_real_rules(tmp_path):
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_guard_and_loop import make_repo
+    repo = make_repo(tmp_path)
+    env = {**os.environ, "PYTHONPATH": str(repo)}
+    env.pop("TENFOLD_TRAIN_SAMPLES", None)
+    p = subprocess.run([sys.executable, "loop/snapshot.py", "--repo", str(repo)], cwd=repo, capture_output=True, text=True, env=env)
+    assert p.returncode == 0, p.stderr
+    explorer = json.loads((repo / "data" / "snapshot.json").read_text())["explorer"]
+    windows = sum(1 for line in (repo / "data" / "samples.jsonl").read_text().splitlines() if line.strip())
+    assert explorer and "error" not in explorer and explorer["windows"] == windows
+    assert explorer["data"].startswith("whole dataset")  # no split active in this repo, and the page says so
+    rows = explorer["sweep"]["CONTACT_THRESHOLD"]["rows"]
+    assert len(rows) >= 10 and {r["gate"] for r in rows} <= {"PASS", "FAIL"}
+    assert any(abs(r["value"] - explorer["constants"]["CONTACT_THRESHOLD"]) < 1e-9 and r["gate"] == "FAIL" for r in rows)
+    for example in explorer["examples"]:
+        assert len(example["left"]) == len(example["right"]) == 21 and len(example["tip_distances"]) == 5
+        assert len(example["answers_by_contact_threshold"]) == 33
 
 
 def test_snapshot_carries_the_retrospective_validation_under_its_own_name(tmp_path):
