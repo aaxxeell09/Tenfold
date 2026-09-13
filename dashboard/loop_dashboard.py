@@ -376,7 +376,7 @@ def _(best_version, checks, comparable, compare, em, icon, informed, missing, mo
 
 
 @app.cell
-def _(checks, explorer, limits, mo, plain_class, section):
+def _(checks, compare, explorer, limits, mo, plain_class, section, steps):
     example_options = {plain_class(_x["class"]).capitalize(): _i for _i, _x in enumerate((explorer or {}).get("examples", []))}
     example_pick = mo.ui.radio(options=example_options, value=next(iter(example_options), None), inline=True) if example_options else None
     mo.vstack([
@@ -385,6 +385,9 @@ def _(checks, explorer, limits, mo, plain_class, section):
                 "fingers 2 cm apart look almost like fingers that touch. If the app gets that wrong, it corrects a child "
                 "who did nothing wrong, or checks an answer the child has not given yet."),
         limits(["not verified: this hand data does not match the rule in use"] if explorer and not checks["hands"] else []),
+        # the steps come before the gesture picker, which is step 1
+        (steps("Pick a gesture", "Switch between the old setting and the AI's setting", "See whether the app reads the hands right")
+         if compare else steps("Pick a gesture", "Move the touch limit")) if example_pick is not None else mo.md(""),
         example_pick if example_pick is not None else mo.callout(mo.md("**No hand data in this snapshot.** This section needs a snapshot built on the practice split."), kind="warn"),
     ], gap=1)
     return (example_pick,)
@@ -495,8 +498,6 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
             f'<span class="tf-key"><i class="tf-swatch" style="background:{RIGHT_HAND}"></i>right hand</span>'
             '<span class="tf-key"><i class="tf-dash"></i>gap between the two closest fingertips</span></div>')
         _view = mo.vstack([
-            steps("Pick a gesture above", "Switch between the old setting and the AI's setting",
-                  "See whether the app reads the hands right") if compare else steps("Pick a gesture above", "Move the touch limit"),
             mo.hstack([
                 mo.vstack([mo.ui.altair_chart(style(_hands), chart_selection=False, legend_selection=False), _keys], gap=0.5),
                 mo.vstack([_verdict,
