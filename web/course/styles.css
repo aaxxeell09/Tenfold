@@ -1081,7 +1081,7 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 }
 #check .stage .practice-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .85; }
 #check .practice-overlay { position: absolute; pointer-events: none; }
-#check .practice-overlay text { font-size: 0.05px; font-weight: 900; text-anchor: middle; font-family: var(--font); }
+#check .practice-overlay text { font-size: 23px; font-weight: 800; text-anchor: middle; font-family: var(--font); }
 #check .frame[data-step="1"] .practice-overlay circle,
 #check .frame[data-step="1"] .practice-overlay text { opacity: 0; transition: opacity .25s ease; }
 #check .frame[data-step="1"] .practice-overlay .lit { opacity: 1; }
@@ -1129,6 +1129,20 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 #lesson .gh .zone-box { fill: rgba(255, 255, 255, 0.04); stroke: rgba(255, 255, 255, 0.5); stroke-width: 6; stroke-dasharray: 22 18; }
 #lesson .gh .hand-box { fill: rgba(247, 148, 51, 0.12); stroke: var(--orange); stroke-width: 9; }
 #lesson .gh text.num.lit { fill: #fff; }
+/* A marker on a fingertip is earned, never given away. Normal mode draws one only
+   where the tutor is pointing, through tutor_visual, and on the two target tips once
+   the answer is in; supportive mode draws them all and shows the numbers 6 to 10 for
+   the first three seconds of an exercise, then fades them. drawFingers puts "on" on
+   the groups that have earned a marker and app.js puts "shows-numbers" on the screen
+   for that window, so nothing else is ever painted over the child's hands. */
+#lesson .gh .fin .halo, #lesson .gh .fin .tip, #lesson .gh text.num { opacity: 0; transition: opacity .35s ease; }
+#lesson .gh .fin.on .halo, #lesson .gh .fin.on .tip { opacity: 1; }
+#lesson.shows-numbers .gh .fin .halo, #lesson.shows-numbers .gh .fin .tip,
+#lesson.shows-numbers .gh text.num { opacity: 1; }
+#lesson .gh text.num.lit { opacity: 1; }
+/* the reasoning band is a recap or a rescue card and nothing else: when app.js has
+   emptied it, it is not a band at all */
+#lesson .why:empty { display: none; }
 /* ---------- learn, which has no export page: the practice rules, for its markup ---------- */
   #learn body.tablet{height:100vh;overflow:hidden;background:var(--polar);display:flex;align-items:center;justify-content:center}
   #learn .frame{
@@ -1247,3 +1261,35 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 .mute .off, .mute.is-muted .on { display: none; }
 .mute.is-muted .off { display: block; }
 .mute.is-muted { color: var(--hare); border-style: dashed; }
+
+/* ---------- check screen addition: the markers on the hands ---------- */
+/* drawFingers is shared with the lesson: it draws the export's g.fin, a halo, a tip
+   and a text.num, in the picture's own pixels, 1194 across and as tall as the camera
+   ratio makes it. check.html styled those groups on its own traced hands; the live
+   check had no rule for them at all, so every fingertip came out as the browser's
+   default, an opaque black disc the width of the export's radius. These are
+   check.html's own values, on the overlay the live check draws into: small, semi
+   transparent, coloured by state, and never opaque over the child's hands. */
+#check .practice-overlay .fin { transition: transform .5s cubic-bezier(.3, .7, .3, 1); }
+#check .practice-overlay .halo { r: 34px; fill: none; }
+#check .practice-overlay .tip {
+  r: 28px; fill: rgba(244, 246, 253, .12); stroke: rgba(244, 246, 253, .3); stroke-width: 3;
+  transition: fill .3s ease, stroke .3s ease;
+}
+#check .practice-overlay text.num {
+  fill: rgba(244, 246, 253, .5); font-family: var(--font); font-size: 23px; font-weight: 800;
+  text-anchor: middle; transition: fill .3s ease;
+}
+/* step one lights the fingertips ten down to six: the export's lit tip */
+#check .practice-overlay .fin.lit .tip { fill: #f4f6fd; stroke: #ffffff; }
+#check .practice-overlay .fin.lit .num, #check .practice-overlay text.num.lit { fill: #35406b; }
+/* the two fingers the exercise asks for, and the one that is wrong */
+#check .practice-overlay .fin.want .tip { fill: #d9f4e9; stroke: #8ed9bd; }
+#check .practice-overlay .fin.want .num { fill: #1f7a58; }
+#check .practice-overlay .fin.want .halo { fill: rgba(47, 174, 130, .26); animation: halo 1.2s ease-in-out infinite; }
+#check .frame.touching .practice-overlay .fin.want .halo { animation: none; r: 42px; }
+#check .frame.matched .practice-overlay .fin.want .tip { fill: #2fae82; stroke: #229068; }
+#check .frame.matched .practice-overlay .fin.want .num { fill: #ffffff; }
+#check .frame.matched .practice-overlay .fin.want .halo { fill: rgba(47, 174, 130, .4); }
+#check .practice-overlay .fin.bad .tip { fill: rgba(247, 148, 51, .5); stroke: var(--orange); }
+#check .practice-overlay .fin.bad .num { fill: #ffffff; }

@@ -370,6 +370,8 @@
     frame.className = "frame";
     frame.dataset.step = "1";
     checkSay("Show me both hands.");
+    // the check ends on a spoken answer too: its own pill, armed the same way
+    armVoice();
     setTally($("#check-tally"), "ready");
     setStepDots(1);
     videoOn($("#check-cam .practice-video"));
@@ -934,7 +936,10 @@
     $("#finish").hidden = true;
     $("#lesson").hidden = false;
     document.body.dataset.view = "lesson";
-    setupVoice();
+    // the lesson is the screen that asks for a spoken answer, so opening one arms the
+    // microphone: the tap that opened it is the gesture Chrome wants, and a lesson
+    // opened by name (a test, a hash) still comes up with voice ready
+    armVoice();
     shellPractice();
     connect(() => {
       // replayed after a dropped socket: the server starts the node again, so the
@@ -985,6 +990,10 @@
     $(".gh", root).replaceChildren();
     const band = $(".why", root);
     band.replaceChildren(); band.classList.remove("is-on"); band.dataset.band = "";
+    clearBand();
+    numbersKey = null;
+    clearTimeout(numbersTimer); numbersTimer = null;
+    root.classList.remove("shows-numbers");
     const tally = $(".foot > .tally-art", root);
     if (tally) tally.setAttribute("data-tally", "ready");
     decorate(root);
@@ -1048,9 +1057,11 @@
     if (lesson && !$("#lesson").hidden) videoOn($(".practice-video", $("#lesson")));
   }
   // the overlay covers exactly the rendered video box: the img's own box, corrected for what
-  // object-fit did with it (contain letterboxes, cover crops). Landmarks are frame fractions,
-  // so a viewBox of ratio x 1 maps them straight through. The lesson box also takes the
-  // camera's ratio so there is no letterbox to begin with.
+  // object-fit did with it (contain letterboxes, cover crops). One convention for both
+  // screens: the overlay draws in the picture's own pixels, 1194 across and as tall as the
+  // camera ratio makes it, which is the export's own box, so a marker radius means the same
+  // size wherever it is drawn. A landmark is a frame fraction and is multiplied through.
+  // The lesson box also takes the camera's ratio so there is no letterbox to begin with.
   function videoRatio(video) {
     return (video && video.naturalWidth && video.naturalHeight) ? video.naturalWidth / video.naturalHeight : 4 / 3;
   }
@@ -1063,7 +1074,7 @@
     const W = video.clientWidth, H = video.clientHeight;
     const cover = getComputedStyle(video).objectFit === "cover";
     const w = cover ? Math.max(W, H * ratio) : Math.min(W, H * ratio), h = w / ratio;
-    overlay.setAttribute("viewBox", `0 0 ${ratio} 1`);
+    overlay.setAttribute("viewBox", `0 0 ${VIEW_W} ${Math.round(VIEW_W / ratio)}`);
     overlay.style.cssText = `left:${video.offsetLeft + (W - w) / 2}px;top:${video.offsetTop + (H - h) / 2}px;width:${w}px;height:${h}px`;
     return ratio;
   }
@@ -1115,8 +1126,24 @@
     root.dataset.level = String(m.intervention_level || 0);
     root.dataset.mode = m.mode || "normal";
     cam.dataset.state = m.state;
+    numbersWindow(root, m);
     renderBand(m, root);
     drawFingers(m, cam);
+  }
+  // supportive mode opens an exercise with the numbers 6 to 10 on the fingertips and
+  // fades them after three seconds. Normal mode never shows them: there, a number on
+  // a fingertip is the tutor's own aid, asked for through tutor_visual.
+  const NUMBERS_MS = 3000;
+  let numbersTimer = null, numbersKey = null;
+  function numbersWindow(root, m) {
+    const supportive = (m.mode || "normal") === "supportive";
+    const key = `${supportive ? "s" : "n"}|${m.exercise || ""}`;
+    if (key === numbersKey) return;
+    numbersKey = key;
+    clearTimeout(numbersTimer);
+    numbersTimer = null;
+    root.classList.toggle("shows-numbers", supportive);
+    if (supportive) numbersTimer = setTimeout(() => root.classList.remove("shows-numbers"), NUMBERS_MS);
   }
   // ---------- what the tutor draws ----------
   // tutor_visual is null or one of six kinds. Every one of them is drawn inside the
@@ -1135,18 +1162,31 @@
     lines.push(`${tens * 10} + ${units} = ${Number(card.total) || tens * 10 + units}`);
     return lines;
   }
-  // one band over the bottom of the picture, the export's .why: the rescue card
-  // when the tutor sends one, the engine's reasoning lines otherwise
+  // one band over the bottom of the picture, the export's .why.
+  // Nothing on this screen shows the tens, the units or the result before the child
+  // has answered: the whole point of the lesson is that they work it out. The band is
+  // the rescue card, which is the one moment walking the method through is the point,
+  // or a short recap once the answer is in, and it goes away again. Every other line
+  // Tally has goes in his bubble and nowhere else. The server sends its reasoning with
+  // every state message; the page is where it is held back.
+  const RECAP_MS = 3000;
+  let bandTimer = null;
+  function clearBand() {
+    clearTimeout(bandTimer);
+    bandTimer = null;
+  }
   function renderBand(m, root) {
     const box = $(".why", root);
     if (!box) return;
     const visual = m.tutor_visual || null;
     const card = visual && visual.kind === "rescue_card" ? visual : null;
-    const lines = card ? rescueLines(card, m.exercise) : (m.reasoning || []);
-    box.classList.toggle("is-on", lines.length > 0);
-    const key = (card ? "card|" : "why|") + lines.join("|");
+    const recap = !card && m.state === "answer_correct";
+    const lines = card ? rescueLines(card, m.exercise) : (recap ? (m.reasoning || []) : []);
+    const key = (card ? "card|" : recap ? "recap|" : "off|") + (m.exercise || "") + "|" + lines.join("|");
     if (box.dataset.band === key) return;
     box.dataset.band = key;
+    clearBand();
+    box.classList.toggle("is-on", lines.length > 0);
     box.replaceChildren();
     lines.forEach((line) => {
       const el = document.createElement("span");
@@ -1155,6 +1195,13 @@
       if (card) el.textContent = line; else el.innerHTML = line;
       box.appendChild(el);
     });
+    // a recap is read once and then gone, so the next question starts clean
+    if (recap && lines.length) {
+      bandTimer = setTimeout(() => {
+        box.classList.remove("is-on");
+        box.replaceChildren();
+      }, RECAP_MS);
+    }
   }
   function svgEl(tag, cls) {
     const el = document.createElementNS(NS, tag);
@@ -1257,11 +1304,21 @@
     const expect = kind === "correction" ? `${visual.wrong_hand}:${visual.expected_finger}` : null;
     const ghostTo = kind === "ghost" ? `${visual.hand}:${visual.to}` : null;
     const ghostFrom = kind === "ghost" ? `${visual.hand}:${visual.from}` : null;
+    // A marker is earned, never given away. Supportive mode marks every fingertip;
+    // normal mode marks only what the tutor is pointing at, and the two target tips
+    // once the answer is in. The numbers 6 to 10 are supportive mode's own, plus the
+    // one visual that asks for them by name.
+    const supportive = (m.mode || "normal") === "supportive";
+    const answered = m.state === "answer_correct";
+    const aid = new Set([pulse, expect, ghostTo, ghostFrom].filter(Boolean));
+    const marked = (tag) => supportive || (answered && match.has(tag))
+      || (visual !== null && (aid.has(tag) || match.has(tag) || wrong.has(tag)));
     if (kind === "placement_zones") placementZones(overlay, W, H);
     if (kind === "correction") handOutline(overlay, fingers.filter((f) => f.hand === visual.wrong_hand).map((f) => at[id(f)]), W);
     for (const finger of fingers) {
       const tag = id(finger), p = at[tag];
-      const g = svgEl("g", "fin" + (match.has(tag) ? " want" : "") + (wrong.has(tag) ? " bad" : ""));
+      const g = svgEl("g", "fin" + (marked(tag) ? " on" : "")
+        + (match.has(tag) ? " want" : "") + (wrong.has(tag) ? " bad" : ""));
       g.setAttribute("transform", `translate(${p.x},${p.y})`);
       g.dataset.hand = finger.hand;
       g.dataset.number = finger.number;
