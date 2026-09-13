@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-13T18:09:48+00:00",
-  "best_version": "3a14d8449f4dd028a84302d307195e29eb83b121",
+  "generated_at": "2026-09-13T18:21:48+00:00",
+  "best_version": "ba7f9467f3dc427c544e8a4675ddc5fe51e0c71c",
   "informed": [
     {
       "tag": "v0",
@@ -904,7 +904,7 @@
     {
       "tag": "v7",
       "version": 7,
-      "sha": "3a14d8449f4dd028a84302d307195e29eb83b121",
+      "sha": "5e7bb99406ceb09e9ee0714a039ca583f1443fdf",
       "ts": "2026-09-13T18:09:47+00:00",
       "kind": "patch",
       "data": {
@@ -1018,6 +1018,124 @@
         "source": "recorded with the metrics"
       },
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex daf54b0..cf1d298 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -37,6 +37,16 @@ Hypothesis log (one line per accepted patch, newest last):\n   only above TIP_MOTION_CONF_GATE=0.75, since low-confidence tracking jitter (e.g. class 8x9, conf ~0.56-0.74)\n   looks like motion but is noise, not travel. TIP_MOTION_THRESHOLD=0.2 (best passing value from --sweep):\n   exact_match 0.510 -> 0.516, false_unknown_rate unchanged at 0.047, no class regressed.\n+- v6: measured (--class transition) that most reachable transition failures (e.g. s000004, s000018,\n+  s000026, s000067) keep the same or a drifting closest fingertip pair steadily separating across the\n+  window even though whole-hand tip_motion stays under threshold, since only two fingers move while the\n+  rest of both hands hold still. An unsigned drift (max-min) gate caught these but also flagged real\n+  holds captured mid-approach (s000007, s000008 converge into contact within the window) and blew up\n+  false_unknown_rate to 0.193 with 10 classes regressed, so it was replaced with a signed mean per-step\n+  trend that only fires when the pair is separating, not converging. Added pair_separation_trend, gated\n+  above TIP_MOTION_CONF_GATE like tip_motion, PAIR_DRIFT_THRESHOLD=0.05 (best passing value from --sweep):\n+  exact_match 0.516 -> 0.534, transition 0.27 -> 0.31, false_unknown_rate 0.047 -> 0.064, no class\n+  regressed beyond the gate's limit.\n \"\"\"\n from __future__ import annotations\n \n@@ -51,6 +61,7 @@ AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the l\n MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units, above which hands are still moving\n TIP_MOTION_THRESHOLD = 0.2  # mean per-frame fingertip displacement, in mean-scale units, above which fingers are still moving into shape\n TIP_MOTION_CONF_GATE = 0.75  # only trust tip_motion above this confidence: low-confidence tracking jitter looks like motion but isn't\n+PAIR_DRIFT_THRESHOLD = 0.05  # mean per-step increase of the closest-pair distance, in mean-scale units, above which the hands are still separating\n \n \n def wrist_motion(window: Window) -> float:\n@@ -109,6 +120,31 @@ def tip_motion(window: Window) -> float:\n     return total / steps if steps else 0.0\n \n \n+def pair_separation_trend(window: Window) -> float:\n+    \"\"\"Mean signed per-step change of each frame's own closest fingertip-pair distance, in mean-scale\n+    units; positive means the hands are steadily moving apart.\n+\n+    A held gesture is either steady or still closing into contact (converging, negative trend), even\n+    when it is captured mid-approach: whole-hand wrist_motion and tip_motion cannot see this because\n+    only two fingers travel while the rest of both hands stay put. A transition that never reaches a\n+    hold instead keeps separating: signed averaging (not the unsigned range tried and rejected, which\n+    also flagged converging holds like s000007/s000008 and blew up false_unknown_rate) catches only the\n+    diverging case.\n+    \"\"\"\n+    dists = []\n+    for l, r in features.both_present_frames(window):\n+        try:\n+            d = features.tip_distance_matrix(l, r)\n+        except (ValueError, TypeError):\n+            continue\n+        if np.isfinite(d).all():\n+            dists.append(float(np.min(d)))\n+    if len(dists) < 2:\n+        return 0.0\n+    diffs = [b - a for a, b in zip(dists, dists[1:])]\n+    return sum(diffs) / len(diffs)\n+\n+\n def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:\n     \"\"\"Nearest pair, falling back to the window average only when the last frame's own choice is ambiguous.\n \n@@ -144,6 +180,8 @@ def classify(window: Window) -> GestureState:\n         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n     if confidence > TIP_MOTION_CONF_GATE and tip_motion(window) > TIP_MOTION_THRESHOLD:\n         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n+    if confidence > TIP_MOTION_CONF_GATE and pair_separation_trend(window) > PAIR_DRIFT_THRESHOLD:\n+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))\n     lf, rf, dist = averaged_pair(window, frame)\n     return GestureState(\n         method=\"6-10\",\n"
+    },
+    {
+      "tag": "v8",
+      "version": 8,
+      "sha": "ba7f9467f3dc427c544e8a4675ddc5fe51e0c71c",
+      "ts": "2026-09-13T18:21:46+00:00",
+      "kind": "patch",
+      "data": {
+        "sha": "448d3292a217",
+        "n_samples": 483
+      },
+      "diagnosis": "DIAGNOSIS: The transition failure family costs the most failed holds (82 out of 111), followed by out_of_frame and near-contact classes like near:10x10 and near:9x10.  \nHYPOTHESIS: The pair_separation_trend mechanism, while designed to detect transitions, is too lenient and allows drifting non-holds",
+      "patch_hypothesis": "Re-measured (not just assumed) that the diagnosis's pair_separation_trend leniency is real: --sweep-all shows the mechanism's threshold sits one notch too high, letting a drifting non-hold like s000004 (trend just under 0.05) pass as a false contact.",
+      "patch": "Lowered PAIR_DRIFT_THRESHOLD from 0.05 to 0.0475, the only constant change in this round's sweep that passes the metric gate.",
+      "expected": "Transition samples improve most (0.31 -> 0.32) since more borderline-drifting non-holds are now flagged unknown, with exact_match rising 0.534 -> 0.541 and no class or condition regressing beyond the gate's limit.",
+      "gate": "exact_match 0.534 -> 0.541",
+      "spent_usd": 0.421,
+      "train": {
+        "exact_match": 0.5409090909090908,
+        "exact_match_ci95": [
+          0.47575757575757577,
+          0.6030303030303031
+        ],
+        "exact_match_unordered": 0.5409090909090908,
+        "contact_accuracy": 0.8765432098765432,
+        "false_unknown_rate": 0.06432748538011697,
+        "negative_rejection_accuracy": 0.4244604316546763,
+        "near_contact_accuracy": 0.7777777777777777,
+        "n_samples": 483,
+        "n_holds": 220,
+        "per_class": {
+          "10x10": 0.3333333333333333,
+          "10x6": 1.0,
+          "10x7": 1.0,
+          "10x8": 1.0,
+          "10x9": 0.8888888888888888,
+          "6x10": 0.5,
+          "6x6": 0.6666666666666666,
+          "6x7": 0.3333333333333333,
+          "6x8": 0.5555555555555556,
+          "6x9": 0.25,
+          "7x10": 1.0,
+          "7x6": 0.5,
+          "7x7": 0.625,
+          "7x8": 0.6666666666666666,
+          "7x9": 1.0,
+          "8x10": 1.0,
+          "8x6": 1.0,
+          "8x7": 1.0,
+          "8x8": 1.0,
+          "8x9": 0.6666666666666666,
+          "9x10": 0.8888888888888888,
+          "9x6": 1.0,
+          "9x7": 1.0,
+          "9x8": 1.0,
+          "9x9": 1.0,
+          "near:10x10": 0.0,
+          "near:10x8": 0.5,
+          "near:6x10": 0.6666666666666666,
+          "near:6x6": 0.6666666666666666,
+          "near:7x7": 1.0,
+          "near:7x9": 1.0,
+          "near:8x7": 0.6666666666666666,
+          "near:8x8": 1.0,
+          "near:9x10": 0.3333333333333333,
+          "near:9x6": 0.3333333333333333,
+          "out_of_frame": 0.7567567567567568,
+          "partial_hand": 1.0,
+          "rest": 1.0,
+          "transition": 0.3192771084337349
+        },
+        "per_slice": {
+          "angle=front": {
+            "exact_match": 0.5132450331125827,
+            "false_unknown_rate": 0.0925925925925926,
+            "n_samples": 329,
+            "n_holds": 151
+          },
+          "angle=side": {
+            "exact_match": 0.5955882352941176,
+            "false_unknown_rate": 0.015873015873015872,
+            "n_samples": 153,
+            "n_holds": 68
+          },
+          "distance=far": {
+            "exact_match": 0.4791666666666667,
+            "false_unknown_rate": 0.0,
+            "n_samples": 154,
+            "n_holds": 72
+          },
+          "distance=near": {
+            "exact_match": 0.5709459459459457,
+            "false_unknown_rate": 0.08730158730158731,
+            "n_samples": 329,
+            "n_holds": 148
+          }
+        },
+        "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
+      },
+      "heldout": null,
+      "hidden_gate": {
+        "validation": {
+          "exact_match": 0.4787878787878788,
+          "n_holds": 55,
+          "n_samples": 125
+        },
+        "live": {
+          "exact_match": 1.0,
+          "n_holds": 20,
+          "n_samples": 154
+        }
+      },
+      "rules_sha256": "d17d1b875a6c251ef8539e518eb3d0936291b0ecf157e965c9723bbc87bdad83",
+      "scorers": {
+        "sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa",
+        "source": "recorded with the metrics"
+      },
+      "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex cf1d298..0b27ab2 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -47,6 +47,11 @@ Hypothesis log (one line per accepted patch, newest last):\n   above TIP_MOTION_CONF_GATE like tip_motion, PAIR_DRIFT_THRESHOLD=0.05 (best passing value from --sweep):\n   exact_match 0.516 -> 0.534, transition 0.27 -> 0.31, false_unknown_rate 0.047 -> 0.064, no class\n   regressed beyond the gate's limit.\n+- v7: re-measured the diagnosis's pair_separation_trend leniency claim directly (--sweep-all): the\n+  mechanism is right but the threshold sits one notch too high, letting samples like s000004 (trend\n+  just under 0.05) through as false holds. Lowered PAIR_DRIFT_THRESHOLD 0.05 -> 0.0475 (best passing\n+  value from --sweep-all, the only constant change that passes the gate this round): exact_match\n+  0.534 -> 0.541, transition 0.31 -> 0.32, false_unknown_rate unchanged at 0.064, no class regressed.\n \"\"\"\n from __future__ import annotations\n \n@@ -61,7 +66,7 @@ AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the l\n MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units, above which hands are still moving\n TIP_MOTION_THRESHOLD = 0.2  # mean per-frame fingertip displacement, in mean-scale units, above which fingers are still moving into shape\n TIP_MOTION_CONF_GATE = 0.75  # only trust tip_motion above this confidence: low-confidence tracking jitter looks like motion but isn't\n-PAIR_DRIFT_THRESHOLD = 0.05  # mean per-step increase of the closest-pair distance, in mean-scale units, above which the hands are still separating\n+PAIR_DRIFT_THRESHOLD = 0.0475  # mean per-step increase of the closest-pair distance, in mean-scale units, above which the hands are still separating\n \n \n def wrist_motion(window: Window) -> float:\n"
     }
   ],
   "blind": [],
@@ -1051,7 +1169,12 @@
   ],
   "critic_commits": [
     {
-      "sha": "3a14d8449f4dd028a84302d307195e29eb83b121",
+      "sha": "ba7f9467f3dc427c544e8a4675ddc5fe51e0c71c",
+      "date": "2026-09-13T11:21:33-07:00",
+      "subject": "critic v8: The transition failure family costs the most failed holds (82 out of 111), followed by out_of_frame and near-contact cla | patch: Lowered PAIR_DRIFT_THRESHOLD from 0.05 to 0.0475, the only constant change in this round's sweep that passes the metric  | expected: Transition samples improve most (0.31 -> 0.32) since more borderline-drifting non-holds are now flagged unknown, with ex"
+    },
+    {
+      "sha": "5e7bb99406ceb09e9ee0714a039ca583f1443fdf",
       "date": "2026-09-13T11:09:35-07:00",
       "subject": "critic v7: The failure family that costs the most failed holds is transition, with 85 failed holds, followed by out_of_frame with 3 | patch: Added `pair_separation_trend` (mean signed per-step change of the frame-by-frame closest-pair distance), gated like `tip | expected: transition improves (0.27 -> 0.31) since separating pairs are now rejected as unknown, exact_match rises 0.516 -> 0.534"
     },
@@ -1189,7 +1312,7 @@
     "data": "train side only",
     "data_sha": "448d3292a217",
     "windows": 483,
-    "rules_sha256": "1ac993583ea3299c9fdf6c2d7ba0bb67dd11986a88af76b63944d557f5ecaaee",
+    "rules_sha256": "d17d1b875a6c251ef8539e518eb3d0936291b0ecf157e965c9723bbc87bdad83",
     "constants": {
       "CONTACT_THRESHOLD": 0.2826,
       "UNKNOWN_THRESHOLD": 0.525,
@@ -1197,15 +1320,15 @@
       "MOTION_THRESHOLD": 0.1,
       "TIP_MOTION_THRESHOLD": 0.2,
       "TIP_MOTION_CONF_GATE": 0.75,
-      "PAIR_DRIFT_THRESHOLD": 0.05
+      "PAIR_DRIFT_THRESHOLD": 0.0475
     },
     "gate_base": {
-      "tag": "v7",
-      "exact_match": 0.534090909090909,
-      "exact_match_unordered": 0.534090909090909,
+      "tag": "v8",
+      "exact_match": 0.5409090909090908,
+      "exact_match_unordered": 0.5409090909090908,
       "contact_accuracy": 0.8765432098765432,
       "false_unknown_rate": 0.06432748538011697,
-      "negative_rejection_accuracy": 0.4136690647482015,
+      "negative_rejection_accuracy": 0.4244604316546763,
       "near_contact_accuracy": 0.7777777777777777,
       "per_class": {
         "10x10": 0.3333333333333333,
@@ -1246,7 +1369,7 @@
         "out_of_frame": 0.7567567567567568,
         "partial_hand": 1.0,
         "rest": 1.0,
-        "transition": 0.3072289156626506
+        "transition": 0.3192771084337349
       }
     },
     "compare": {
@@ -1265,8 +1388,8 @@
         "near_contact_accuracy": 0.40277777777777773
       },
       "b": {
-        "commit": "3a14d8449f4dd028a84302d307195e29eb83b121",
-        "rules_sha256": "1ac993583ea3299c9fdf6c2d7ba0bb67dd11986a88af76b63944d557f5ecaaee",
+        "commit": "ba7f9467f3dc427c544e8a4675ddc5fe51e0c71c",
+        "rules_sha256": "d17d1b875a6c251ef8539e518eb3d0936291b0ecf157e965c9723bbc87bdad83",
         "constants": {
           "CONTACT_THRESHOLD": 0.2826,
           "UNKNOWN_THRESHOLD": 0.525,
@@ -1274,13 +1397,13 @@
           "MOTION_THRESHOLD": 0.1,
           "TIP_MOTION_THRESHOLD": 0.2,
           "TIP_MOTION_CONF_GATE": 0.75,
-          "PAIR_DRIFT_THRESHOLD": 0.05
+          "PAIR_DRIFT_THRESHOLD": 0.0475
         },
-        "exact_match": 0.534090909090909,
-        "exact_match_unordered": 0.534090909090909,
+        "exact_match": 0.5409090909090908,
+        "exact_match_unordered": 0.5409090909090908,
         "contact_accuracy": 0.8765432098765432,
         "false_unknown_rate": 0.06432748538011697,
-        "negative_rejection_accuracy": 0.4136690647482015,
+        "negative_rejection_accuracy": 0.4244604316546763,
         "near_contact_accuracy": 0.7777777777777777
       },
       "data_sha": "448d3292a217",
@@ -1296,11 +1419,11 @@
         "rows": [
           {
             "value": 0.1413,
-            "exact_match": 0.5068181818181816,
-            "exact_match_unordered": 0.5068181818181816,
+            "exact_match": 0.5136363636363634,
+            "exact_match_unordered": 0.5136363636363634,
             "contact_accuracy": 0.7942386831275717,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.9166666666666666,
             "per_class": {
               "10x10": 0.0,
@@ -1341,18 +1464,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.507"
+            "why": "exact_match fell 0.541 -> 0.514"
           },
           {
             "value": 0.1554,
-            "exact_match": 0.5189393939393937,
-            "exact_match_unordered": 0.5189393939393937,
+            "exact_match": 0.5257575757575755,
+            "exact_match_unordered": 0.5257575757575755,
             "contact_accuracy": 0.8271604938271603,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.9166666666666666,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -1393,18 +1516,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.519"
+            "why": "exact_match fell 0.541 -> 0.526"
           },
           {
             "value": 0.1696,
-            "exact_match": 0.5234848484848482,
-            "exact_match_unordered": 0.5234848484848482,
+            "exact_match": 0.53030303030303,
+            "exact_match_unordered": 0.53030303030303,
             "contact_accuracy": 0.839506172839506,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.9027777777777777,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -1445,18 +1568,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.523"
+            "why": "exact_match fell 0.541 -> 0.530"
           },
           {
             "value": 0.1837,
-            "exact_match": 0.5265151515151513,
-            "exact_match_unordered": 0.5265151515151513,
+            "exact_match": 0.5333333333333331,
+            "exact_match_unordered": 0.5333333333333331,
             "contact_accuracy": 0.8518518518518516,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.8888888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -1497,18 +1620,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.527"
+            "why": "exact_match fell 0.541 -> 0.533"
           },
           {
             "value": 0.1978,
-            "exact_match": 0.5325757575757574,
-            "exact_match_unordered": 0.5325757575757574,
+            "exact_match": 0.5393939393939392,
+            "exact_match_unordered": 0.5393939393939392,
             "contact_accuracy": 0.8683127572016458,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.8888888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -1549,18 +1672,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.212,
-            "exact_match": 0.537121212121212,
-            "exact_match_unordered": 0.537121212121212,
+            "exact_match": 0.5439393939393938,
+            "exact_match_unordered": 0.5439393939393938,
             "contact_accuracy": 0.8847736625514402,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.875,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1601,18 +1724,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 2 class(es) regressed"
           },
           {
             "value": 0.2261,
-            "exact_match": 0.5356060606060604,
-            "exact_match_unordered": 0.5356060606060604,
+            "exact_match": 0.5424242424242424,
+            "exact_match_unordered": 0.5424242424242424,
             "contact_accuracy": 0.8806584362139915,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.861111111111111,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1653,18 +1776,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 2 class(es) regressed"
           },
           {
             "value": 0.2402,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8806584362139918,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.8333333333333334,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1705,18 +1828,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.2543,
-            "exact_match": 0.5356060606060605,
-            "exact_match_unordered": 0.5356060606060605,
+            "exact_match": 0.5424242424242424,
+            "exact_match_unordered": 0.5424242424242424,
             "contact_accuracy": 0.8847736625514402,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.8333333333333334,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1757,18 +1880,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 2 class(es) regressed"
           },
           {
             "value": 0.2685,
-            "exact_match": 0.5356060606060605,
-            "exact_match_unordered": 0.5356060606060605,
+            "exact_match": 0.5424242424242424,
+            "exact_match_unordered": 0.5424242424242424,
             "contact_accuracy": 0.8847736625514402,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.8194444444444445,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1809,18 +1932,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
             "why": "class 9x9 fell 1.00 -> 0.89 (limit 5 points), 1 class(es) regressed"
           },
           {
             "value": 0.2826,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1861,18 +1984,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.2967,
-            "exact_match": 0.531060606060606,
-            "exact_match_unordered": 0.531060606060606,
+            "exact_match": 0.5378787878787878,
+            "exact_match_unordered": 0.5378787878787878,
             "contact_accuracy": 0.8641975308641975,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.736111111111111,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1913,18 +2036,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.3109,
-            "exact_match": 0.5265151515151514,
-            "exact_match_unordered": 0.5265151515151514,
+            "exact_match": 0.5333333333333332,
+            "exact_match_unordered": 0.5333333333333332,
             "contact_accuracy": 0.8436213991769547,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.6666666666666666,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -1965,18 +2088,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.527"
+            "why": "exact_match fell 0.541 -> 0.533"
           },
           {
             "value": 0.325,
-            "exact_match": 0.5128787878787878,
-            "exact_match_unordered": 0.5128787878787878,
+            "exact_match": 0.5196969696969697,
+            "exact_match_unordered": 0.5196969696969697,
             "contact_accuracy": 0.7983539094650205,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.5138888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2017,18 +2140,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.513"
+            "why": "exact_match fell 0.541 -> 0.520"
           },
           {
             "value": 0.3391,
-            "exact_match": 0.5053030303030301,
-            "exact_match_unordered": 0.5053030303030301,
+            "exact_match": 0.512121212121212,
+            "exact_match_unordered": 0.512121212121212,
             "contact_accuracy": 0.7736625514403291,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.4305555555555555,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2069,18 +2192,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.505"
+            "why": "exact_match fell 0.541 -> 0.512"
           },
           {
             "value": 0.3533,
-            "exact_match": 0.5007575757575756,
-            "exact_match_unordered": 0.5007575757575756,
+            "exact_match": 0.5075757575757575,
+            "exact_match_unordered": 0.5075757575757575,
             "contact_accuracy": 0.7613168724279834,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.3888888888888889,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2121,18 +2244,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.501"
+            "why": "exact_match fell 0.541 -> 0.508"
           },
           {
             "value": 0.3674,
-            "exact_match": 0.4931818181818181,
-            "exact_match_unordered": 0.4931818181818181,
+            "exact_match": 0.49999999999999994,
+            "exact_match_unordered": 0.49999999999999994,
             "contact_accuracy": 0.7366255144032922,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.3055555555555555,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2173,18 +2296,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.493"
+            "why": "exact_match fell 0.541 -> 0.500"
           },
           {
             "value": 0.3815,
-            "exact_match": 0.49015151515151506,
-            "exact_match_unordered": 0.49015151515151506,
+            "exact_match": 0.4969696969696969,
+            "exact_match_unordered": 0.4969696969696969,
             "contact_accuracy": 0.7283950617283951,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.2638888888888889,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2225,18 +2348,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.490"
+            "why": "exact_match fell 0.541 -> 0.497"
           },
           {
             "value": 0.3956,
-            "exact_match": 0.4825757575757575,
-            "exact_match_unordered": 0.4825757575757575,
+            "exact_match": 0.48939393939393927,
+            "exact_match_unordered": 0.48939393939393927,
             "contact_accuracy": 0.7078189300411522,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.19444444444444442,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2277,18 +2400,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.483"
+            "why": "exact_match fell 0.541 -> 0.489"
           },
           {
             "value": 0.4098,
-            "exact_match": 0.4795454545454545,
-            "exact_match_unordered": 0.4795454545454545,
+            "exact_match": 0.4863636363636362,
+            "exact_match_unordered": 0.4863636363636362,
             "contact_accuracy": 0.6995884773662551,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.16666666666666666,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2329,18 +2452,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.480"
+            "why": "exact_match fell 0.541 -> 0.486"
           },
           {
             "value": 0.4239,
-            "exact_match": 0.4765151515151514,
-            "exact_match_unordered": 0.4765151515151514,
+            "exact_match": 0.48333333333333317,
+            "exact_match_unordered": 0.48333333333333317,
             "contact_accuracy": 0.6872427983539094,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.125,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2381,10 +2504,10 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.477"
+            "why": "exact_match fell 0.541 -> 0.483"
           }
         ]
       },
@@ -2393,11 +2516,11 @@
         "rows": [
           {
             "value": 0.2625,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2438,18 +2561,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.2888,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2490,18 +2613,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.315,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2542,18 +2665,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.3413,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2594,18 +2717,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.3675,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2646,18 +2769,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.3938,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2698,18 +2821,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.42,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2750,18 +2873,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.4462,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2802,18 +2925,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.4725,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2854,18 +2977,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.4987,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
+            "negative_rejection_accuracy": 0.42086330935251803,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2906,18 +3029,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.525,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -2958,18 +3081,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.5513,
-            "exact_match": 0.5333333333333332,
-            "exact_match_unordered": 0.5333333333333332,
+            "exact_match": 0.540151515151515,
+            "exact_match_unordered": 0.540151515151515,
             "contact_accuracy": 0.868312757201646,
             "false_unknown_rate": 0.0760233918128655,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3010,18 +3133,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.540"
           },
           {
             "value": 0.5775,
-            "exact_match": 0.5303030303030302,
-            "exact_match_unordered": 0.5303030303030302,
+            "exact_match": 0.537121212121212,
+            "exact_match_unordered": 0.537121212121212,
             "contact_accuracy": 0.8600823045267488,
             "false_unknown_rate": 0.08771929824561403,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3062,18 +3185,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.530"
+            "why": "exact_match fell 0.541 -> 0.537"
           },
           {
             "value": 0.6038,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8477366255144032,
             "false_unknown_rate": 0.09941520467836258,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3114,18 +3237,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.63,
-            "exact_match": 0.5287878787878788,
-            "exact_match_unordered": 0.5287878787878788,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8353909465020575,
             "false_unknown_rate": 0.11695906432748537,
-            "negative_rejection_accuracy": 0.4244604316546763,
+            "negative_rejection_accuracy": 0.43525179856115115,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3166,18 +3289,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3192771084337349
+              "transition": 0.3313253012048193
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.6562,
-            "exact_match": 0.5257575757575758,
-            "exact_match_unordered": 0.5257575757575758,
+            "exact_match": 0.5325757575757575,
+            "exact_match_unordered": 0.5325757575757575,
             "contact_accuracy": 0.8106995884773661,
             "false_unknown_rate": 0.14619883040935674,
-            "negative_rejection_accuracy": 0.43165467625899284,
+            "negative_rejection_accuracy": 0.44244604316546765,
             "near_contact_accuracy": 0.75,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3218,18 +3341,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3253012048192771
+              "transition": 0.3373493975903614
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.526"
+            "why": "exact_match fell 0.541 -> 0.533"
           },
           {
             "value": 0.6825,
-            "exact_match": 0.5333333333333332,
-            "exact_match_unordered": 0.5333333333333332,
+            "exact_match": 0.540151515151515,
+            "exact_match_unordered": 0.540151515151515,
             "contact_accuracy": 0.794238683127572,
             "false_unknown_rate": 0.16959064327485382,
-            "negative_rejection_accuracy": 0.4532374100719425,
+            "negative_rejection_accuracy": 0.46402877697841727,
             "near_contact_accuracy": 0.75,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3270,18 +3393,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3493975903614458
+              "transition": 0.3614457831325301
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.540"
           },
           {
             "value": 0.7088,
-            "exact_match": 0.5287878787878786,
-            "exact_match_unordered": 0.5287878787878786,
+            "exact_match": 0.5356060606060604,
+            "exact_match_unordered": 0.5356060606060604,
             "contact_accuracy": 0.7818930041152263,
             "false_unknown_rate": 0.1871345029239766,
-            "negative_rejection_accuracy": 0.4532374100719425,
+            "negative_rejection_accuracy": 0.46402877697841727,
             "near_contact_accuracy": 0.75,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3322,70 +3445,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3493975903614458
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
-          },
-          {
-            "value": 0.735,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
-            "contact_accuracy": 0.7695473251028807,
-            "false_unknown_rate": 0.19298245614035087,
-            "negative_rejection_accuracy": 0.46402877697841727,
-            "near_contact_accuracy": 0.7083333333333334,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.5555555555555556,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 0.5,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.5,
-              "9x10": 0.5555555555555556,
-              "9x6": 0.5,
-              "9x7": 0.5,
-              "9x8": 0.6666666666666666,
-              "9x9": 0.7777777777777778,
-              "near:10x10": 0.0,
-              "near:10x8": 0.3333333333333333,
-              "near:6x10": 0.5,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
               "transition": 0.3614457831325301
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
-            "value": 0.7612,
-            "exact_match": 0.537121212121212,
-            "exact_match_unordered": 0.537121212121212,
+            "value": 0.735,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.7695473251028807,
             "false_unknown_rate": 0.19298245614035087,
-            "negative_rejection_accuracy": 0.4712230215827338,
+            "negative_rejection_accuracy": 0.4748201438848921,
             "near_contact_accuracy": 0.7083333333333334,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3426,18 +3497,70 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3674698795180723
+              "transition": 0.37349397590361444
+            },
+            "gate": "FAIL",
+            "why": "exact_match fell 0.541 -> 0.539"
+          },
+          {
+            "value": 0.7612,
+            "exact_match": 0.5439393939393938,
+            "exact_match_unordered": 0.5439393939393938,
+            "contact_accuracy": 0.7695473251028807,
+            "false_unknown_rate": 0.19298245614035087,
+            "negative_rejection_accuracy": 0.48201438848920863,
+            "near_contact_accuracy": 0.7083333333333334,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.5555555555555556,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 0.5,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.5,
+              "9x10": 0.5555555555555556,
+              "9x6": 0.5,
+              "9x7": 0.5,
+              "9x8": 0.6666666666666666,
+              "9x9": 0.7777777777777778,
+              "near:10x10": 0.0,
+              "near:10x8": 0.3333333333333333,
+              "near:6x10": 0.5,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3795180722891566
             },
             "gate": "FAIL",
             "why": "class 10x9 fell 0.89 -> 0.56 (limit 5 points), 10 class(es) regressed"
           },
           {
             "value": 0.7875,
-            "exact_match": 0.537121212121212,
-            "exact_match_unordered": 0.537121212121212,
+            "exact_match": 0.5439393939393938,
+            "exact_match_unordered": 0.5439393939393938,
             "contact_accuracy": 0.7695473251028807,
             "false_unknown_rate": 0.19298245614035087,
-            "negative_rejection_accuracy": 0.4712230215827338,
+            "negative_rejection_accuracy": 0.48201438848920863,
             "near_contact_accuracy": 0.7083333333333334,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3478,7 +3601,7 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3674698795180723
+              "transition": 0.3795180722891566
             },
             "gate": "FAIL",
             "why": "class 10x9 fell 0.89 -> 0.56 (limit 5 points), 10 class(es) regressed"
@@ -3490,11 +3613,11 @@
         "rows": [
           {
             "value": 0.0125,
-            "exact_match": 0.5310606060606059,
-            "exact_match_unordered": 0.5310606060606059,
+            "exact_match": 0.5378787878787877,
+            "exact_match_unordered": 0.5378787878787877,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3535,18 +3658,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.0138,
-            "exact_match": 0.5310606060606059,
-            "exact_match_unordered": 0.5310606060606059,
+            "exact_match": 0.5378787878787877,
+            "exact_match_unordered": 0.5378787878787877,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3587,18 +3710,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.015,
-            "exact_match": 0.5310606060606059,
-            "exact_match_unordered": 0.5310606060606059,
+            "exact_match": 0.5378787878787877,
+            "exact_match_unordered": 0.5378787878787877,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3639,18 +3762,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.0163,
-            "exact_match": 0.5310606060606059,
-            "exact_match_unordered": 0.5310606060606059,
+            "exact_match": 0.5378787878787877,
+            "exact_match_unordered": 0.5378787878787877,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3691,18 +3814,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.0175,
-            "exact_match": 0.5310606060606059,
-            "exact_match_unordered": 0.5310606060606059,
+            "exact_match": 0.5378787878787877,
+            "exact_match_unordered": 0.5378787878787877,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3743,18 +3866,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.0188,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3795,18 +3918,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.02,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3847,18 +3970,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0213,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3899,18 +4022,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0225,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -3951,18 +4074,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0238,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4003,18 +4126,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.025,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4055,18 +4178,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.0263,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4107,18 +4230,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.0275,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4159,18 +4282,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.0287,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4211,18 +4334,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.03,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4263,18 +4386,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0312,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4315,18 +4438,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0325,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4367,18 +4490,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0338,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4419,18 +4542,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.035,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4471,18 +4594,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0362,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4523,18 +4646,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.0375,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -4575,10 +4698,10 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           }
         ]
       },
@@ -4587,11 +4710,11 @@
         "rows": [
           {
             "value": 0.05,
-            "exact_match": 0.5583333333333332,
-            "exact_match_unordered": 0.5583333333333332,
+            "exact_match": 0.5651515151515151,
+            "exact_match_unordered": 0.5651515151515151,
             "contact_accuracy": 0.8024691358024689,
             "false_unknown_rate": 0.16374269005847952,
-            "negative_rejection_accuracy": 0.4784172661870504,
+            "negative_rejection_accuracy": 0.4892086330935252,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4632,18 +4755,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3855421686746988
+              "transition": 0.39759036144578314
             },
             "gate": "FAIL",
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 8 class(es) regressed"
           },
           {
             "value": 0.055,
-            "exact_match": 0.543939393939394,
-            "exact_match_unordered": 0.543939393939394,
+            "exact_match": 0.5507575757575757,
+            "exact_match_unordered": 0.5507575757575757,
             "contact_accuracy": 0.8148148148148147,
             "false_unknown_rate": 0.14619883040935666,
-            "negative_rejection_accuracy": 0.4532374100719425,
+            "negative_rejection_accuracy": 0.46402877697841727,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4684,18 +4807,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.35542168674698793
+              "transition": 0.3674698795180723
             },
             "gate": "FAIL",
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 8 class(es) regressed"
           },
           {
             "value": 0.06,
-            "exact_match": 0.5431818181818181,
-            "exact_match_unordered": 0.5431818181818181,
+            "exact_match": 0.5499999999999999,
+            "exact_match_unordered": 0.5499999999999999,
             "contact_accuracy": 0.8189300411522631,
             "false_unknown_rate": 0.14035087719298242,
-            "negative_rejection_accuracy": 0.4496402877697842,
+            "negative_rejection_accuracy": 0.460431654676259,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4736,18 +4859,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3493975903614458
+              "transition": 0.3614457831325301
             },
             "gate": "FAIL",
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 8 class(es) regressed"
           },
           {
             "value": 0.065,
-            "exact_match": 0.5446969696969696,
-            "exact_match_unordered": 0.5446969696969696,
+            "exact_match": 0.5515151515151514,
+            "exact_match_unordered": 0.5515151515151514,
             "contact_accuracy": 0.8271604938271605,
             "false_unknown_rate": 0.13450292397660815,
-            "negative_rejection_accuracy": 0.4496402877697842,
+            "negative_rejection_accuracy": 0.460431654676259,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4788,18 +4911,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3493975903614458
+              "transition": 0.3614457831325301
             },
             "gate": "FAIL",
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 7 class(es) regressed"
           },
           {
             "value": 0.07,
-            "exact_match": 0.5348484848484848,
-            "exact_match_unordered": 0.5348484848484848,
+            "exact_match": 0.5416666666666665,
+            "exact_match_unordered": 0.5416666666666665,
             "contact_accuracy": 0.8312757201646088,
             "false_unknown_rate": 0.12865497076023386,
-            "negative_rejection_accuracy": 0.43165467625899284,
+            "negative_rejection_accuracy": 0.44244604316546765,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4840,18 +4963,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3253012048192771
+              "transition": 0.3373493975903614
             },
             "gate": "FAIL",
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 7 class(es) regressed"
           },
           {
             "value": 0.075,
-            "exact_match": 0.5295454545454544,
-            "exact_match_unordered": 0.5295454545454544,
+            "exact_match": 0.5363636363636363,
+            "exact_match_unordered": 0.5363636363636363,
             "contact_accuracy": 0.839506172839506,
             "false_unknown_rate": 0.11695906432748536,
-            "negative_rejection_accuracy": 0.42086330935251803,
+            "negative_rejection_accuracy": 0.43165467625899284,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4892,18 +5015,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.530"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.08,
-            "exact_match": 0.5310606060606059,
-            "exact_match_unordered": 0.5310606060606059,
+            "exact_match": 0.5378787878787877,
+            "exact_match_unordered": 0.5378787878787877,
             "contact_accuracy": 0.8436213991769544,
             "false_unknown_rate": 0.11111111111111109,
-            "negative_rejection_accuracy": 0.42086330935251803,
+            "negative_rejection_accuracy": 0.43165467625899284,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4944,18 +5067,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.085,
-            "exact_match": 0.5310606060606059,
-            "exact_match_unordered": 0.5310606060606059,
+            "exact_match": 0.5378787878787877,
+            "exact_match_unordered": 0.5378787878787877,
             "contact_accuracy": 0.8559670781893004,
             "false_unknown_rate": 0.09356725146198829,
-            "negative_rejection_accuracy": 0.42086330935251803,
+            "negative_rejection_accuracy": 0.43165467625899284,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -4996,18 +5119,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.531"
+            "why": "exact_match fell 0.541 -> 0.538"
           },
           {
             "value": 0.09,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8641975308641975,
             "false_unknown_rate": 0.08187134502923976,
-            "negative_rejection_accuracy": 0.42086330935251803,
+            "negative_rejection_accuracy": 0.43165467625899284,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5046,280 +5169,280 @@
               "near:9x10": 0.3333333333333333,
               "near:9x6": 0.3333333333333333,
               "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3253012048192771
+            },
+            "gate": "FAIL",
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
+          },
+          {
+            "value": 0.095,
+            "exact_match": 0.5363636363636363,
+            "exact_match_unordered": 0.5363636363636363,
+            "contact_accuracy": 0.8641975308641975,
+            "false_unknown_rate": 0.08187134502923976,
+            "negative_rejection_accuracy": 0.4244604316546763,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 0.8333333333333334,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 0.8888888888888888,
+              "8x9": 0.5,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3192771084337349
+            },
+            "gate": "FAIL",
+            "why": "exact_match fell 0.541 -> 0.536"
+          },
+          {
+            "value": 0.1,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.4244604316546763,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3192771084337349
+            },
+            "gate": "FAIL",
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
+          },
+          {
+            "value": 0.105,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.4220623501199041,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7297297297297297,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3192771084337349
+            },
+            "gate": "FAIL",
+            "why": "exact_match fell 0.541 -> 0.539"
+          },
+          {
+            "value": 0.11,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.4220623501199041,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7297297297297297,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3192771084337349
+            },
+            "gate": "FAIL",
+            "why": "exact_match fell 0.541 -> 0.539"
+          },
+          {
+            "value": 0.115,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.4160671462829736,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
               "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
-          },
-          {
-            "value": 0.095,
-            "exact_match": 0.5295454545454544,
-            "exact_match_unordered": 0.5295454545454544,
-            "contact_accuracy": 0.8641975308641975,
-            "false_unknown_rate": 0.08187134502923976,
-            "negative_rejection_accuracy": 0.4136690647482015,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 0.8333333333333334,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 0.8888888888888888,
-              "8x9": 0.5,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3072289156626506
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.530"
-          },
-          {
-            "value": 0.1,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3072289156626506
-            },
-            "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
-          },
-          {
-            "value": 0.105,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4112709832134293,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7297297297297297,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3072289156626506
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
-          },
-          {
-            "value": 0.11,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4112709832134293,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7297297297297297,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3072289156626506
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
-          },
-          {
-            "value": 0.115,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7027027027027027,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.30120481927710846
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.12,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
+            "negative_rejection_accuracy": 0.4160671462829736,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5360,18 +5483,18 @@
               "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.125,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
+            "negative_rejection_accuracy": 0.4160671462829736,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5412,18 +5535,18 @@
               "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.13,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
+            "negative_rejection_accuracy": 0.4160671462829736,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5464,18 +5587,18 @@
               "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.135,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
+            "negative_rejection_accuracy": 0.4160671462829736,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5516,18 +5639,18 @@
               "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.14,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
+            "negative_rejection_accuracy": 0.4160671462829736,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5568,18 +5691,18 @@
               "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.145,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
+            "negative_rejection_accuracy": 0.4160671462829736,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5620,18 +5743,18 @@
               "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           },
           {
             "value": 0.15,
-            "exact_match": 0.5287878787878787,
-            "exact_match_unordered": 0.5287878787878787,
+            "exact_match": 0.5356060606060605,
+            "exact_match_unordered": 0.5356060606060605,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4052757793764988,
+            "negative_rejection_accuracy": 0.4160671462829736,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -5672,10 +5795,10 @@
               "out_of_frame": 0.7027027027027027,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.30120481927710846
+              "transition": 0.3132530120481928
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.529"
+            "why": "exact_match fell 0.541 -> 0.536"
           }
         ]
       },
@@ -5684,11 +5807,63 @@
         "rows": [
           {
             "value": 0.1,
-            "exact_match": 0.5446969696969696,
-            "exact_match_unordered": 0.5446969696969696,
+            "exact_match": 0.5515151515151514,
+            "exact_match_unordered": 0.5515151515151514,
             "contact_accuracy": 0.8518518518518516,
             "false_unknown_rate": 0.09356725146198829,
-            "negative_rejection_accuracy": 0.43525179856115115,
+            "negative_rejection_accuracy": 0.44604316546762596,
+            "near_contact_accuracy": 0.7638888888888888,
+            "per_class": {
+              "10x10": 0.16666666666666666,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 0.8888888888888888,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.35542168674698793
+            },
+            "gate": "FAIL",
+            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 2 class(es) regressed"
+          },
+          {
+            "value": 0.11,
+            "exact_match": 0.5469696969696968,
+            "exact_match_unordered": 0.5469696969696968,
+            "contact_accuracy": 0.8559670781893004,
+            "false_unknown_rate": 0.08771929824561402,
+            "negative_rejection_accuracy": 0.4388489208633094,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -5735,64 +5910,12 @@
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 2 class(es) regressed"
           },
           {
-            "value": 0.11,
-            "exact_match": 0.540151515151515,
-            "exact_match_unordered": 0.540151515151515,
-            "contact_accuracy": 0.8559670781893004,
-            "false_unknown_rate": 0.08771929824561402,
-            "negative_rejection_accuracy": 0.4280575539568346,
-            "near_contact_accuracy": 0.7638888888888888,
-            "per_class": {
-              "10x10": 0.16666666666666666,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 0.8888888888888888,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3313253012048193
-            },
-            "gate": "FAIL",
-            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 2 class(es) regressed"
-          },
-          {
             "value": 0.12,
-            "exact_match": 0.540151515151515,
-            "exact_match_unordered": 0.540151515151515,
+            "exact_match": 0.5469696969696968,
+            "exact_match_unordered": 0.5469696969696968,
             "contact_accuracy": 0.8600823045267488,
             "false_unknown_rate": 0.08187134502923976,
-            "negative_rejection_accuracy": 0.4280575539568346,
+            "negative_rejection_accuracy": 0.4388489208633094,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -5833,18 +5956,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3313253012048193
+              "transition": 0.3433734939759036
             },
             "gate": "FAIL",
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 2 class(es) regressed"
           },
           {
             "value": 0.13,
-            "exact_match": 0.5416666666666665,
-            "exact_match_unordered": 0.5416666666666665,
+            "exact_match": 0.5484848484848484,
+            "exact_match_unordered": 0.5484848484848484,
             "contact_accuracy": 0.8641975308641975,
             "false_unknown_rate": 0.07602339181286549,
-            "negative_rejection_accuracy": 0.4280575539568346,
+            "negative_rejection_accuracy": 0.4388489208633094,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -5885,18 +6008,70 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3313253012048193
+              "transition": 0.3433734939759036
             },
             "gate": "FAIL",
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
           },
           {
             "value": 0.14,
-            "exact_match": 0.5416666666666665,
-            "exact_match_unordered": 0.5416666666666665,
+            "exact_match": 0.5484848484848484,
+            "exact_match_unordered": 0.5484848484848484,
             "contact_accuracy": 0.8641975308641975,
             "false_unknown_rate": 0.07602339181286549,
-            "negative_rejection_accuracy": 0.4280575539568346,
+            "negative_rejection_accuracy": 0.4388489208633094,
+            "near_contact_accuracy": 0.7638888888888888,
+            "per_class": {
+              "10x10": 0.16666666666666666,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3433734939759036
+            },
+            "gate": "FAIL",
+            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
+          },
+          {
+            "value": 0.15,
+            "exact_match": 0.5439393939393937,
+            "exact_match_unordered": 0.5439393939393937,
+            "contact_accuracy": 0.8641975308641975,
+            "false_unknown_rate": 0.07602339181286549,
+            "negative_rejection_accuracy": 0.43165467625899284,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.16666666666666666,
@@ -5943,13 +6118,117 @@
             "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
           },
           {
-            "value": 0.15,
-            "exact_match": 0.537121212121212,
-            "exact_match_unordered": 0.537121212121212,
-            "contact_accuracy": 0.8641975308641975,
-            "false_unknown_rate": 0.07602339181286549,
-            "negative_rejection_accuracy": 0.42086330935251803,
+            "value": 0.16,
+            "exact_match": 0.5416666666666665,
+            "exact_match_unordered": 0.5416666666666665,
+            "contact_accuracy": 0.8683127572016462,
+            "false_unknown_rate": 0.07017543859649122,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7638888888888888,
+            "per_class": {
+              "10x10": 0.16666666666666666,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3253012048192771
+            },
+            "gate": "FAIL",
+            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
+          },
+          {
+            "value": 0.17,
+            "exact_match": 0.5416666666666665,
+            "exact_match_unordered": 0.5416666666666665,
+            "contact_accuracy": 0.8683127572016462,
+            "false_unknown_rate": 0.07017543859649122,
+            "negative_rejection_accuracy": 0.4280575539568346,
+            "near_contact_accuracy": 0.7638888888888888,
+            "per_class": {
+              "10x10": 0.16666666666666666,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3253012048192771
+            },
+            "gate": "FAIL",
+            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
+          },
+          {
+            "value": 0.18,
+            "exact_match": 0.5393939393939392,
+            "exact_match_unordered": 0.5393939393939392,
+            "contact_accuracy": 0.8724279835390947,
+            "false_unknown_rate": 0.07017543859649122,
+            "negative_rejection_accuracy": 0.4244604316546763,
+            "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.16666666666666666,
               "10x6": 1.0,
@@ -5992,171 +6271,15 @@
               "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
-          },
-          {
-            "value": 0.16,
-            "exact_match": 0.5348484848484847,
-            "exact_match_unordered": 0.5348484848484847,
-            "contact_accuracy": 0.8683127572016462,
-            "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4172661870503598,
-            "near_contact_accuracy": 0.7638888888888888,
-            "per_class": {
-              "10x10": 0.16666666666666666,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3132530120481928
-            },
-            "gate": "FAIL",
-            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
-          },
-          {
-            "value": 0.17,
-            "exact_match": 0.5348484848484847,
-            "exact_match_unordered": 0.5348484848484847,
-            "contact_accuracy": 0.8683127572016462,
-            "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4172661870503598,
-            "near_contact_accuracy": 0.7638888888888888,
-            "per_class": {
-              "10x10": 0.16666666666666666,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3132530120481928
-            },
-            "gate": "FAIL",
-            "why": "class 10x10 fell 0.33 -> 0.17 (limit 5 points), 1 class(es) regressed"
-          },
-          {
-            "value": 0.18,
-            "exact_match": 0.5325757575757574,
-            "exact_match_unordered": 0.5325757575757574,
-            "contact_accuracy": 0.8724279835390947,
-            "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4136690647482015,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.16666666666666666,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3072289156626506
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.19,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6197,18 +6320,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.2,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6249,18 +6372,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.21,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6301,18 +6424,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.22,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6353,18 +6476,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.23,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6405,18 +6528,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.24,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6457,18 +6580,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.25,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6509,18 +6632,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.26,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6561,18 +6684,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.27,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6613,18 +6736,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.28,
-            "exact_match": 0.534090909090909,
-            "exact_match_unordered": 0.534090909090909,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6665,18 +6788,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
             "value": 0.29,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.41127098321342925,
+            "negative_rejection_accuracy": 0.42206235011990406,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6717,18 +6840,18 @@
               "out_of_frame": 0.7297297297297297,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.3,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.41127098321342925,
+            "negative_rejection_accuracy": 0.42206235011990406,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6769,10 +6892,10 @@
               "out_of_frame": 0.7297297297297297,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           }
         ]
       },
@@ -6781,11 +6904,11 @@
         "rows": [
           {
             "value": 0.375,
-            "exact_match": 0.5333333333333332,
-            "exact_match_unordered": 0.5333333333333332,
+            "exact_match": 0.540151515151515,
+            "exact_match_unordered": 0.540151515151515,
             "contact_accuracy": 0.868312757201646,
             "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6826,18 +6949,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.540"
           },
           {
             "value": 0.4125,
-            "exact_match": 0.5333333333333332,
-            "exact_match_unordered": 0.5333333333333332,
+            "exact_match": 0.540151515151515,
+            "exact_match_unordered": 0.540151515151515,
             "contact_accuracy": 0.868312757201646,
             "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6878,18 +7001,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.540"
           },
           {
             "value": 0.45,
-            "exact_match": 0.5333333333333332,
-            "exact_match_unordered": 0.5333333333333332,
+            "exact_match": 0.540151515151515,
+            "exact_match_unordered": 0.540151515151515,
             "contact_accuracy": 0.868312757201646,
             "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6930,18 +7053,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.540"
           },
           {
             "value": 0.4875,
-            "exact_match": 0.5333333333333332,
-            "exact_match_unordered": 0.5333333333333332,
+            "exact_match": 0.540151515151515,
+            "exact_match_unordered": 0.540151515151515,
             "contact_accuracy": 0.868312757201646,
             "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -6982,18 +7105,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.540"
           },
           {
             "value": 0.525,
-            "exact_match": 0.5333333333333332,
-            "exact_match_unordered": 0.5333333333333332,
+            "exact_match": 0.540151515151515,
+            "exact_match_unordered": 0.540151515151515,
             "contact_accuracy": 0.868312757201646,
             "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4172661870503598,
+            "negative_rejection_accuracy": 0.4280575539568346,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -7034,18 +7157,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3132530120481928
+              "transition": 0.3253012048192771
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.540"
           },
           {
             "value": 0.5625,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8724279835390947,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -7086,18 +7209,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.6,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8724279835390947,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -7138,18 +7261,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.6375,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8724279835390947,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -7190,18 +7313,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.675,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8724279835390947,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -7242,18 +7365,18 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.7125,
-            "exact_match": 0.5325757575757575,
-            "exact_match_unordered": 0.5325757575757575,
+            "exact_match": 0.5393939393939393,
+            "exact_match_unordered": 0.5393939393939393,
             "contact_accuracy": 0.8724279835390947,
             "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4136690647482015,
+            "negative_rejection_accuracy": 0.4244604316546763,
             "near_contact_accuracy": 0.7638888888888888,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -7294,13 +7417,169 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3072289156626506
+              "transition": 0.3192771084337349
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.533"
+            "why": "exact_match fell 0.541 -> 0.539"
           },
           {
             "value": 0.75,
+            "exact_match": 0.5409090909090908,
+            "exact_match_unordered": 0.5409090909090908,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.4244604316546763,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3192771084337349
+            },
+            "gate": "FAIL",
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
+          },
+          {
+            "value": 0.7875,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.42086330935251803,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3132530120481928
+            },
+            "gate": "FAIL",
+            "why": "exact_match fell 0.541 -> 0.539"
+          },
+          {
+            "value": 0.825,
+            "exact_match": 0.5386363636363635,
+            "exact_match_unordered": 0.5386363636363635,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.42086330935251803,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3132530120481928
+            },
+            "gate": "FAIL",
+            "why": "exact_match fell 0.541 -> 0.539"
+          },
+          {
+            "value": 0.8625,
             "exact_match": 0.534090909090909,
             "exact_match_unordered": 0.534090909090909,
             "contact_accuracy": 0.8765432098765432,
@@ -7349,171 +7628,15 @@
               "transition": 0.3072289156626506
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
-          },
-          {
-            "value": 0.7875,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.30120481927710846
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
-          },
-          {
-            "value": 0.825,
-            "exact_match": 0.5318181818181816,
-            "exact_match_unordered": 0.5318181818181816,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.4100719424460432,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.30120481927710846
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
-          },
-          {
-            "value": 0.8625,
-            "exact_match": 0.5272727272727271,
-            "exact_match_unordered": 0.5272727272727271,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.06432748538011697,
-            "negative_rejection_accuracy": 0.40287769784172667,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.29518072289156627
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.527"
+            "why": "exact_match fell 0.541 -> 0.534"
           },
           {
             "value": 0.9,
-            "exact_match": 0.5181818181818181,
-            "exact_match_unordered": 0.5181818181818181,
+            "exact_match": 0.5249999999999999,
+            "exact_match_unordered": 0.5249999999999999,
             "contact_accuracy": 0.8765432098765432,
             "false_unknown_rate": 0.058479532163742694,
-            "negative_rejection_accuracy": 0.38848920863309355,
+            "negative_rejection_accuracy": 0.3992805755395684,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -7554,10 +7677,10 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.27710843373493976
+              "transition": 0.2891566265060241
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.518"
+            "why": "exact_match fell 0.541 -> 0.525"
           },
           {
             "value": 0.9375,
@@ -7609,7 +7732,7 @@
               "transition": 0.2710843373493976
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.516"
+            "why": "exact_match fell 0.541 -> 0.516"
           },
           {
             "value": 0.975,
@@ -7661,7 +7784,7 @@
               "transition": 0.26506024096385544
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.511"
+            "why": "exact_match fell 0.541 -> 0.511"
           },
           {
             "value": 1.0125,
@@ -7713,7 +7836,7 @@
               "transition": 0.26506024096385544
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.510"
+            "why": "exact_match fell 0.541 -> 0.510"
           },
           {
             "value": 1.05,
@@ -7765,7 +7888,7 @@
               "transition": 0.26506024096385544
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.510"
+            "why": "exact_match fell 0.541 -> 0.510"
           },
           {
             "value": 1.0875,
@@ -7817,7 +7940,7 @@
               "transition": 0.26506024096385544
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.510"
+            "why": "exact_match fell 0.541 -> 0.510"
           },
           {
             "value": 1.125,
@@ -7869,21 +7992,21 @@
               "transition": 0.26506024096385544
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.510"
+            "why": "exact_match fell 0.541 -> 0.510"
           }
         ]
       },
       "PAIR_DRIFT_THRESHOLD": {
-        "current": 0.05,
+        "current": 0.0475,
         "rows": [
           {
-            "value": 0.025,
+            "value": 0.0238,
             "exact_match": 0.559090909090909,
             "exact_match_unordered": 0.559090909090909,
-            "contact_accuracy": 0.8559670781893002,
+            "contact_accuracy": 0.8518518518518516,
             "false_unknown_rate": 0.08771929824561402,
             "negative_rejection_accuracy": 0.460431654676259,
-            "near_contact_accuracy": 0.7638888888888888,
+            "near_contact_accuracy": 0.75,
             "per_class": {
               "10x10": 0.3333333333333333,
               "10x6": 1.0,
@@ -7929,7 +8052,7 @@
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 3 class(es) regressed"
           },
           {
-            "value": 0.0275,
+            "value": 0.0261,
             "exact_match": 0.5537878787878786,
             "exact_match_unordered": 0.5537878787878786,
             "contact_accuracy": 0.8600823045267488,
@@ -7981,7 +8104,7 @@
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 2 class(es) regressed"
           },
           {
-            "value": 0.03,
+            "value": 0.0285,
             "exact_match": 0.5537878787878786,
             "exact_match_unordered": 0.5537878787878786,
             "contact_accuracy": 0.8600823045267488,
@@ -8033,7 +8156,59 @@
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 2 class(es) regressed"
           },
           {
-            "value": 0.0325,
+            "value": 0.0309,
+            "exact_match": 0.5537878787878786,
+            "exact_match_unordered": 0.5537878787878786,
+            "contact_accuracy": 0.8600823045267488,
+            "false_unknown_rate": 0.08187134502923976,
+            "negative_rejection_accuracy": 0.4496402877697842,
+            "near_contact_accuracy": 0.7638888888888888,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 0.8333333333333334,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.4444444444444444,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.35542168674698793
+            },
+            "gate": "FAIL",
+            "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 2 class(es) regressed"
+          },
+          {
+            "value": 0.0332,
             "exact_match": 0.5515151515151514,
             "exact_match_unordered": 0.5515151515151514,
             "contact_accuracy": 0.8683127572016458,
@@ -8085,7 +8260,7 @@
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 2 class(es) regressed"
           },
           {
-            "value": 0.035,
+            "value": 0.0356,
             "exact_match": 0.5530303030303029,
             "exact_match_unordered": 0.5530303030303029,
             "contact_accuracy": 0.8724279835390946,
@@ -8137,7 +8312,7 @@
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 1 class(es) regressed"
           },
           {
-            "value": 0.0375,
+            "value": 0.038,
             "exact_match": 0.5462121212121211,
             "exact_match_unordered": 0.5462121212121211,
             "contact_accuracy": 0.8724279835390946,
@@ -8189,59 +8364,7 @@
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 1 class(es) regressed"
           },
           {
-            "value": 0.04,
-            "exact_match": 0.5462121212121211,
-            "exact_match_unordered": 0.5462121212121211,
-            "contact_accuracy": 0.8724279835390946,
-            "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.43525179856115115,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 0.8333333333333334,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.3373493975903614
-            },
-            "gate": "FAIL",
-            "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 1 class(es) regressed"
-          },
-          {
-            "value": 0.0425,
+            "value": 0.0404,
             "exact_match": 0.5439393939393938,
             "exact_match_unordered": 0.5439393939393938,
             "contact_accuracy": 0.8724279835390946,
@@ -8293,12 +8416,12 @@
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 1 class(es) regressed"
           },
           {
-            "value": 0.045,
-            "exact_match": 0.5416666666666665,
-            "exact_match_unordered": 0.5416666666666665,
+            "value": 0.0428,
+            "exact_match": 0.5439393939393938,
+            "exact_match_unordered": 0.5439393939393938,
             "contact_accuracy": 0.8724279835390946,
             "false_unknown_rate": 0.07017543859649122,
-            "negative_rejection_accuracy": 0.4280575539568346,
+            "negative_rejection_accuracy": 0.43165467625899284,
             "near_contact_accuracy": 0.7777777777777777,
             "per_class": {
               "10x10": 0.3333333333333333,
@@ -8339,10 +8462,62 @@
               "out_of_frame": 0.7567567567567568,
               "partial_hand": 1.0,
               "rest": 1.0,
-              "transition": 0.3253012048192771
+              "transition": 0.3313253012048193
             },
             "gate": "FAIL",
             "why": "class 10x8 fell 1.00 -> 0.83 (limit 5 points), 1 class(es) regressed"
+          },
+          {
+            "value": 0.0451,
+            "exact_match": 0.5431818181818181,
+            "exact_match_unordered": 0.5431818181818181,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.4280575539568346,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.3253012048192771
+            },
+            "gate": "PASS",
+            "why": "exact_match 0.541 -> 0.543"
           },
           {
             "value": 0.0475,
@@ -8393,11 +8568,11 @@
               "rest": 1.0,
               "transition": 0.3192771084337349
             },
-            "gate": "PASS",
-            "why": "exact_match 0.534 -> 0.541"
+            "gate": "FAIL",
+            "why": "no improvement: exact_match stayed 0.541 (strict improvement required)"
           },
           {
-            "value": 0.05,
+            "value": 0.0499,
             "exact_match": 0.534090909090909,
             "exact_match_unordered": 0.534090909090909,
             "contact_accuracy": 0.8765432098765432,
@@ -8446,10 +8621,10 @@
               "transition": 0.3072289156626506
             },
             "gate": "FAIL",
-            "why": "no improvement: exact_match stayed 0.534 (strict improvement required)"
+            "why": "exact_match fell 0.541 -> 0.534"
           },
           {
-            "value": 0.0525,
+            "value": 0.0523,
             "exact_match": 0.5318181818181816,
             "exact_match_unordered": 0.5318181818181816,
             "contact_accuracy": 0.8765432098765432,
@@ -8498,10 +8673,10 @@
               "transition": 0.30120481927710846
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.532"
+            "why": "exact_match fell 0.541 -> 0.532"
           },
           {
-            "value": 0.055,
+            "value": 0.0546,
             "exact_match": 0.5295454545454544,
             "exact_match_unordered": 0.5295454545454544,
             "contact_accuracy": 0.8765432098765432,
@@ -8550,10 +8725,10 @@
               "transition": 0.29518072289156627
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.530"
+            "why": "exact_match fell 0.541 -> 0.530"
           },
           {
-            "value": 0.0575,
+            "value": 0.057,
             "exact_match": 0.5249999999999999,
             "exact_match_unordered": 0.5249999999999999,
             "contact_accuracy": 0.8765432098765432,
@@ -8602,10 +8777,10 @@
               "transition": 0.2891566265060241
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.525"
+            "why": "exact_match fell 0.541 -> 0.525"
           },
           {
-            "value": 0.06,
+            "value": 0.0594,
             "exact_match": 0.5249999999999999,
             "exact_match_unordered": 0.5249999999999999,
             "contact_accuracy": 0.8765432098765432,
@@ -8654,10 +8829,10 @@
               "transition": 0.2891566265060241
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.525"
+            "why": "exact_match fell 0.541 -> 0.525"
           },
           {
-            "value": 0.0625,
+            "value": 0.0618,
             "exact_match": 0.5249999999999999,
             "exact_match_unordered": 0.5249999999999999,
             "contact_accuracy": 0.8765432098765432,
@@ -8706,10 +8881,62 @@
               "transition": 0.2891566265060241
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.525"
+            "why": "exact_match fell 0.541 -> 0.525"
           },
           {
-            "value": 0.065,
+            "value": 0.0641,
+            "exact_match": 0.5249999999999999,
+            "exact_match_unordered": 0.5249999999999999,
+            "contact_accuracy": 0.8765432098765432,
+            "false_unknown_rate": 0.06432748538011697,
+            "negative_rejection_accuracy": 0.3992805755395684,
+            "near_contact_accuracy": 0.7777777777777777,
+            "per_class": {
+              "10x10": 0.3333333333333333,
+              "10x6": 1.0,
+              "10x7": 1.0,
+              "10x8": 1.0,
+              "10x9": 0.8888888888888888,
+              "6x10": 0.5,
+              "6x6": 0.6666666666666666,
+              "6x7": 0.3333333333333333,
+              "6x8": 0.5555555555555556,
+              "6x9": 0.25,
+              "7x10": 1.0,
+              "7x6": 0.5,
+              "7x7": 0.625,
+              "7x8": 0.6666666666666666,
+              "7x9": 1.0,
+              "8x10": 1.0,
+              "8x6": 1.0,
+              "8x7": 1.0,
+              "8x8": 1.0,
+              "8x9": 0.6666666666666666,
+              "9x10": 0.8888888888888888,
+              "9x6": 1.0,
+              "9x7": 1.0,
+              "9x8": 1.0,
+              "9x9": 1.0,
+              "near:10x10": 0.0,
+              "near:10x8": 0.5,
+              "near:6x10": 0.6666666666666666,
+              "near:6x6": 0.6666666666666666,
+              "near:7x7": 1.0,
+              "near:7x9": 1.0,
+              "near:8x7": 0.6666666666666666,
+              "near:8x8": 1.0,
+              "near:9x10": 0.3333333333333333,
+              "near:9x6": 0.3333333333333333,
+              "out_of_frame": 0.7567567567567568,
+              "partial_hand": 1.0,
+              "rest": 1.0,
+              "transition": 0.2891566265060241
+            },
+            "gate": "FAIL",
+            "why": "exact_match fell 0.541 -> 0.525"
+          },
+          {
+            "value": 0.0665,
             "exact_match": 0.5249999999999999,
             "exact_match_unordered": 0.5249999999999999,
             "contact_accuracy": 0.8765432098765432,
@@ -8758,10 +8985,10 @@
               "transition": 0.2891566265060241
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.525"
+            "why": "exact_match fell 0.541 -> 0.525"
           },
           {
-            "value": 0.0675,
+            "value": 0.0689,
             "exact_match": 0.5249999999999999,
             "exact_match_unordered": 0.5249999999999999,
             "contact_accuracy": 0.8765432098765432,
@@ -8810,10 +9037,10 @@
               "transition": 0.2891566265060241
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.525"
+            "why": "exact_match fell 0.541 -> 0.525"
           },
           {
-            "value": 0.07,
+            "value": 0.0713,
             "exact_match": 0.5249999999999999,
             "exact_match_unordered": 0.5249999999999999,
             "contact_accuracy": 0.8765432098765432,
@@ -8862,111 +9089,7 @@
               "transition": 0.2891566265060241
             },
             "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.525"
-          },
-          {
-            "value": 0.0725,
-            "exact_match": 0.5227272727272726,
-            "exact_match_unordered": 0.5227272727272726,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.058479532163742694,
-            "negative_rejection_accuracy": 0.3956834532374101,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.28313253012048195
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.523"
-          },
-          {
-            "value": 0.075,
-            "exact_match": 0.5227272727272726,
-            "exact_match_unordered": 0.5227272727272726,
-            "contact_accuracy": 0.8765432098765432,
-            "false_unknown_rate": 0.058479532163742694,
-            "negative_rejection_accuracy": 0.3956834532374101,
-            "near_contact_accuracy": 0.7777777777777777,
-            "per_class": {
-              "10x10": 0.3333333333333333,
-              "10x6": 1.0,
-              "10x7": 1.0,
-              "10x8": 1.0,
-              "10x9": 0.8888888888888888,
-              "6x10": 0.5,
-              "6x6": 0.6666666666666666,
-              "6x7": 0.3333333333333333,
-              "6x8": 0.5555555555555556,
-              "6x9": 0.25,
-              "7x10": 1.0,
-              "7x6": 0.5,
-              "7x7": 0.625,
-              "7x8": 0.6666666666666666,
-              "7x9": 1.0,
-              "8x10": 1.0,
-              "8x6": 1.0,
-              "8x7": 1.0,
-              "8x8": 1.0,
-              "8x9": 0.6666666666666666,
-              "9x10": 0.8888888888888888,
-              "9x6": 1.0,
-              "9x7": 1.0,
-              "9x8": 1.0,
-              "9x9": 1.0,
-              "near:10x10": 0.0,
-              "near:10x8": 0.5,
-              "near:6x10": 0.6666666666666666,
-              "near:6x6": 0.6666666666666666,
-              "near:7x7": 1.0,
-              "near:7x9": 1.0,
-              "near:8x7": 0.6666666666666666,
-              "near:8x8": 1.0,
-              "near:9x10": 0.3333333333333333,
-              "near:9x6": 0.3333333333333333,
-              "out_of_frame": 0.7567567567567568,
-              "partial_hand": 1.0,
-              "rest": 1.0,
-              "transition": 0.28313253012048195
-            },
-            "gate": "FAIL",
-            "why": "exact_match fell 0.534 -> 0.523"
+            "why": "exact_match fell 0.541 -> 0.525"
           }
         ]
       }
