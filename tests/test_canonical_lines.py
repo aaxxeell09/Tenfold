@@ -269,7 +269,9 @@ def test_every_line_of_the_file_is_reachable() -> None:
 # The seven lines that walk a child through the method. The owner's wording:
 # the fingers at the bottom and the fingers on top, because a child who has not
 # met place value yet cannot hear "tens" and "ones" as anything.
-COUNTING_KEYS = ("pose_ready", "count_tens", "multiply_above", "wrong_answer_1",
+# pose_ready left this list when the owner shortened it to "Now do the math.":
+# it hands over to the counting, it no longer counts anything itself.
+COUNTING_KEYS = ("count_tens", "multiply_above", "wrong_answer_1",
                  "wrong_answer_2", "wrong_answer_3", "rescue")
 PLACEHOLDER = re.compile(r"\{[^}]*\}")
 
