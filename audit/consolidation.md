@@ -1,14 +1,18 @@
 # Consolidation audit, after the morning passes
 
-Commit audited: **c9e8224**, which carries origin/main as of the last merge
+Commit audited: **dd3ae9e**, which carries origin/main as of the last merge
 before this was written.
 
-main moved four times while this was being read (331c4ef, 554dc0d, e15ab97,
-c9e8224), so every finding was re-checked at c9e8224 before being kept. Three
-were fixed under me while I read and are marked as such rather than deleted,
-because what changed and why is part of what a consolidation audit is for; two
-are new and only exist because of those fixes. Anything simply fixed and not
-interesting was dropped.
+main moved five times while this was being read (331c4ef, 554dc0d, e15ab97,
+c9e8224, dd3ae9e), so every finding was re-checked at dd3ae9e by grep before
+being kept. Four were fixed under me and are marked as closed rather than
+deleted, because what changed and why is half of what a consolidation audit is
+for; two are new and exist only because of those fixes. Anything fixed and not
+interesting was simply dropped.
+
+That also means this is a photograph, not a guarantee. Every claim below names
+the file and the line it was checked at, so the next reader can re-run the same
+grep rather than trust the date.
 
 Method: the whole suite; the mock flow driven end to end with playwright
 (chromium 1194) through welcome, the start gate and a lesson to the finish card;
@@ -163,18 +167,18 @@ the step dots advance with it, which also clears the step-2 dot bug reported
 from the earlier run. What is left of the finding is small and worth fixing
 before it rots:
 
-- **`gate_step_pause_ms`** (1000, bounds `[500, 2000]`, `lesson/tutor_params.json:33`)
-  is read by no production code. `app/tutor.py:171` requires it and comments
-  "gate_step_pause_ms is the page's"; `grep -c gate_step_pause_ms web/course/app.js`
-  is 0.
-- **`gate_ready_button_s`** is the mirror image. `web/course/app.js:454` reads it
-  through `timing(READY_BUTTON_KEY, READY_BUTTON_S)` and the comment says
-  "lesson/tutor_params.json owns the value". It is not in that file, so the page
-  silently falls back to its own 6.
+- **`gate_step_pause_ms`** was read by no production code on c9e8224. **Fixed at
+  dd3ae9e**: `web/course/app.js:460` now reads it as `GATE_PAUSE_KEY`. Closed.
+- **`gate_ready_button_s`** still stands. `web/course/app.js` reads it through
+  `timing(READY_BUTTON_KEY, READY_BUTTON_S)` and its comment says
+  "lesson/tutor_params.json owns the value". `grep -c gate_ready_button_s
+  lesson/tutor_params.json` is 0, so the page silently falls back to its own 6
+  seconds, and the one number deciding how long a child with a dead microphone
+  stares at a screen with no way forward is not in the policy file, not bounded,
+  and not tunable by Loop 2.
 
-So the gate has two policy parameters and neither is connected: one the file has
-and nobody reads, one the page reads and the file has not got. The fallback is
-graceful, which is why nothing failed, and which is why this will sit here.
+The fallback is graceful, which is why nothing failed, and which is why this
+will sit here.
 
 The two tests named for the gate (`tests/test_opening.py:125-136`) still assert
 only that a constant and a string exist; they passed before the gate was built
