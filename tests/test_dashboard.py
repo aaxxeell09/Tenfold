@@ -112,7 +112,8 @@ def test_snapshot_versions_carry_the_identity_of_their_rules_and_scorers(tmp_pat
     repo = make_repo(tmp_path)
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
     (repo / "data" / "metrics.json").write_text(json.dumps({"rejected": [], "versions": [
-        {"tag": "v0", "version": 0, "sha": head, "kind": "baseline", "data": {"sha": "abc", "n_samples": 1}, "train": {"exact_match": 0.5}},
+        {"tag": "v0", "version": 0, "sha": head, "kind": "baseline", "data": {"sha": "abc", "n_samples": 1}, "train": {"exact_match": 0.5},
+         "hidden": {"validation": {"exact_match": 0.46, "n_holds": 55, "n_samples": 125, "per_class": {"6x6": 1.0}}}},
         {"tag": "v1", "version": 1, "sha": "no-commit", "kind": "patch", "train": {"exact_match": 0.6, "scorers_sha256": "f" * 64}}]}))
     p = subprocess.run([sys.executable, "loop/snapshot.py", "--repo", str(repo)], cwd=repo, capture_output=True, text=True,
                        env={**os.environ, "PYTHONPATH": str(repo)})
@@ -122,6 +123,9 @@ def test_snapshot_versions_carry_the_identity_of_their_rules_and_scorers(tmp_pat
     assert v0["scorers"] == {"sha256": hashlib.sha256((repo / "eval" / "scorers.py").read_bytes()).hexdigest(),
                              "source": "eval/scorers.py at the version commit"}
     assert v1["rules_sha256"] is None and v1["scorers"] == {"sha256": "f" * 64, "source": "recorded with the metrics"}
+    # the hidden gate record is kept, slim, so the page can say from which version the held-back gestures select patches
+    assert v0["hidden_gate"] == {"validation": {"exact_match": 0.46, "n_holds": 55, "n_samples": 125}}
+    assert v1["hidden_gate"] is None
 
 
 def test_snapshot_collects_refusals_from_every_run_log_once(tmp_path):

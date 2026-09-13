@@ -54,8 +54,13 @@ def version_rows(metrics: dict | None, repo: Path, with_diff: bool) -> list[dict
         row = {k: v.get(k) for k in ("tag", "version", "sha", "ts", "kind", "data", "diagnosis", "patch_hypothesis",
                                      "patch", "expected", "gate", "spent_usd")}
         row["train"], row["heldout"] = slim(v.get("train")), slim(v.get("heldout"))
+        # the hidden sets the loop scored for this version (loop/gate.py check_hidden): once a version carries them,
+        # the next accepted patch was selected on them, so they stop being an independent check from then on
+        hidden = v.get("hidden") or {}
+        row["hidden_gate"] = {name: {k: hidden[name].get(k) for k in ("exact_match", "n_holds", "n_samples")}
+                              for name in ("validation", "live") if isinstance(hidden.get(name), dict)} or None
         sha = v.get("sha")
-        known = bool(sha and sha != "no-commit")
+        known =bool(sha and sha != "no-commit")
         rules = git_bytes(repo, "show", f"{sha}:classifier/rules.py") if known else b""
         scorers = git_bytes(repo, "show", f"{sha}:eval/scorers.py") if known else b""
         row["rules_sha256"] = hashlib.sha256(rules).hexdigest() if rules else None

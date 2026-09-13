@@ -288,19 +288,29 @@ def _(compare, explorer, informed, snap):
     _data = ((best_version or {}).get("data") or {}).get("sha")
     _scorers = (((best_version or {}).get("scorers") or {}).get("sha256")
                 or ((best_version or {}).get("train") or {}).get("scorers_sha256"))
-    _retro = snap.get("retrospective_validation") or {}
-    # what each block of the page was computed from must be the version in use, on the same data, with the same scorers
+    # the retrospective report shown: the one for the rule in use, else the latest one computed for an earlier version
+    retro_report = (snap.get("retrospective_validation")
+                    or next(iter(reversed(snap.get("retrospective_versions") or [])), None) or {})
+    _report_commit = (retro_report.get("b") or {}).get("commit") or ""
+    _named = next((v for v in informed if v.get("sha") and _report_commit
+                   and (v["sha"].startswith(_report_commit[:7]) or _report_commit.startswith(v["sha"][:7]))), None)
+    retro_current = bool(retro_report and best_version is not None and _named is best_version)
+    # the first patch accepted while the loop already scored the held-back gestures: from then on they select patches
+    gate_since = next((v for _i, v in enumerate(informed) if _i > 0 and v.get("kind") == "patch"
+                       and ((informed[_i - 1].get("hidden_gate") or {}).get("validation"))), None)
+    # what each block of the page was computed from must match the version it names, on the same data, with the same scorers
     checks = {
         "hands": bool(explorer and _rules and explorer.get("rules_sha256") == _rules and explorer.get("data_sha") == _data),
         "compare": bool(compare and _rules and _scorers and compare.get("data_sha") == _data
                         and compare.get("scorers_sha256") == _scorers and (compare.get("b") or {}).get("rules_sha256") == _rules),
-        "retro": bool(_retro and _rules and (_retro.get("b") or {}).get("rules_sha256") == _rules),
+        "retro": bool(retro_report and _named and _named.get("rules_sha256")
+                      and (retro_report.get("b") or {}).get("rules_sha256") == _named.get("rules_sha256")),
     }
-    missing = [label for label, present in (("versions", informed), ("hand data and threshold sweep", explorer),
-                                            ("retrospective check", _retro)) if not present]
+    missing = [label for label, present in (("versions", informed), ("hand data", explorer),
+                                            ("retrospective check", retro_report)) if not present]
     unverified = [label for key, label, present in (("hands", "hand data", explorer), ("compare", "before and after", compare),
-                                                     ("retro", "retrospective check", _retro)) if present and not checks[key]]
-    return best_version, checks, missing, unverified
+                                                     ("retro", "retrospective check", retro_report)) if present and not checks[key]]
+    return best_version, checks, gate_since, missing, retro_current, retro_report, unverified
 
 
 @app.cell
@@ -482,41 +492,48 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
 
 
 @app.cell
-def _(compare, checks, icon, informed, mo, pill, refused, refused_known, section):
-    _guard = sum(1 for r in refused if r.get("stage") == "guard")
-    _gate = sum(1 for r in refused if r.get("stage") != "guard")
+def _(checks, compare, gate_since, icon, informed, mo, names_for, pill, plain_reason, refused, refused_known, section):
+    # only the two judges: what each one checks, who it is, how often it said no, and one real refusal
+    _guard = [r for r in refused if r.get("stage") == "guard"]
+    _gate = [r for r in refused if r.get("stage") != "guard"]
     _kept = sum(1 for v in informed if v.get("kind") == "patch")
     _spend = sum(v.get("spent_usd") or 0 for v in informed if v.get("kind") == "patch")
-    _unknown = "" if refused_known else pill("refusals not recorded")
-    _stages = [
-        ("camera", "", "New gestures", "Hand points, no images", "camera", ""),
-        ("search", " tf-ai", "Diagnosis agent", "Finds the app's most common mistake", "W&B Inference · Qwen3", ""),
-        ("code", " tf-ai", "Patch agent", "Changes a setting to fix it", "Claude Code", ""),
-        ("shield", " tf-ai", "Guard agent", "Refuses changes off topic or against the rules", "W&B Inference",
-         pill(f"{_guard} refused", "bad") if _guard else _unknown),
-        ("scale", " tf-judge", "Referee", "Refuses a change if any gesture drops by 5 points", "metric gate",
-         pill(f"{_gate} refused", "bad") if _gate else _unknown),
-        ("commit", " tf-judge", "Kept", "Goes into the app", "W&B Weave",
-         pill(f"{_kept} kept", "good") if informed else pill("no versions")),
-    ]
-    _cards = "".join(
-        f'<div class="tf-stage{_kind}"><div class="tf-stage-head"><span class="tf-stage-icon">{icon(_icon, 18)}</span>'
-        f'<span class="tf-stage-step">{_k + 1:02d}</span></div><div class="tf-stage-name">{_name}</div>'
-        f'<div class="tf-stage-text">{_text}</div><div class="tf-stage-foot"><span class="tf-stage-tech">{_tech}</span>{_count}</div></div>'
-        for _k, (_icon, _kind, _name, _text, _tech, _count) in enumerate(_stages))
+
+    def _count(items):
+        return pill(f"{len(items)} refused", "bad" if items else "neutral") if refused_known else pill("refusals not recorded")
+
+    def _judge(icon_name, tone, name, who, what, count, example=""):
+        return (f'<div class="tf-card"><div class="tf-judge-head"><span class="tf-judge-icon{tone}">{icon(icon_name, 18)}</span>'
+                f'<div><div class="tf-card-title">{name}</div><div class="tf-quiet">{who}</div></div>'
+                f'<span class="tf-judge-count">{count}</span></div><div class="tf-card-text">{what}</div>'
+                f'{f"<div class=tf-quiet>Real refusal: {example}</div>" if example else ""}</div>')
+
+    _flow = (f'<div class="tf-flow">{pill("The AI proposes a change")}<span class="tf-flow-arrow">→</span>{pill("Judge 1: guard agent")}'
+             f'<span class="tf-flow-arrow">→</span>{pill("Judge 2: referee")}<span class="tf-flow-arrow">→</span>'
+             f'{pill("Kept in the app", "good")}</div>')
+    _judges = (
+        _judge("shield", "", "Guard agent", "Judge 1 · an AI on W&B Inference (Qwen3)",
+               "Reads the mistake the AI found and the change it wrote. Says no if the change does not fix that mistake, "
+               "touches something else, or breaks the loop's safety rules.", _count(_guard))
+        + _judge("scale", " tf-dark", "Referee", "Judge 2 · plain code, no AI",
+                 "Runs the changed app on every practice gesture. Says no unless more gestures are read right and no kind of "
+                 "gesture drops by 5 points" + (f". Since {names_for(informed).get(gate_since['tag'], gate_since['tag'])}, it also "
+                 "says no if the held-back gestures get worse" if gate_since else "") + ".",
+                 _count(_gate), plain_reason(_gate[0].get("reason")) if _gate else "")
+    )
     _a, _b = ((compare or {}).get("a") or {}, (compare or {}).get("b") or {}) if checks["compare"] else ({}, {})
-    _impact = (f'<div class="tf-impact">Impact of the {_kept} kept changes: the app reads <b>{_a["exact_match"] * 100:.0f}</b> → '
+    _impact = (f'<div class="tf-impact">Result: {_kept} changes kept. The app now reads <b>{_a["exact_match"] * 100:.0f}</b> → '
                f'<b>{_b["exact_match"] * 100:.0f}</b> practice gestures out of 100, and <b>{_a["near_contact_accuracy"] * 100:.0f}</b> → '
                f'<b>{_b["near_contact_accuracy"] * 100:.0f}</b> almost-touching ones'
                f'{f", for <b>${_spend:.2f}</b> of AI time" if _spend else ""}.</div>'
                if _a.get("exact_match") is not None and _a.get("near_contact_accuracy") is not None else "")
     mo.vstack([
         section("loop", 2, "How a change is accepted or refused", "Agents propose. <em>Two judges</em> can say no.",
-                "An AI change can raise the average while breaking one gesture a child needs. So nothing reaches the app "
-                "unless two independent checks accept it."),
-        mo.Html(f'<div class="tf"><div class="tf-loop">{_cards}</div><div class="tf-loopback">{icon("loop", 14)}'
-                f'Repeats when new gestures arrive</div>{_impact}</div>'),
-    ])
+                "An AI finds the app's most common mistake and writes a change. A change can raise the average while "
+                "breaking one gesture a child needs, so it reaches the app only if both judges say yes."),
+        mo.Html(f'<div class="tf">{_flow}<div class="tf-judges">{_judges}</div>{_impact}'
+                f'<div class="tf-loopback">{icon("loop", 14)}Runs again whenever new gestures are recorded</div></div>'),
+    ], gap=1)
     return
 
 
@@ -697,9 +714,9 @@ def _(comparable, em, html, informed, mo, pill, plain_change, plain_reason, pts,
 
 
 @app.cell
-def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, icon, informed, math, mo, names_for, pct, pill, pts, retro_summary,
-      section, snap):
-    _retro = snap.get("retrospective_validation") or {}
+def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, gate_since, icon, informed, math, mo, names_for, pct, pill, pts,
+      retro_current, retro_report, retro_summary, section, snap):
+    _retro = retro_report
     _versions = snap.get("retrospective_versions") or ([_retro] if _retro else [])
     _names = names_for(informed)
     _best = snap.get("best_version") or ""
@@ -761,9 +778,13 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, icon, informed, math, mo
                 f'<div class="tf-rung-text">{text}</div>{extra}</div><div class="tf-rung-value">{value}</div></div>')
 
     _practice_gain = (_b["exact_match"] - _a["exact_match"]) if _a.get("exact_match") is not None and _b.get("exact_match") is not None else None
+    _measured_on = _name_of((_retro.get("b") or {}).get("commit")) if _retro else ""
     _retro_pills = ((pill(_rs["badge"]) if _rs else pill("not run"))
-                    + (pill("not verified", "warn") if _retro and not checks["retro"] else ""))
-    _pair = f"Original → {_name_of((_retro.get('b') or {}).get('commit'))}" if _retro else ""
+                    + (pill("not verified", "warn") if _retro and not checks["retro"] else "")
+                    + (pill(f"measured on {_measured_on}, not on the rule in use", "warn") if _retro and not retro_current else ""))
+    _pair = f"Original → {_measured_on}" if _retro else ""
+    _gate_note = (f"<br>Since {_names.get(gate_since['tag'], gate_since['tag'])}, the loop also uses these held-back gestures "
+                  "to accept or refuse changes, so they can no longer check later versions independently." if gate_since else "")
     _method = ((f'<div class="tf-quiet" style="margin-top:10px">Method: these {_retro.get("holds")} gesture holds were set aside after '
                 'earlier development had used the full dataset. Participants are not reliably identified. Evaluation on new users '
                 f'is still needed. ({RETRO_LABEL})</div>') if _retro else "")
@@ -778,7 +799,7 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, icon, informed, math, mo
               else "No verified before and after comparison in this snapshot.",
               pts(_practice_gain) if _practice_gain is not None else ""),
         _rung("partial" if _rs else "next", f"Retrospective evaluation {_retro_pills}",
-              (f"{_pair}: {_rs['a']} → {_rs['b']}, {_rs['gain']} · 95% CI {_rs['ci']}<br>{_rs['text']}"
+              (f"{_pair}: {_rs['a']} → {_rs['b']}, {_rs['gain']} · 95% CI {_rs['ci']}<br>{_rs['text']}{_gate_note}"
                if _rs else "Not in this snapshot."),
               _rs["gain"] if _rs else "",
               (f'<div class="tf-ci">{_ci_svg(_versions)}</div>' if _versions else "") + _method),
@@ -812,7 +833,7 @@ def _(REPO_URL, WEAVE_URL, checks, explorer, icon, informed, mo, snap, snap_sour
     mo.Html(
         f'<div class="tf"><div class="tf-prov">{_prov}<a href="{WEAVE_URL}" target="_blank" rel="noopener">Nimble traces in Weave {icon("link", 12)}</a>'
         f'<a href="{REPO_URL}" target="_blank" rel="noopener">Nimble code {icon("link", 12)}</a></div>'
-        '<div class="tf-closing"><p>The child learns multiplication.<br><em>The app learns to see the child.</em></p></div></div>'
+        '<div class="tf-closing"><p>The child learns multiplication.<br><em>The app learns to read the child\'s hands.</em></p></div></div>'
     )
     return
 

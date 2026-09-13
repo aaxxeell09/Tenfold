@@ -100,7 +100,9 @@ recover frames where MediaPipe lost a hand.
 evaluated before it existed). Any metric can be null.
 
 Every `informed` row also carries `rules_sha256` (classifier/rules.py at the row's commit) and `scorers`
-(`{"sha256", "source"}`: recorded with the metrics, or eval/scorers.py at the row's commit). `explorer.compare` carries
+(`{"sha256", "source"}`: recorded with the metrics, or eval/scorers.py at the row's commit), and `hidden_gate`
+(`{"validation"|"live": {"exact_match", "n_holds", "n_samples"}}` or null) when the loop scored its hidden sets for that
+version; the next accepted patch was selected on them. `explorer.compare` carries
 `data_sha`, `scorers_sha256` and `rules_sha256` for `a` and `b`. The dashboard compares two scores only when data and
 scorers are both identified and equal, and says "not verified" otherwise.
 
