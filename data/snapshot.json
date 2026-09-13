@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-13T19:14:04+00:00",
-  "best_version": "97bd6c1fa02ce51248e4eeb778887ff06ab5106c",
+  "generated_at": "2026-09-13T20:01:43+00:00",
+  "best_version": "8577743a22c0f92daf1e48f2884c04c6723008a6",
   "informed": [
     {
       "tag": "v0",
@@ -1376,7 +1376,7 @@
     {
       "tag": "v11",
       "version": 11,
-      "sha": "97bd6c1fa02ce51248e4eeb778887ff06ab5106c",
+      "sha": "8577743a22c0f92daf1e48f2884c04c6723008a6",
       "ts": "2026-09-13T19:14:02+00:00",
       "kind": "patch",
       "data": {
@@ -1479,9 +1479,9 @@
           "n_samples": 125
         },
         "live": {
-          "exact_match": 0.9879518072289156,
-          "n_holds": 83,
-          "n_samples": 628
+          "exact_match": 0.9867256637168141,
+          "n_holds": 113,
+          "n_samples": 865
         }
       },
       "rules_sha256": "a115d369f065e28f7e9f599efadabc31a11a1c9cfe6701e532f67f188033e93c",
@@ -1507,6 +1507,13 @@
       "ts": "2026-09-13T19:09:08+00:00",
       "reason": "hidden gate: live",
       "patch": "Narrowed the FAR_APART_THRESHOLD exception from \"thumb or pinky present\" to \"pinky present\" (`pinky_involved = lf == 10 or rf == 10`), confirmed near:10x8 (reaching 0.46-0.49) still needs the exception while thumb-only pairs no longer get an unwarranted pass."
+    },
+    {
+      "arm": "informed",
+      "iteration": 1,
+      "ts": "2026-09-13T19:39:53+00:00",
+      "reason": "no improvement: exact_match stayed 0.588 (strict improvement required)",
+      "patch": "edit left by a session that ran out of turns"
     }
   ],
   "refused": [
@@ -1534,11 +1541,16 @@
       "stage": "gate",
       "ts": "2026-09-13T01:03:20+00:00",
       "reason": "class near:6x10 fell 0.11 -> 0.00 (limit 5 points), 1 class(es) regressed"
+    },
+    {
+      "stage": "gate",
+      "ts": "2026-09-13T19:39:53+00:00",
+      "reason": "no improvement: exact_match stayed 0.588 (strict improvement required)"
     }
   ],
   "critic_commits": [
     {
-      "sha": "97bd6c1fa02ce51248e4eeb778887ff06ab5106c",
+      "sha": "8577743a22c0f92daf1e48f2884c04c6723008a6",
       "date": "2026-09-13T12:13:50-07:00",
       "subject": "critic v11: The failure family that costs the most failed holds is transition, with 78 failed holds, followed by out_of_frame and ne | patch: Narrowed the FAR_APART exemption to require the two paired fingers be different (lf != rf), so same-finger far-apart pai | expected: out_of_frame and other negative-kind samples with degenerate same-finger far pairs should now correctly resolve to unkno"
     },
@@ -1773,7 +1785,7 @@
         "near_contact_accuracy": 0.40277777777777773
       },
       "b": {
-        "commit": "97bd6c1fa02ce51248e4eeb778887ff06ab5106c",
+        "commit": "8577743a22c0f92daf1e48f2884c04c6723008a6",
         "rules_sha256": "a115d369f065e28f7e9f599efadabc31a11a1c9cfe6701e532f67f188033e93c",
         "constants": {
           "CONTACT_THRESHOLD": 0.2826,
