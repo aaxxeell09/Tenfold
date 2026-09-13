@@ -108,11 +108,44 @@ def git_sha(path: Path) -> str:
         return "none"
 
 
+def failures_by_class(rows: list[dict]) -> dict[str, dict]:
+    """Failed windows and failed holds per failing class, the class costing the most holds first. A hold fails when
+    half or fewer of its windows match. Negatives (transition, out_of_frame...) are classes like any other."""
+    table: dict[str, dict] = {}
+    holds: dict[str, dict[str, list[bool]]] = {}
+    for r in rows:
+        c = scorers.class_of(r["target"], r["kind"])
+        ok = scorers.exact_match(r["output"], r["target"])
+        t = table.setdefault(c, {"failed_windows": 0, "windows": 0})
+        t["windows"] += 1
+        t["failed_windows"] += 0 if ok else 1
+        holds.setdefault(c, {}).setdefault(str(r["hold_id"]), []).append(ok)
+    for c, t in table.items():
+        t["failed_holds"] = sum(1 for h in holds[c].values() if sum(h) * 2 <= len(h))
+        t["holds"] = len(holds[c])
+    failing = [(c, t) for c, t in table.items() if t["failed_windows"]]
+    return dict(sorted(failing, key=lambda kv: (-kv[1]["failed_holds"], -kv[1]["failed_windows"], kv[0])))
+
+
+def failure_order(rows: list[dict]) -> list[dict]:
+    """Failed rows taken from each failing class in turn, in failures_by_class order, so a short list shows every
+    failure family instead of the first ids of the positives."""
+    queues = {c: [] for c in failures_by_class(rows)}
+    for r in sorted(rows, key=lambda r: r["id"]):
+        if not scorers.exact_match(r["output"], r["target"]):
+            queues[scorers.class_of(r["target"], r["kind"])].append(r)
+    ordered: list[dict] = []
+    while any(queues.values()):
+        for q in queues.values():
+            if q:
+                ordered.append(q.pop(0))
+    return ordered
+
+
 def worst_samples(samples: list[dict], rows: list[dict], k: int = 10) -> list[dict]:
     """The failed samples the critic gets to see: predicted vs expected and fingertip distances, no arrays."""
     by_id = {s["id"]: s for s in samples}
-    failed = [r for r in rows if not scorers.exact_match(r["output"], r["target"])]
-    failed.sort(key=lambda r: (r.get("kind") != "positive", r["id"]))
+    failed = failure_order(rows)
     report = []
     for r in failed[:k]:
         s = by_id[r["id"]]
@@ -254,6 +287,7 @@ def main() -> int:
             "tag": args.tag, "git_sha": sha,
             "success_metric": "exact_match must go up, false_unknown_rate must not rise, no class or capture condition may fall",
             "metrics": {k: v for k, v in metrics.items()},
+            "failures_by_class": failures_by_class(rows),
             "worst_samples": worst_samples(samples, rows),
             "errors": [{"id": r["id"], "error": r["error"]} for r in rows if r.get("error")][:10],
         }, indent=2))
