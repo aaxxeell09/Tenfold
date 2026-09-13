@@ -23,15 +23,27 @@ The model never invents the lesson: it gets the moment and Tally's own line for 
 words (build_messages). Model calls are traced in Weave (op `tutor.call`, project tenfold) with the line, the served
 model, token usage and latency, when WANDB_API_KEY comes from the environment. TENFOLD_TUTOR=0 switches the model off
 and keeps Tally's phrases, for a stage with no network.
+
+Live scoring. Every traced tutor.call gets lesson/tutor_rules.py applied to it with Weave's own Call.apply_scorer, so
+the score is feedback on that call (type wandb.runnable.tutor_rules_v2), not a field of its output. What happened to
+the line afterwards is a second feedback on the same call, type tutor_delivery (DELIVERY_NOTES). Both go through one
+bounded queue and one daemon thread (ScoreQueue): nothing on the frame loop waits on Weave, a full queue drops and
+counts, and a Weave that is missing or down costs the lesson nothing. tutor.call records only the event, the
+exercise, the expected correction, the typed answer on an answer moment and the model (trace_context), never the
+child's name or what the camera detected.
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import queue
 import threading
 import time
 from typing import Any, Callable, Optional
 
 import httpx
+
+from lesson import tutor_rules
 
 DEFAULT_BASE_URL = "https://api.inference.wandb.ai/v1"
 DEFAULT_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
@@ -55,10 +67,25 @@ SYSTEM = ("You are Tally, a warm math tutor for a 7 year old learning finger mul
           "finger to move and where to move it when the pose is off. Never reveal the result of the multiplication "
           "before the child types it. Reply with the words Tally says and nothing else: no quotes, no emoji.")
 
-_WEAVE = {"tried": False, "op": None}
+_WEAVE: dict[str, Any] = {"tried": False, "op": None, "scorer": None}
 RETRY_S = 15.0      # after a failed model call, the same moment is not retried for this long
 PAUSE_AFTER = 3     # consecutive failures before all model calls pause
 PAUSE_S = 30.0      # length of that pause; Tally's phrases keep the experience going meanwhile
+SCORE_QUEUE_MAX = 32  # scores and delivery notes waiting for Weave; past this they are dropped and counted
+
+DELIVERY_FEEDBACK = "tutor_delivery"
+# What a tutor_delivery note can say. None of them claims the page received the line or that it was spoken: this
+# module never sees an acknowledgement for either.
+DELIVERY_NOTES: dict[str, str] = {
+    "handed_to_server": "Tutor.phrase returned this line to its caller for a state message; page receipt and speech "
+                        "are not observed here",
+    "handed_to_callback": "on_phrase received this line; page receipt and speech are not observed here",
+    "late_held": "arrived after the timeout, not shown in its moment; kept for the next time the moment happens",
+    "moment_ended_unserved": "the moment changed before this line was returned; kept in case the moment comes back",
+    "dropped_late": "arrived after the timeout; on_phrase never received it",
+    "generation_failed": "the model call raised; Tally's canonical line stayed",
+    "generation_empty": "the model said nothing usable; Tally's canonical line stayed",
+}
 
 
 def default_fallback(event: str, ctx: dict[str, Any]) -> str:
@@ -90,11 +117,36 @@ def _plain_hint(hint: Any) -> Optional[dict[str, Any]]:
     return {name: getattr(hint, name, None) for name in ("hand", "move_from", "move_to")}
 
 
+def trace_context(event: str, ctx: dict[str, Any]) -> dict[str, Any]:
+    """What Weave keeps of a moment: the exercise, the expected correction, and the typed answer on an answer moment.
+    Never the child's name, the detected fingers or anything else the caller put in the context."""
+    out: dict[str, Any] = {"exercise": ctx.get("exercise") or None}
+    hint = _plain_hint(ctx.get("hint"))
+    if hint and any(hint.get(k) is not None for k in ("hand", "move_from", "move_to")):
+        out["hint"] = {k: hint.get(k) for k in ("hand", "move_from", "move_to")}
+    operands = ctx.get("operands")
+    if isinstance(operands, (list, tuple)) and len(operands) == 2 and all(isinstance(v, int) for v in operands):
+        out["operands"] = list(operands)
+    if str(event).startswith("answer") and ctx.get("answer") is not None:
+        out["answer"] = ctx.get("answer")
+    return out
+
+
+def _record_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
+    """postprocess_inputs of tutor.call: the model still gets the full context, Weave records trace_context."""
+    event = str(inputs.get("event") or "")
+    context = inputs.get("context")
+    return {"event": event, "context": trace_context(event, dict(context) if isinstance(context, dict) else {}),
+            "model": inputs.get("model")}
+
+
 class Line(str):
-    """The model's words for one moment, carrying the served model, token usage and latency of the call."""
+    """The model's words for one moment, carrying the served model, token usage and latency of the call, and the
+    Weave call that produced it when it was traced."""
     model: Optional[str] = None
     usage: Optional[dict] = None
     latency_ms: Optional[int] = None
+    call: Any = None
 
 
 def build_messages(event: str, ctx: dict[str, Any], line: str) -> list[dict[str, str]]:
@@ -129,6 +181,48 @@ def as_record(text: str) -> dict[str, Any]:
             "latency_ms": getattr(text, "latency_ms", None)}
 
 
+class ScoreQueue:
+    """One daemon thread and a bounded queue between the tutor and Weave. Nothing that renders, speaks or reads the
+    camera waits on it: submit never blocks, a full queue drops the job and counts it, a job that raises is counted."""
+
+    def __init__(self, maxsize: int = SCORE_QUEUE_MAX):
+        self._jobs: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._thread: Optional[threading.Thread] = None
+        self._start = threading.Lock()
+        self.stats = {"scored": 0, "notes": 0, "dropped": 0, "errors": 0}
+
+    def submit(self, job: Callable[[], None]) -> bool:
+        with self._start:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name="tutor-scoring", daemon=True)
+                self._thread.start()
+        try:
+            self._jobs.put_nowait(job)
+            return True
+        except queue.Full:
+            self.stats["dropped"] += 1
+            return False
+
+    def _run(self) -> None:
+        while True:
+            job = self._jobs.get()
+            try:
+                job()
+            except Exception:
+                self.stats["errors"] += 1
+            finally:
+                self._jobs.task_done()
+
+    def wait(self, timeout: float = 5.0) -> bool:
+        """True once every submitted job has run, for tests and eval/tutor_live_check.py."""
+        end = time.monotonic() + timeout
+        while self._jobs.unfinished_tasks:
+            if time.monotonic() > end:
+                return False
+            time.sleep(0.01)
+        return True
+
+
 class Tutor:
     def __init__(self, fallback: Optional[Callable[..., str]] = None, timeout: float = 1.5,
                  model: Optional[str] = None, base_url: Optional[str] = None, api_key: Optional[str] = None,
@@ -144,6 +238,7 @@ class Tutor:
         self.trace = trace if trace is not None else (api_key is None and self.enabled and os.environ.get("TENFOLD_TRACE", "1") != "0")
         self.cache: dict[tuple, str] = {}
         self.stats = {"calls": 0, "hits": 0, "late": 0, "errors": 0}
+        self.scoring = ScoreQueue()
         self._lock = threading.Lock()
         self._inflight: set[tuple] = set()
         self._episode_key: Optional[tuple] = None
@@ -194,17 +289,74 @@ class Tutor:
                 ent = os.environ.get("WANDB_ENTITY")
                 weave.init(f"{ent}/tenfold" if ent else "tenfold")
                 _WEAVE["op"] = weave.op
+                _WEAVE["scorer"] = weave.op(name=tutor_rules.SCORER_OP)(tutor_rules.score_output)
             except Exception:
-                _WEAVE["op"] = None
+                _WEAVE["op"], _WEAVE["scorer"] = None, None
         if self.trace and _WEAVE["op"] is not None and getattr(self, "_op", None) is None:
             # one op per instance, so a second Tutor never runs with the first one's key or model
-            self._op = _WEAVE["op"](name="tutor.call")(lambda event, context, model: as_record(self._call(event, context)))
-        if self.trace and getattr(self, "_op", None) is not None:
-            # the op must hand _call the same correction as the untraced path, so the hint stays a mapping
-            context = {**ctx, "hint": _plain_hint(ctx["hint"])} if "hint" in ctx else dict(ctx)
-            out = self._op(event, context, self.model)
+            try:
+                self._op = _WEAVE["op"](name="tutor.call", postprocess_inputs=_record_inputs)(
+                    lambda event, context, model: as_record(self._call(event, context)))
+            except Exception:
+                self.trace = False  # a Weave that cannot build the op leaves the model untraced, never silent
+        op = getattr(self, "_op", None) if self.trace else None
+        if op is None:
+            return self._call(event, ctx)
+        # the op must hand _call the same correction as the untraced path, so the hint stays a mapping
+        context = {**ctx, "hint": _plain_hint(ctx["hint"])} if "hint" in ctx else dict(ctx)
+        with_call = getattr(op, "call", None)
+        if with_call is None:
+            out = op(event, context, self.model)
             return out["text"] if isinstance(out, dict) else out
-        return self._call(event, ctx)
+        out, call = with_call(event, context, self.model)   # Op.call never raises: a failure is on call.exception
+        if getattr(call, "exception", None) is not None or not isinstance(out, dict):
+            self._note(call, "generation_failed")
+            raise RuntimeError("tutor.call failed")
+        line = Line(out.get("text") or "")
+        line.model, line.usage, line.latency_ms, line.call = out.get("model"), out.get("usage"), out.get("latency_ms"), call
+        self._score(call, event, context)
+        if not line:
+            self._note_line(line, "generation_empty")
+        return line
+
+    # ---------- live scoring, off the frame loop ----------
+    def _score(self, call: Any, event: str, context: dict[str, Any]) -> None:
+        """Attach tutor_rules to the tutor.call that produced the line, with Weave's Call.apply_scorer."""
+        scorer = _WEAVE.get("scorer")
+        if scorer is None or call is None or not hasattr(call, "apply_scorer"):
+            return
+        kwargs = {"event": event, "context": trace_context(event, context), "timeout_ms": int(self.timeout * 1000)}
+
+        def job() -> None:
+            asyncio.run(call.apply_scorer(scorer, additional_scorer_kwargs=kwargs))
+            self.scoring.stats["scored"] += 1
+
+        self.scoring.submit(job)
+
+    def _note(self, call: Any, status: str) -> None:
+        """One tutor_delivery feedback on a tutor.call."""
+        if call is None or not hasattr(call, "feedback"):
+            return
+        payload = {"status": status, "detail": DELIVERY_NOTES[status], "source": "model",
+                   "scorer_version": tutor_rules.SCORER_VERSION}
+
+        def job() -> None:
+            call.feedback.add(DELIVERY_FEEDBACK, payload)
+            self.scoring.stats["notes"] += 1
+
+        self.scoring.submit(job)
+
+    def _note_line(self, line: Any, status: str) -> bool:
+        """_note once per status for a line that came from a traced call. False when nothing was noted."""
+        call = getattr(line, "call", None)
+        if call is None:
+            return False
+        noted = line.__dict__.setdefault("noted", set())
+        if status in noted:
+            return False
+        noted.add(status)
+        self._note(call, status)
+        return True
 
     # ---------- drop-in for tally.phrase ----------
     def _moment_key(self, event: str, ctx: dict[str, Any]) -> tuple:
@@ -221,11 +373,15 @@ class Tutor:
         key = self._moment_key(event, ctx)
         with self._lock:
             if key != self._episode_key:
+                ended = self.cache.get(self._episode_key) if self._episode_key is not None else None
+                if ended is not None and "handed_to_server" not in getattr(ended, "__dict__", {}).get("noted", ()):
+                    self._note_line(ended, "moment_ended_unserved")
                 self._episode_key = key
                 self._blocked.clear()
             cached = self.cache.get(key)
             if cached is not None and key not in self._blocked:
                 self.stats["hits"] += 1
+                self._note_line(cached, "handed_to_server")
                 return cached
             if cached is not None or key in self._inflight or self._backing_off(key):
                 return fb
@@ -248,6 +404,9 @@ class Tutor:
                     self.stats["late"] += 1
                     if self._episode_key == key:
                         self._blocked.add(key)
+                    self._note_line(text, "late_held")
+                elif self._episode_key != key:
+                    self._note_line(text, "moment_ended_unserved")
 
         threading.Thread(target=worker, daemon=True).start()
         return fb
@@ -266,6 +425,7 @@ class Tutor:
         if cached:
             self.stats["hits"] += 1
             on_phrase(cached, state_id, "model")
+            self._note_line(cached, "handed_to_callback")
             return cached
         with self._lock:
             if not self.enabled or self._backing_off(key):
@@ -285,8 +445,10 @@ class Tutor:
                 self.cache[key] = text
             if time.monotonic() - t0 <= self.timeout:
                 on_phrase(text, state_id, "model")
+                self._note_line(text, "handed_to_callback")
             else:
                 self.stats["late"] += 1
+                self._note_line(text, "dropped_late")
 
         threading.Thread(target=worker, daemon=True).start()
         return fb

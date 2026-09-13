@@ -156,7 +156,7 @@ def test_injected_key_never_traces():
 
 
 def test_traced_op_is_per_instance(monkeypatch):
-    fake = types.SimpleNamespace(init=lambda project: None, op=lambda name: (lambda fn: fn))
+    fake = types.SimpleNamespace(init=lambda project: None, op=lambda name, **kw: (lambda fn: fn))
     monkeypatch.setitem(sys.modules, "weave", fake)
     monkeypatch.setattr(tmod, "_WEAVE", {"tried": False, "op": None})
     a = tmod.Tutor(api_key="ka", trace=True)
@@ -230,7 +230,7 @@ def _fake_http(monkeypatch, sent, fail=False):
 
 
 def _fake_weave(monkeypatch, recorded):
-    def op(name):
+    def op(name, **kw):
         def wrap(fn):
             def traced(event, context, model):
                 recorded.append(context)
