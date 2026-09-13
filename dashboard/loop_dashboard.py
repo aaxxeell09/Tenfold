@@ -161,16 +161,38 @@ def _(datetime, mo, re):
         m = re.search(r"([A-Z_]{4,}) from ([0-9.]+) to ([0-9.]+)", (patch or "").replace("`", ""))
         return (m.group(1), float(m.group(2)), float(m.group(3))) if m else None
 
-    def plain_change(patch):
-        """The setting that moved, with its values."""
+    # code changes recognised from the lines a patch adds to classifier/rules.py, most specific first:
+    # (pattern, what it means for a child, short label for the history)
+    CODE_CHANGES = (
+        (r"^\+\s*def tip_motion\b",
+         "The app waits while the fingers are still moving into shape, unless the camera tracking is too shaky to tell",
+         "waits while the fingers are still moving into shape"),
+        (r"^\+\s*def wrist_motion\b", "The app waits while the hands are still moving from one gesture to the next",
+         "waits while the hands are still moving"),
+        (r"^\+\s*AMBIGUITY_MARGIN\s*=",
+         "When two finger pairs look almost tied, the app checks the whole short clip instead of one shaky frame",
+         "checks the whole clip when one frame is a coin flip"),
+    )
+
+    def _code_change(diff):
+        for pattern, effect, short in CODE_CHANGES:
+            if re.search(pattern, diff or "", re.M):
+                return effect, short
+        return None
+
+    def plain_change(patch, diff=""):
+        """A short label: the setting that moved with its values, or what a code change does."""
         s = _setting(patch)
         if s:
             names = {"CONTACT_THRESHOLD": "touch limit", "UNKNOWN_THRESHOLD": "confidence needed"}
             return f"{names.get(s[0], s[0].lower())} {s[1]:g} → {s[2]:g}"
+        code = _code_change(diff)
+        if code:
+            return code[1]
         text = " ".join((patch or "").split())
         return text if len(text) <= 70 else text[:69] + "…"
 
-    def plain_effect(patch):
+    def plain_effect(patch, diff=""):
         """What the change means for a child in front of the camera."""
         s = _setting(patch)
         if s and s[0] == "CONTACT_THRESHOLD":
@@ -179,7 +201,14 @@ def _(datetime, mo, re):
         if s and s[0] == "UNKNOWN_THRESHOLD":
             return ("The app answers only when it sees both hands clearly" if s[2] > s[1]
                     else "The app answers even when it sees the hands less clearly")
-        return plain_change(patch)
+        code = _code_change(diff)
+        return code[0] if code else plain_change(patch, diff)
+
+    def technical(patch, diff=""):
+        """The one line under the plain sentence: the setting values, or that the rule gained a new check."""
+        if _setting(patch):
+            return plain_change(patch, diff)
+        return "a new check added to the rule's code" if _code_change(diff) else ""
 
     def plain_reason(why):
         why = why or ""
@@ -282,7 +311,7 @@ def _(datetime, mo, re):
                 "a_100": "n/a" if ea is None else f"{ea * 100:.0f}", "b_100": "n/a" if eb is None else f"{eb * 100:.0f}"}
 
     return (RETRO_LABEL, basis, comparable, em, kicker, limits, names_for, pct, pill, plain_change, plain_class,
-            plain_effect, plain_reason, pts, retro_summary, said, same_pose, section, steps, when)
+            plain_effect, plain_reason, pts, retro_summary, said, same_pose, section, steps, technical, when)
 
 
 @app.cell
@@ -637,8 +666,8 @@ def _(get_selected, informed, mo, set_selected, version_names):
 
 
 @app.cell
-def _(comparable, em, get_selected, html, informed, mo, pct, pill, plain_change, plain_class, plain_effect, plain_reason,
-      pts, version_menu, version_names):
+def _(comparable, em, get_selected, html, informed, mo, pct, pill, plain_class, plain_effect, plain_reason, pts, technical,
+      version_menu, version_names):
     _tag = get_selected()
     _i = next((i for i, v in enumerate(informed) if v["tag"] == _tag), len(informed) - 1)
     if not informed:
@@ -659,8 +688,8 @@ def _(comparable, em, get_selected, html, informed, mo, pct, pill, plain_change,
         if _v.get("kind") == "patch":
             _delta = (em(_v.get("train")) - em(_prev.get("train"))) if _ok and em(_v.get("train")) is not None and em(_prev.get("train")) is not None else None
             _cards = (
-                f'<div class="tf-card"><span class="tf-label">What changed</span><div class="tf-card-title">{html.escape(plain_effect(_v.get("patch")))}</div>'
-                f'<div class="tf-quiet">{html.escape(plain_change(_v.get("patch")))}</div></div>'
+                f'<div class="tf-card"><span class="tf-label">What changed</span><div class="tf-card-title">{html.escape(plain_effect(_v.get("patch"), _v.get("diff")))}</div>'
+                f'<div class="tf-quiet">{html.escape(technical(_v.get("patch"), _v.get("diff")))}</div></div>'
                 f'<div class="tf-card"><span class="tf-label">Effect</span>'
                 + (f'<div class="tf-big">{pts(_delta)}</div><div class="tf-quiet">gestures read right, {pct(em(_prev.get("train")))} → {pct(em(_v.get("train")))}</div>'
                    f'<div class="tf-moves">{_moves_html}</div>' if _delta is not None else '<div class="tf-card-text">comparison not verified</div>')
@@ -703,7 +732,7 @@ def _(comparable, em, html, informed, mo, pill, plain_change, plain_reason, pts,
         if _kind == "patch":
             _ok = comparable(_previous, _v) and em(_v.get("train")) is not None and em(_previous.get("train")) is not None
             _events.append((str(_v.get("ts") or ""), 1, pill("Kept", "good"),
-                            f"{version_names.get(_v['tag'], _v['tag'])}: {html.escape(plain_change(_v.get('patch')))}",
+                            f"{version_names.get(_v['tag'], _v['tag'])}: {html.escape(plain_change(_v.get('patch'), _v.get('diff')))}",
                             pts(em(_v.get("train")) - em(_previous.get("train"))) if _ok else "not verified"))
         elif _kind == "data_refresh":
             _events.append((str(_v.get("ts") or ""), 1, pill("Data", "accent"), "20% of recordings set aside for the retrospective evaluation", ""))
