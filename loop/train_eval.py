@@ -49,6 +49,15 @@ def numeric_constants(mod) -> dict[str, float]:
             if CONSTANT.fullmatch(k) and isinstance(v, (int, float)) and not isinstance(v, bool)}
 
 
+def neighbours(value: float) -> list[float]:
+    """Values tried around a constant by --sweep-all: +-1 and +-2 for integers, 0.5x to 1.4x for floats."""
+    if isinstance(value, int):
+        return [v for v in (value - 2, value - 1, value + 1, value + 2) if v >= 0 or value < 0]
+    if value == 0:
+        return [0.05, 0.1, 0.2]
+    return sorted({round(value * f, 4) for f in (0.5, 0.6, 0.7, 0.8, 0.85, 0.9, 0.95, 1.05, 1.1, 1.2, 1.4)})
+
+
 def parse_assignment(text: str, mod) -> tuple[str, list[float]]:
     """NAME=V or NAME=V1,V2,... -> (NAME, values). Exits with a usable message on anything else."""
     name, sep, raw = text.partition("=")
@@ -111,6 +120,8 @@ def main() -> int:
     ap.add_argument("--set", dest="sets", action="append", default=[], metavar="NAME=VALUE",
                     help="override a numeric constant of rules.py for this run (repeatable)")
     ap.add_argument("--sweep", metavar="NAME=V1,V2,...", help="evaluate several values of one constant, one line each")
+    ap.add_argument("--sweep-all", action="store_true",
+                    help="try every numeric constant of rules.py around its value, one line each, and name the best passing one")
     a = ap.parse_args()
     data = ROOT / "data" / "train.jsonl"
     if not data.exists():
@@ -126,6 +137,31 @@ def main() -> int:
             accepted = json.loads(report.read_text())["metrics"]
         except (KeyError, ValueError):
             accepted = None
+
+    if a.sweep_all:
+        base = accepted
+        if base is None:
+            base, _ = evaluate(mod.classify, samples)
+        against = "the last accepted version" if accepted is not None else "the file as it stands"
+        print(f"train: {len(samples)} samples; every numeric constant of rules.py tried around its value; "
+              f"gate = the metric gate's verdict against {against} (exact_match {fmt(base['exact_match'])})")
+        passing: list[tuple[float, str, float]] = []
+        for name, value in numeric_constants(mod).items():
+            for v in neighbours(value):
+                setattr(mod, name, v)
+                m, _ = evaluate(mod.classify, samples)
+                ok, why = gate.check(base, m)
+                print(f"  {name}={v}  exact_match={fmt(m['exact_match'])}  false_unknown_rate={fmt(m.get('false_unknown_rate'))}"
+                      f"  gate: {'PASS' if ok else 'FAIL ' + why}")
+                if ok:
+                    passing.append((m["exact_match"], name, v))
+            setattr(mod, name, value)
+        if passing:
+            em, name, v = max(passing)
+            print(f"best passing single change: {name}={v} (exact_match {fmt(em)})")
+        else:
+            print("no single constant change passes the gate: the fix needs new logic")
+        return 0
 
     if a.sweep:
         name, values = parse_assignment(a.sweep, mod)

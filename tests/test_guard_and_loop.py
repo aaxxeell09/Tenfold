@@ -424,6 +424,19 @@ def test_train_eval_gives_the_gate_verdict_against_the_last_accepted_version(tmp
     assert "against the last accepted version" in sweep.stdout and sweep.stdout.rstrip().endswith("gate: PASS"), sweep.stdout
 
 
+def test_sweep_all_names_the_best_passing_constant(tmp_path):
+    repo = make_repo(tmp_path)
+    before = (repo / "classifier" / "rules.py").read_text()
+    p = _train_eval(repo, "--sweep-all")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "  UNKNOWN_THRESHOLD=" in p.stdout and "  CONTACT_THRESHOLD=" in p.stdout  # every numeric constant is tried
+    best = [l for l in p.stdout.splitlines() if l.startswith("best passing single change: ")]
+    assert len(best) == 1, p.stdout
+    name_value = best[0].split(": ", 1)[1].split(" ")[0]
+    assert f"  {name_value}  " in p.stdout and p.stdout.split(f"  {name_value}  ", 1)[1].split("\n", 1)[0].endswith("gate: PASS")
+    assert (repo / "classifier" / "rules.py").read_text() == before
+
+
 def test_train_eval_sweep_scores_each_value_without_touching_rules(tmp_path):
     repo = make_repo(tmp_path)
     before = (repo / "classifier" / "rules.py").read_text()

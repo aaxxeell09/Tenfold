@@ -44,7 +44,11 @@ PATCH_TOOLS = PATCH_TOOLS_BLIND + ",Bash(python loop/train_eval.py),Bash(python 
 DIAG_TOOLS = "Read,mcp__wandb__*"
 # never useful to the critic; disallowing them stops the agent from burning turns on denied attempts
 DISALLOWED = "Write,Task,WebSearch,WebFetch,NotebookEdit,Skill,EnterPlanMode,Agent,Workflow"
-TOOLS_NOTE = ("To test your hypothesis before and after the edit, run `python loop/train_eval.py` (train set only: "
+TOOLS_NOTE = ("Start with `python loop/train_eval.py --sweep-all`: one call tries every numeric constant of rules.py "
+              "around its value, each with the metric gate's verdict, and names the best passing change. If one "
+              "passes, that single edit is usually the patch; build new logic only when none passes or the failure "
+              "you measured is out of every constant's reach. "
+              "To test your hypothesis before and after the edit, run `python loop/train_eval.py` (train set only: "
               "metrics, worst classes, failing samples with per-frame nearest pairs, and the metric gate's verdict "
               "against the last accepted version; `--class 7x8` to focus). To try several values of a constant, "
               "sweep them in one call instead of editing and re-running per value: "

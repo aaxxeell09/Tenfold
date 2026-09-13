@@ -37,7 +37,8 @@ What happens inside `loop/critic.py`:
    writes one diagnosis and one hypothesis.
 3. Patch agent: edits `rules.py` only, may run `python loop/train_eval.py` (train metrics and failing samples,
    before and after its edit; `--sweep NAME=v1,v2,...` scores several values of a constant in one call, each with the metric gate's
-   verdict from `loop/gate.py`, the same code the critic decides with),
+   verdict from `loop/gate.py`, the same code the critic decides with; it starts with `--sweep-all`, every
+   numeric constant tried around its value, before building new logic),
    `python loop/guard.py --check` and `python loop/smoke.py`. The diagnosis is a guess made without running
    anything, so the patch agent may fix the named failures with another mechanism, or, when measurement
    refutes the diagnosis, fix the failure it measured instead; either way it states its hypothesis with the
