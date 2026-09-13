@@ -88,6 +88,49 @@ def test_wrong_pose_names_the_finger_to_move():
     assert update.hint == {"hand": "right", "move_from": 9, "move_to": 7}
 
 
+def test_a_new_wrong_pose_replaces_the_stale_correction():
+    """8 x 7 held as (8, 9), then as (9, 7). Both are "wrong", but the right hand is
+    fixed and the left one moved: the advice has to follow the pose on screen now,
+    once it has settled, not the one that was named first."""
+    e = fresh()
+    first = settle(e, g(8, 9, False))
+    assert first.event == eng.EVENT_WRONG_RIGHT
+    assert first.hint == {"hand": "right", "move_from": 9, "move_to": 7}
+
+    moved = g(9, 7, False)
+    assert e.observe(moved, 1.0) is None, "the new pose has to settle first"
+    assert e.observe(moved, 1.0 + eng.DEBOUNCE_S - 0.01) is None
+    update = e.observe(moved, 1.0 + eng.DEBOUNCE_S)
+    assert update is not None, "the stale correction was kept"
+    assert update.state == eng.STATE_WRONG_POSE
+    assert update.event == eng.EVENT_WRONG_LEFT
+    assert update.hint == {"hand": "left", "move_from": 9, "move_to": 8}
+    assert [f.as_dict() for f in update.wrong] == [{"hand": "left", "number": 9}]
+    assert [f.as_dict() for f in update.match] == [{"hand": "right", "number": 7}]
+    assert e.snapshot().hint == update.hint
+    assert e.observe(moved, 5.0) is None, "and it is said once"
+
+
+def test_one_frame_of_another_wrong_pose_keeps_the_correction():
+    e = fresh()
+    wrong = g(8, 9, False)
+    settle(e, wrong)
+    assert e.observe(g(9, 7, False), 0.4) is None
+    assert e.observe(wrong, 0.45) is None
+    assert e.observe(wrong, 1.0) is None, "the flicker never settled"
+    assert e.snapshot().hint == {"hand": "right", "move_from": 9, "move_to": 7}
+
+
+def test_the_same_wrong_finger_moved_elsewhere_is_named_again():
+    """(8, 9) then (8, 10): same hand, but "from 9" is no longer what the child sees."""
+    e = fresh()
+    settle(e, g(8, 9, False))
+    update = settle(e, g(8, 10, False), t0=1.0)
+    assert update is not None
+    assert update.event == eng.EVENT_WRONG_RIGHT
+    assert update.hint == {"hand": "right", "move_from": 10, "move_to": 7}
+
+
 def test_correct_pose_clears_the_wrong_fingers_and_shows_the_reasoning():
     update = settle(fresh(), g(8, 7, True))
     assert update.wrong == ()

@@ -12,7 +12,9 @@ that moment "swap your hands" is better advice than naming two fingers to move.
 Touching as is still gives correct_pose.
 
 An event is only emitted once its condition has held for the debounce window, so
-one flickering frame never moves the lesson.
+one flickering frame never moves the lesson. What has to hold is what the screen
+shows, the condition together with the fingers it names: two different wrong
+poses are both "wrong", and the advice for the first one is stale on the second.
 """
 
 from __future__ import annotations
@@ -156,6 +158,17 @@ def _scored(gesture: GestureState, exercise: Exercise) -> tuple[tuple[Finger, ..
     return tuple(wrong), tuple(match), hint
 
 
+def _view(gesture: GestureState, exercise: Exercise,
+          condition: str) -> tuple[tuple[Finger, ...], tuple[Finger, ...], dict]:
+    """What the screen paints for this condition: wrong fingers, placed fingers, hint."""
+    if condition == COND_UNKNOWN:
+        return (), (), {}
+    wrong, match, hint = _scored(gesture, exercise)
+    if condition == COND_CORRECT:
+        return (), match, {}
+    return wrong, match, hint
+
+
 class Engine:
     """One lesson. Feed it gestures, ask it for the next exercise, check answers."""
 
@@ -177,8 +190,9 @@ class Engine:
         self._reasoning: tuple[str, ...] = ()
         self._hint: dict[str, object] = {}
         self._event: str | None = None
-        self._committed = ""
-        self._pending = ""
+        # The debounced key: the condition and the fingers and hint it shows.
+        self._committed: tuple | None = None
+        self._pending: tuple | None = None
         self._pending_since = 0.0
         self._latched = False
 
@@ -215,24 +229,27 @@ class Engine:
             return None
 
         condition = _condition(gesture, self.exercise)
-        if condition != self._pending:
-            self._pending = condition
+        wrong, match, hint = _view(gesture, self.exercise, condition)
+        # 8 x 7 held as (8, 9) then as (9, 7) is "wrong" both times, but the
+        # finger to move is not the same one: keying on the condition alone kept
+        # the first correction on screen for the second pose.
+        key = (condition, wrong, match, tuple(sorted(hint.items())))
+        if key != self._pending:
+            self._pending = key
             self._pending_since = now
         if now - self._pending_since < self.debounce_s:
             return None
-        if condition == self._committed:
+        if key == self._committed:
             return None
 
-        self._committed = condition
-        self._wrong, self._match, self._hint = _scored(gesture, self.exercise)
+        self._committed = key
+        self._wrong, self._match, self._hint = wrong, match, hint
 
         if condition == COND_UNKNOWN:
             self._state, self._event = STATE_WAITING_POSE, None
-            self._wrong, self._match, self._hint = (), (), {}
         elif condition == COND_CORRECT:
             self._state, self._event = STATE_CORRECT_POSE, EVENT_CORRECT_POSE
             self._reasoning = self.exercise.reasoning_lines()
-            self._wrong, self._hint = (), {}
             self._latched = True
         elif condition == COND_NO_CONTACT:
             self._state, self._event = STATE_WRONG_POSE, EVENT_NO_CONTACT
@@ -292,8 +309,8 @@ class Engine:
         self._match = ()
         self._reasoning = ()
         self._hint = {}
-        self._committed = ""
-        self._pending = ""
+        self._committed = None
+        self._pending = None
         self._pending_since = 0.0
         self._latched = False
         return self.snapshot()
