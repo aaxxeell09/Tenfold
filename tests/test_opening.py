@@ -43,6 +43,9 @@ ACK = LINES["pose_ack"]
 INITIAL_SILENCE = GLOBALS["initial_silence"]
 VISIBILITY_PROMPT_S = GLOBALS["visibility_prompt_ms"] / 1000.0
 WRONG_POSE_PROMPT = GLOBALS["wrong_pose_prompt"]
+# The first step of the ladder on a wrong pose held from the first frame: the
+# end of the thinking silence, or wrong_pose_prompt, whichever comes later.
+FIRST_STEP = max(INITIAL_SILENCE, WRONG_POSE_PROMPT)
 
 FPS = 15
 STEP = 1.0 / FPS
@@ -160,9 +163,10 @@ def test_the_ladder_clock_does_not_run_while_the_hands_are_away() -> None:
     harness.feed(20.0, hands=0)
     assert harness.last.intervention_level == 0
     # The hands arrive on a wrong pose. The thinking silence starts here, and
-    # the ladder takes its first step at the end of it, exactly as it would
-    # have if the hands had been there from the first second.
-    harness.feed(INITIAL_SILENCE - 0.3, gesture=pose(8, 9, False), hint=HINT)
+    # the ladder takes its first step at the end of it, or once the pose has
+    # been held wrong_pose_prompt, exactly as it would have if the hands had
+    # been there from the first second.
+    harness.feed(FIRST_STEP - 0.3, gesture=pose(8, 9, False), hint=HINT)
     assert harness.last.intervention_level == 0
     harness.feed(0.6, gesture=pose(8, 9, False), hint=HINT)
     assert harness.last.intervention_level == 1
@@ -171,7 +175,7 @@ def test_the_ladder_clock_does_not_run_while_the_hands_are_away() -> None:
 
 def test_taking_the_hands_away_freezes_the_ladder_where_it_was() -> None:
     harness = Harness()
-    harness.feed(INITIAL_SILENCE + 0.3, gesture=pose(8, 9, False), hint=HINT)
+    harness.feed(FIRST_STEP + 0.3, gesture=pose(8, 9, False), hint=HINT)
     assert harness.last.intervention_level == 1
     harness.feed(12.0, hands=0)
     assert harness.last.intervention_level == 1, "no ladder with no hands"
