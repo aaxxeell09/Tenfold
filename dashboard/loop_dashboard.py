@@ -164,6 +164,9 @@ def _(datetime, mo, re):
     # code changes recognised from the lines a patch adds to classifier/rules.py, most specific first:
     # (pattern, what it means for a child, short label for the history)
     CODE_CHANGES = (
+        (r"^\+\s*def pair_separation_trend\b",
+         "If the two closest fingertips keep moving apart, the app sees hands leaving a gesture and does not read it",
+         "ignores fingertips that are moving apart"),
         (r"^\+\s*def tip_motion\b",
          "The app waits while the fingers are still moving into shape, unless the camera tracking is too shaky to tell",
          "waits while the fingers are still moving into shape"),
@@ -184,7 +187,8 @@ def _(datetime, mo, re):
         """A short label: the setting that moved with its values, or what a code change does."""
         s = _setting(patch)
         if s:
-            names = {"CONTACT_THRESHOLD": "touch limit", "UNKNOWN_THRESHOLD": "confidence needed"}
+            names = {"CONTACT_THRESHOLD": "touch limit", "UNKNOWN_THRESHOLD": "confidence needed",
+                     "PAIR_DRIFT_THRESHOLD": "moving-apart limit"}
             return f"{names.get(s[0], s[0].lower())} {s[1]:g} → {s[2]:g}"
         code = _code_change(diff)
         if code:
@@ -201,6 +205,11 @@ def _(datetime, mo, re):
         if s and s[0] == "UNKNOWN_THRESHOLD":
             return ("The app answers only when it sees both hands clearly" if s[2] > s[1]
                     else "The app answers even when it sees the hands less clearly")
+        if s and s[0] == "PAIR_DRIFT_THRESHOLD":
+            return ("Fingertips moving apart a little more slowly now also count as leaving a gesture" if s[2] < s[1]
+                    else "Only fingertips moving apart faster count as leaving a gesture")
+        if s:
+            return "A setting of the rule was fine-tuned"  # a setting the page cannot name yet: its values go on the line below
         code = _code_change(diff)
         return code[0] if code else plain_change(patch, diff)
 
