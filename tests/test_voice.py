@@ -1459,6 +1459,35 @@ def test_the_gate_runs_before_a_lesson_started_from_the_path(page):
     tab.wait_for_function("!!Tenfold.lesson", timeout=10000)
 
 
+def test_practice_goes_straight_to_the_path_and_the_gate_runs_at_the_level(page):
+    """Seen live: the gate ran twice, once after Practice and again after the level.
+    The Practice door opens the path with no gate; the level tap is the one gate."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(known_child() + FAKE_RECOGNITION + CAPTURE_SOCKET + WATCH_SENDS
+                        + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_selector("#home a.door[href='#practice']", timeout=10000)
+    tab.click("#home a.door[href='#practice']", force=True)
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+    tab.wait_for_timeout(800)
+    assert tab.evaluate("document.body.dataset.view") == "practice"
+    # data-step="1" is the export's resting markup; a gate that ran has a checkRun
+    assert not tab.evaluate("!!Tenfold.checkRun"), "the gate started on Practice"
+    # no socket has even opened: nothing was asked of the server on the way to the path
+    early = tab.evaluate("window.__sent || []")
+    assert [m for m in early if m.get("type") == "start_node"] == []
+    # the level tap is where the one gate runs
+    tab.wait_for_selector('[data-action="start"]', timeout=10000)
+    tab.click('[data-action="start"]', force=True)
+    tab.wait_for_function("document.body.dataset.view === 'check'", timeout=10000)
+    wait_step(tab, "ready", timeout=30000)
+    hear(tab, "yes")
+    tab.wait_for_function("!!Tenfold.lesson", timeout=15000)
+    checks = [m for m in sent(tab, "start_node") if m.get("node", {}).get("kind") == "check"]
+    assert len(checks) == 1, "one gate, at the level"
+
+
 def test_the_pose_step_runs_once_for_a_child(page):
     """The finger pose is the one step that proves the camera can read a pose. A child
     meets it on their very first gate and never again, and it is remembered against
