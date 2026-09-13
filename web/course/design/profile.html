@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1194, height=834, initial-scale=1, viewport-fit=cover">
+<title>Nimble · Tally</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<style>
+  body.tablet{height:100vh;overflow:hidden;background:var(--polar);display:flex;align-items:center;justify-content:center}
+  .frame{
+    position:relative;flex:none;width:1194px;height:834px;overflow:hidden;background:var(--snow);
+    transform:scale(var(--fit,1));transform-origin:center center;
+    display:grid;grid-template-columns:486px minmax(0,1fr);
+  }
+  .back{position:absolute;top:20px;left:20px;z-index:5;width:74px;height:74px;display:block;transition:transform 60ms ease}
+  .back img{width:100%;height:100%;object-fit:contain;display:block}
+  .back:active{transform:translateY(3px)}
+
+  /* left: Tally wearing what he earned */
+  .left{
+    background:var(--polar);display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:16px;padding:84px 40px 40px;text-align:center;
+  }
+  .stage{width:232px;height:276px;flex:none;background:url("art/hand2.png") no-repeat center / contain}
+
+  /* what Tally has earned, as a simple row */
+  .wardrobe{display:flex;gap:10px;margin-top:2px}
+  .wardrobe .slot{
+    width:62px;height:62px;border-radius:18px;border:3px solid #e2e7f5;background:var(--snow);
+    display:flex;align-items:center;justify-content:center;
+  }
+  .wardrobe .slot img{width:38px;height:34px;object-fit:contain;display:block;opacity:.3;filter:grayscale(1)}
+  .wardrobe .slot.on{border-color:var(--green);background:#dff3ea}
+  .wardrobe .slot.on img{opacity:1;filter:none}
+  .wardlabel{margin:2px 0 0;font-size:14px;font-weight:800;color:var(--wolf);letter-spacing:.6px;text-transform:uppercase}
+
+  .lsub{margin:0;font-size:16px;font-weight:900;color:var(--wolf);letter-spacing:.9px;text-transform:uppercase}
+  .lname{margin:0;font-size:38px;font-weight:900;color:var(--eel);line-height:1.05}
+
+  /* XP bar in the plate style of the design system */
+  .xpwrap{width:100%;max-width:372px;padding:12px 14px;border-radius:22px;background:var(--snow);box-shadow:0 0 0 2px #e7ebf8 inset}
+  .track{position:relative;height:22px;border-radius:11px;background:#e2e7f5;overflow:hidden}
+  .track i{position:absolute;inset:0 auto 0 0;border-radius:11px;background:var(--green)}
+  .xprow{display:flex;align-items:baseline;justify-content:space-between;margin:0 2px 9px;font-size:15px;font-weight:800;color:var(--wolf)}
+  .xprow b{color:var(--eel);font-size:17px}
+  .nextline{margin:0;font-size:16px;font-weight:800;color:var(--wolf)}
+
+  /* right: the ten levels */
+  .right{padding:30px 46px 26px;display:flex;flex-direction:column;min-height:0}
+  .right h2{margin:0 0 2px;font-size:26px;font-weight:900;color:var(--eel)}
+  .right .hint{margin:0 0 14px;font-size:15px;font-weight:700;color:var(--wolf)}
+  .list{display:flex;flex-direction:column;gap:8px}
+
+  .row{
+    display:flex;align-items:center;gap:16px;height:58px;padding:0 16px;
+    border:3px solid #e2e7f5;border-radius:18px;background:var(--snow);
+  }
+  .row .no{
+    width:38px;height:38px;flex:none;border-radius:50%;background:#e7ebf8;color:var(--eel);
+    display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:900;
+  }
+  .row .nm{font-size:19px;font-weight:800;color:var(--wolf);white-space:nowrap}
+  .row .right-side{margin-left:auto;display:flex;align-items:center;gap:12px}
+  .row .item{width:40px;height:34px;object-fit:contain;display:block;opacity:.35;filter:grayscale(1)}
+  .row .mark{
+    width:30px;height:30px;flex:none;border-radius:50%;background:#e7ebf8;
+    display:flex;align-items:center;justify-content:center;
+  }
+  .row .mark svg{width:18px;height:18px;display:block}
+  .row .mark path{stroke:#c3cae0}
+  .row .pending{width:56px;height:12px;border-radius:6px;background:#e7ebf8}
+
+  /* done: filled green plate */
+  .row.got{border-color:var(--green);background:#dff3ea}
+  .row.got .no{background:var(--green);color:#fff}
+  .row.got .nm{color:#1f7a58}
+  .row.got .item{opacity:1;filter:none}
+  .row.got .mark{background:var(--green)}
+  .row.got .mark path{stroke:#fff}
+
+  /* current: white plate, green outline */
+  .row.now{border-color:var(--green);background:var(--snow);box-shadow:0 4px 0 #cfe9dd}
+  .row.now .no{background:var(--green);color:#fff}
+  .row.now .nm{color:var(--eel);font-weight:900}
+  .row.now .item{opacity:1;filter:none}
+  .row.now .mark{background:var(--green)}
+  .row.now .mark path{stroke:#fff}
+  .row.now .tag{font-size:14px;font-weight:900;color:#1f7a58;letter-spacing:.6px;text-transform:uppercase;white-space:nowrap}
+</style>
+</head>
+<body class="tablet">
+<div class="frame">
+
+  <a class="back" href="hub.html" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
+
+  <section class="left">
+    <div class="stage" role="img" aria-label="Tally"></div>
+
+    <p class="lsub">Level <span id="lnum">2</span> of 10</p>
+    <h1 class="lname" id="lname">Finger Counter</h1>
+
+    <div class="xpwrap">
+      <div class="xprow"><span>XP to next level</span><b id="lxp">60 / 150</b></div>
+      <div class="track"><i id="lfill" style="width:40%"></i></div>
+    </div>
+    <p class="nextline" id="nextline">Next: Tip Toucher</p>
+
+    <p class="wardlabel">Tally's gear</p>
+    <div class="wardrobe" id="wardrobe"></div>
+  </section>
+
+  <section class="right">
+    <h2>Tally's levels</h2>
+    <p class="hint">Every second level he gets something new to wear.</p>
+    <div class="list" id="list"></div>
+  </section>
+
+</div>
+
+<script src="levels.js"></script>
+<script>
+(function () {
+  var i = TF.info();
+  document.getElementById('lnum').textContent = i.level;
+  document.getElementById('lname').textContent = i.name;
+  document.getElementById('lxp').textContent = i.next ? i.inLevel + ' / ' + i.span : 'Complete';
+  document.getElementById('lfill').style.width = i.percent + '%';
+  document.getElementById('nextline').textContent = i.next ? 'Next: ' + i.next : 'Top level reached.';
+
+  var names = { glasses: 'Glasses', headband: 'Headband', hat: 'Wizard hat', cape: 'Cape', crown: 'Crown' };
+
+  // the gear row: earned items in colour, the rest waiting
+  var worn = i.accessories.split(' ').filter(Boolean);
+  document.getElementById('wardrobe').innerHTML = Object.keys(TF.ACC).map(function (lvl) {
+    var a = TF.ACC[lvl];
+    var on = worn.indexOf(a) > -1;
+    return '<span class="slot' + (on ? ' on' : '') + '" title="' + names[a] + (on ? '' : ' at level ' + lvl) + '">' +
+           '<img src="art/acc-' + a + '.png" alt="' + names[a] + '"></span>';
+  }).join('');
+  var check = '<span class="mark"><svg viewBox="0 0 24 24" aria-hidden="true">' +
+    '<path d="M 5 12.5 L 9.5 17 L 19 7" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"></path></svg></span>';
+
+  document.getElementById('list').innerHTML = TF.LEVELS.map(function (name, k) {
+    var lvl = k + 1;
+    var cls = lvl < i.level ? 'got' : lvl === i.level ? 'now' : '';
+    var acc = TF.ACC[lvl];
+    var item = acc ? '<img class="item" src="art/acc-' + acc + '.png" alt="' + names[acc] + '" title="' + names[acc] + '">' : '';
+    var tail = lvl === i.level ? '<span class="tag">You are here</span>' + check
+             : lvl < i.level ? check
+             : '<span class="pending"></span>';
+    return '<div class="row ' + cls + '"><span class="no">' + lvl + '</span>' +
+           '<span class="nm">' + name + '</span>' +
+           '<span class="right-side">' + item + tail + '</span></div>';
+  }).join('');
+
+  function fit() {
+    var s = Math.min(1, window.innerWidth / 1194, window.innerHeight / 834);
+    document.documentElement.style.setProperty('--fit', s);
+  }
+  window.addEventListener('resize', fit);
+  fit();
+})();
+</script>
+</body>
+</html>
