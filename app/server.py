@@ -556,7 +556,7 @@ class TutorLink:
 
     def feed(self, verdict: GestureState, motion: float, now: float,
              fingers: list[dict[str, Any]], hands: int,
-             hint: dict[str, Any] | None) -> None:
+             hint: dict[str, Any] | None, palm: float | None = None) -> None:
         """One perception window, every one of them, at the camera rate.
 
         The tutor drops what arrives faster than its own fps. Dropping here as
@@ -567,7 +567,7 @@ class TutorLink:
             return
         observation = call_tutor(getattr(self._module, TUTOR_NAMES["observation"], None),
                                  gesture=verdict, fingers=fingers, hands_seen=hands,
-                                 hint=hint, motion=motion)
+                                 hint=hint, motion=motion, palm=palm)
         if observation is None:
             return
         self._absorb(self._send("observe", obs=observation, now=now))
@@ -1012,8 +1012,11 @@ class Lesson:
             # The engine's geometric hint goes with it: it is what the tutor
             # builds its correction and its ghost out of.
             current = update if update is not None else self.engine.snapshot()
+            # The palm goes with the fingertips: it is what turns a gap between
+            # two tips into a touch or a pose held apart, at any distance from
+            # the camera. Without it the tutor estimates one from the tips.
             self.tutor.feed(gesture, motion, now, fingers=fingers, hands=hands_seen,
-                            hint=dict(current.hint))
+                            hint=dict(current.hint), palm=palm)
             self._follow_tutor()
             scored = self._score_gesture(gesture, hands_seen, now)
             if scored and self.pick is not None:
