@@ -1594,7 +1594,8 @@
     const inField = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
     const answering = (lesson && !$("#lesson").hidden) || (checkRun && checkRun.step === 3);
     if (!answering) {
-      if (e.key === "Enter" && !$("#finish").hidden) { const btn = $("#finish .fn-pane:not(.out) .btn2"); if (btn) btn.click(); }
+      // the pane on screen: the card until the level up card slides in over it (.out on #p1, .in.show on #p2)
+      if (e.key === "Enter" && !$("#finish").hidden) { const btn = $("#finish .pane:not(.out):not(.in) .btn2, #finish .pane.in.show .btn2"); if (btn) btn.click(); }
       return;
     }
     if (inField) return;
