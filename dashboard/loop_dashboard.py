@@ -59,9 +59,21 @@ def _(informed, mo, snap, snap_source):
         return ((v or {}).get(key) or {}).get("exact_match")
 
     _patches = [v for v in informed if v.get("kind") == "patch" or (v.get("version") or 0) > 0 and not v.get("kind")]
-    _first, _last = (informed[0], informed[-1]) if informed else ({}, {})
-    _train = (f"train exact_match **{_em(_first):.3f} → {_em(_last):.3f}**"
-              if _em(_first) is not None and _em(_last) is not None else "no train evaluation yet")
+    def _basis(v):
+        return ((v.get("data") or {}).get("sha"), (v.get("train") or {}).get("scorers_sha256"))
+
+    # Only two train scores measured on the same data with the same scorers are compared.
+    _scored = [v for v in informed if _em(v) is not None]
+    _last = _scored[-1] if _scored else {}
+    _first = next((v for v in _scored if _basis(v)[0] and _basis(v) == _basis(_last)), _last)
+    _same = "same data and scorers" if _basis(_last)[1] else "same data, scorer version not recorded"
+    if not _scored:
+        _train = "no train evaluation yet"
+    elif _first is _last:
+        _train = f"train exact_match **{_em(_last):.3f}** ({_last.get('tag')}, nothing comparable before it)"
+    else:
+        _train = (f"train exact_match **{_em(_first):.3f} → {_em(_last):.3f}** "
+                  f"({_first.get('tag')} → {_last.get('tag')}, {_same})")
     _held = [v for v in informed if _em(v, "heldout") is not None]
     _held_line = (f"held-out exact_match **{_em(_held[0], 'heldout'):.3f} → {_em(_held[-1], 'heldout'):.3f}**"
                   if _held else "held-out: **not measured yet** (needs a capture by other people)")
@@ -106,11 +118,21 @@ def _(informed, plt, snap):
 
     _series("train", "#6b7280", "--", 2, "train (the data the critic sees)", 0.15)
     _series("heldout", "#16a34a", "-", 3, "held-out (other people's hands)", 0.18)
-    _trains = [(_x, _metric(v.get("train"))) for _x, v in zip(_xs, informed) if _metric(v.get("train")) is not None]
-    if len(_trains) > 1:
-        _ax.annotate(f"{(_trains[-1][1] - _trains[0][1]) * 100:+.1f} points since {informed[0]['tag']}",
-                     _trains[-1], textcoords="offset points", xytext=(-12, 34), ha="right", fontsize=15,
-                     fontweight="bold", color="#111827")
+    def _basis(v):
+        return ((v.get("data") or {}).get("sha"), (v.get("train") or {}).get("scorers_sha256"))
+
+    # The gain is written only between two train scores with the same data fingerprint and the same scorers
+    # (a data refresh or a train split starts a new basis), never simply first against last.
+    _trains = [(_x, v) for _x, v in zip(_xs, informed) if _metric(v.get("train")) is not None]
+    if _trains:
+        _lx, _lv = _trains[-1]
+        _base = next(((_x, v) for _x, v in _trains if _basis(v)[0] and _basis(v) == _basis(_lv)), None)
+        if _base and _base[0] != _lx:
+            _gain = (_metric(_lv.get("train")) - _metric(_base[1].get("train"))) * 100
+            _ax.annotate(f"{_gain:+.1f} train points since {_base[1]['tag']}"
+                         + ("" if _basis(_lv)[1] else "\n(same data, scorer version not recorded)"),
+                         (_lx, _metric(_lv.get("train"))), textcoords="offset points", xytext=(-12, 34), ha="right",
+                         fontsize=14, fontweight="bold", color="#111827")
 
     _blind = snap.get("blind") or []
     if _blind:

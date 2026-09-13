@@ -16,7 +16,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 KEEP = ("exact_match", "exact_match_ci95", "exact_match_unordered", "contact_accuracy", "false_unknown_rate",
-        "negative_rejection_accuracy", "near_contact_accuracy", "n_samples", "n_holds", "per_class", "per_slice")
+        "negative_rejection_accuracy", "near_contact_accuracy", "n_samples", "n_holds", "per_class", "per_slice", "scorers_sha256")
 
 
 def slim(m: dict | None) -> dict | None:

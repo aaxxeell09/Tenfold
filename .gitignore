@@ -21,3 +21,5 @@ data/BEST_VERSION
 loop/blind-rules.py
 loop/*.out
 loop/watch-state.json
+data/splits/
+dashboard/__marimo__/

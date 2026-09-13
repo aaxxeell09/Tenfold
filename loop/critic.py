@@ -628,6 +628,13 @@ def main() -> int:
     repo = Path(a.repo).resolve()
     load_env(repo / ".env")
     a.model = a.model or os.environ.get("TENFOLD_CRITIC_MODEL", "claude-sonnet-5")
+    # TENFOLD_TRAIN_SAMPLES points the loop at a train split from eval/split.py; unset, it reads the whole dataset
+    a.train_samples = a.train_samples or os.environ.get("TENFOLD_TRAIN_SAMPLES") or None
+    if a.train_samples:
+        chosen = Path(a.train_samples)
+        a.train_samples = str(chosen if chosen.is_absolute() else repo / chosen)
+        if not Path(a.train_samples).exists():
+            raise SystemExit(f"train samples {a.train_samples} not found: run make split, or unset TENFOLD_TRAIN_SAMPLES")
     a.text_agents = a.text_agents or os.environ.get("TENFOLD_TEXT_AGENTS") or "claude"
     if a.text_agents not in ("claude", "wandb"):
         raise SystemExit(f"TENFOLD_TEXT_AGENTS must be claude or wandb, got {a.text_agents!r}")

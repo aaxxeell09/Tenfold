@@ -14,6 +14,7 @@ State: loop/watch-state.json. Log: loop/watch.log, critic output in loop/watch-c
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -28,6 +29,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from loop.critic import ITERATION_MIN_USD, data_fingerprint  # noqa: E402
+from tenfold.env import load_env  # noqa: E402
 
 STATE = REPO / "loop" / "watch-state.json"
 LOG = REPO / "loop" / "watch.log"
@@ -69,6 +71,30 @@ def accepted_data_sha(metrics_path: Path) -> str | None:
         return None
     accepted = [v for v in versions if v.get("accepted")]
     return (accepted[-1].get("data") or {}).get("sha") if accepted else None
+
+
+def train_samples_path() -> Path:
+    """What the critic trains on: TENFOLD_TRAIN_SAMPLES (a train split from eval/split.py) or the whole dataset."""
+    chosen = os.environ.get("TENFOLD_TRAIN_SAMPLES")
+    if not chosen:
+        return REPO / "data" / "samples.jsonl"
+    path = Path(chosen)
+    return path if path.is_absolute() else REPO / path
+
+
+def stale_split_warning(train: Path, source: Path) -> str | None:
+    """A split is a snapshot of its source: captures pushed after it reach neither side until a new split."""
+    meta = train.parent / "source.json"
+    if train == source or not meta.exists() or not source.exists():
+        return None
+    try:
+        made_from = json.loads(meta.read_text()).get("source_sha256")
+    except json.JSONDecodeError:
+        return f"{meta} is unreadable"
+    if made_from != hashlib.sha256(source.read_bytes()).hexdigest():
+        return (f"{source.name} changed since the split {train.parent.name} was made; new captures reach the loop "
+                "only through a new split under a new name (make split NAME=...)")
+    return None
 
 
 def sync() -> bool:
@@ -141,7 +167,11 @@ def cycle(a: argparse.Namespace, state: dict) -> None:
     state["cycles"] += 1
     n = state["cycles"]
     sync()
-    fp = data_fingerprint(REPO / "data" / "samples.jsonl")
+    train = train_samples_path()
+    stale = stale_split_warning(train, REPO / "data" / "samples.jsonl")
+    if stale:
+        log(f"cycle {n}: warning, {stale}")
+    fp = data_fingerprint(train)
     new_data = accepted_data_sha(REPO / a.metrics) != fp["sha"]
     momentum = state.get("last_outcome") == "accepted"
     if not (new_data or momentum or a.force):
@@ -189,6 +219,7 @@ def main() -> int:
     ap.add_argument("--critic-args", default="", help='extra flags for loop/critic.py, e.g. "--skip-heldout"')
     ap.add_argument("--cycle-timeout", type=int, default=3600)
     a = ap.parse_args()
+    load_env(REPO / ".env")  # TENFOLD_TRAIN_SAMPLES decides what the loop fingerprints and trains on
     state = load_state()
     state.pop("stopped", None)
     log(f"watch start: every {a.every}s, {a.iterations} iteration(s) per cycle, budget ${a.max_cost:.2f} "
