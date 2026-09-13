@@ -1,14 +1,19 @@
 # Consolidation audit, after the morning passes
 
-Commit audited: **554dc0d** (`Merge remote-tracking branch 'origin/main'`), which
-carries origin/main as of the merge. Earlier reading was done on 331c4ef; every
-finding below was re-checked against 554dc0d and anything already fixed was
-dropped rather than reported stale.
+Commit audited: **c9e8224**, which carries origin/main as of the last merge
+before this was written.
 
-Method: the whole suite, the mock flow driven end to end with playwright
-(chromium 1194) through welcome, the start check and a lesson to the finish
-card, the `--demo` replay, and then `app/tutor.py`, `lesson/engine.py`,
-`app/server.py` and `web/course/app.js` read straight through as one system.
+main moved four times while this was being read (331c4ef, 554dc0d, e15ab97,
+c9e8224), so every finding was re-checked at c9e8224 before being kept. Three
+were fixed under me while I read and are marked as such rather than deleted,
+because what changed and why is part of what a consolidation audit is for; two
+are new and only exist because of those fixes. Anything simply fixed and not
+interesting was dropped.
+
+Method: the whole suite; the mock flow driven end to end with playwright
+(chromium 1194) through welcome, the start gate and a lesson to the finish card;
+the `--demo` replay; and `app/tutor.py`, `lesson/engine.py`, `app/server.py` and
+`web/course/app.js` read straight through as one system.
 
 Classification: **BLOCKER** (the demo breaks or lies to the child),
 **BUG** (wrong behaviour, not on the demo path), **CLEANUP** (dead or
@@ -16,10 +21,11 @@ contradictory, costs nothing today), **DECISION NEEDED** (two owners disagree in
 code and only a person can settle it).
 
 Nothing in `app/`, `lesson/`, `web/course/` or `tests/` was edited. Four other
-agents hold those files. Everything found there is listed here with file and
-line for its owner.
+agents hold those files. Everything found there is listed with file and line for
+its owner. `docs/tutor_contract.md` is fixed in place, section 3.
 
 ---
+
 
 ## 1. The suite
 
@@ -54,131 +60,126 @@ browser tests behind a marker.
 
 ## 2. Contradictions, ordered by how much they hurt the demo
 
-### 2.1 BLOCKER. The start check asks for 6 x 6 and the server serves something else
+### 2.1 BLOCKER. The start gate tells the child to touch 6 with 6 and the server is on another fact
 
-- Page: `web/course/index.html:159` `"That is a 6 and a 6."`, line 160
-  `<div class="result" id="result">36</div>`; `web/course/app.js:406` opens the
-  node as `{id:"check", kind:"check", pairs:[[6,6]], count:1}`; the scripted
-  lines are `"Touch your 6 with your 6."` (app.js:492) and
-  `"Thirty six. Exactly."` (app.js:522).
-- Server: `app/server.py:1250` `start_session(now, pairs=pairs, length=length)`.
-- Scheduler: `lesson/scheduler.py:620-631` `set_scope` stores `self.allowed`
-  and its own docstring says **"Neither one steers the draw."** `_choose` and
-  `_draw` (`lesson/scheduler.py:710-750`) never consult `self.allowed`. The only
-  reader in the whole repo is `app/server.py:947`, inside `_mastered_pick`.
+**Rewritten on c9e8224.** On 331c4ef this was worse: the start check asked for
+6 x 6, pre-rendered a 36, and marked a correct 36 wrong. The gate pass has since
+removed the arithmetic step entirely, so nothing tells a child they are wrong for
+being right any more. What is left is the same root cause with a different
+symptom.
 
-This is amendment F10 ("a course node does not shape what a session serves at
-all") landing on top of the start check, which is the one node whose whole
-script depends on being served exactly 6 x 6.
+- Page: `web/course/app.js:498-500` still opens the node with
+  `pairs: [[6, 6]]` whenever the pose step is in the gate.
+- Lines: `lesson/tally_lines.json:71` `gate_pose` is "Touch your 6 with your 6."
+  and line 73 `gate_banner` is "That is a 6 and a 6."
+- Server: `app/server.py` passes those pairs to `start_session`.
+- Scheduler: `set_scope` (`lesson/scheduler.py:620-631`) records `self.allowed`,
+  its docstring says **"Neither one steers the draw"**, and `_choose` never reads
+  it. The only reader in the repo is `app/server.py:947`, inside `_mastered_pick`.
 
-Observed, not inferred. Driving the mock flow through the check:
+The gate's pose step passes on `posed(m)` (`app.js:544`), which is
+`m.state === "correct_pose"`, and that is the engine's verdict on **whatever
+exercise the scheduler happened to draw**.
+
+Driven on the mock server at c9e8224:
 
 ```
-t= 0 {"step": 2, "say": "Perfect.", ...}
-t= 1 {"step": 2, "say": "Almost. Your left hand is good. Move your right finger from 10 to 9.", ...}
-t= 2 {"step": 3, "say": "Yes, that's it.", "frame": "... matched banner"}
-t= 4 {"step": 3, "say": "Type the answer.", "dots": "tile-1-off,tile-2-off,tile-3-on"}
-=== typing 36 ===
-after: {'say': 'Almost. Count the tens again: the touched ones and below.'}
+t= 0 {"step": 2, "say": "Perfect.", "banner": "That is a 6 and a 6.", ...}
+t= 1 {"step": 3, "say": "Yes, that's it.", ...}
+t= 3 {"step": 3, "say": "Say: I'm ready!", ...}
+--- exercise the server thinks it is on ---
+  state=correct_pose exercise=8 x 10
 ```
 
-The exercise was 9 x 9. The screen said "That is a 6 and a 6", the pre-rendered
-result read 36, the child typed 36, and Tally told them they were wrong. On a
-second run it was 7 x 7. The very first thing a child does in this app is be
-told they are wrong for being right.
+The screen said "That is a 6 and a 6" about an 8 and a 10.
 
-F10 is explicit that the node name is a label, so the fix is not to put node
-scoping back. Either the check node stops going through the scheduler at all
-(it is one fixed exercise, not a lesson), or `set_scope` gets one exception for
-`kind == "check"`. **DECISION NEEDED** on which, then a one-line fix.
+The mock passes because its hands always make the exercise the engine is on. A
+real child does what the line says and holds 6 and 6, the engine is comparing
+against 8 x 10, `correct_pose` never arrives, and **the gate never passes**. The
+first screen of the app becomes a dead end on the one path where nothing else
+can go wrong.
 
-### 2.2 BLOCKER. The success beat is decided and nothing plays it
+F10 is explicit that a node name is a label, so the fix is not to restore node
+scoping. Either the gate's pose step stops going through the scheduler (it is a
+camera check, not a question), or `set_scope` gets one exception for
+`kind == "check"`. **DECISION NEEDED** on which, then a small fix.
 
-`app/tutor.py:1731`-ish `_success_beat` builds the whole beat: `kind`, `parts`
+
+### 2.2 BLOCKER. The success beat is decided, carried, and still never played
+
+`app/tutor.py::_success_beat` builds the whole beat: `kind`, `parts`
 (`line`, `halo`, `stars`, `counter`), `success_ms`, `pause_ms`, `total_ms`,
-`line`, `next_line`. `app/server.py:196-199` carries it on the wire as
-`tutor_beat`, with a comment saying the page choreographs it.
+`line`, `next_line`. `app/server.py` carries it as `tutor_beat`, with a comment
+saying the page choreographs it.
 
-`web/course/app.js` contains **zero** occurrences of `tutor_beat`
-(`grep -c tutor_beat web/course/app.js` → 0). The two parameters that exist only
-to size it, `success_beat_ms` (1300) and `next_pause_ms` (1200), appear nowhere
-outside `app/tutor.py` and `lesson/tutor_params.json`.
+On c9e8224 the page finally mentions the field, once, at `app.js:1274`:
 
-Worse, nothing on the server pauses either. `app/server.py::_check` pushes the
+```js
+if (m.tutor_beat || (fresh && m.state === "exercise_shown")) clearHeard();
+```
+
+That is the beat used as a bare signal to clear the answer pill. **Nothing plays
+it.** `success_beat_ms` and `next_pause_ms` still have zero occurrences in
+`web/course/app.js`, so the two numbers whose only purpose is to size the
+celebration size nothing, and `parts` is never read at all.
+
+Nothing on the server pauses either. `app/server.py::_check` pushes the
 `answer_correct` message, then calls `_record`, then `_advance()`, which pushes
-`exercise_shown` in the same lock, microseconds later. The page therefore gets
-the celebration and its replacement back to back:
+`exercise_shown` inside the same lock, microseconds later. The page gets the
+celebration and its replacement back to back:
 
-- `frame.classList.add("is-cheer")` at `app.js:1298` is removed by the very next
-  message, because `if (!cheer) frame.classList.remove("is-cheer")` runs on the
-  `exercise_shown` message.
+- `frame.classList.add("is-cheer")` is undone by the next message, because
+  `if (!cheer) frame.classList.remove("is-cheer")` runs on `exercise_shown`.
 - the recap band (`renderBand`, `RECAP_MS = 3000`) keys on `m.exercise`, so the
-  new exercise wipes it before the 3 s timer it just set ever fires.
+  new exercise wipes it before the 3 s timer it just set can fire.
 
-Observed in the mock run: `answer_correct` and the finish card landed inside the
-same 500 ms sample. In the `--demo` replay the same, at `t=12`.
+Observed every run: `answer_correct` and the next exercise, or the finish card,
+land inside the same 500 ms sample.
 
-And the success line is not merely rushed, it is **cut off**. `ACK_STATES` at
-`app.js:615` contains both `answer_correct` and `exercise_shown`; `say()` at
-`app.js:672` handles an `"ack"` by `speech.queue.unshift(item); cutLine();`.
-So the `exercise_shown` line that arrives microseconds after the success line
-cuts the success line mid sentence, every single time. "Yes. 8 times 6 is 48."
-never finishes.
+And the success line is not merely rushed, it is **cut off**. `ACK_STATES`
+contains both `answer_correct` and `exercise_shown`, and `say()` handles an
+`"ack"` with `speech.queue.unshift(item); cutLine();`. The `exercise_shown` line
+that arrives microseconds after the success line cuts the success line mid
+sentence, every time. In the run on e15ab97 "Yes. 6 times 8 is 48." never
+reached the bubble at all.
 
-This is three passes disagreeing: the success beat pass decided a 2.5 s beat,
-the speech queue policy pass made every acknowledgement cut its predecessor, and
-nobody changed `_check` to stop advancing instantly. **DECISION NEEDED**: the
-beat has to be enforced somewhere, and there are only two honest places, the
-server holding `_advance` for `total_ms`, or the page holding the render. Doing
-it in both is how this happened.
+Three passes disagreeing: the beat pass decided a 2.5 s beat, the speech queue
+pass made every acknowledgement cut its predecessor, and nobody changed `_check`
+to stop advancing instantly. **DECISION NEEDED**: there are two honest places to
+enforce the beat, the server holding `_advance` for `total_ms`, or the page
+holding the render. Doing it in neither is where we are; doing it in both is how
+this happened.
 
-### 2.3 BLOCKER. The ready gate does not exist
+### 2.3 CLEANUP, was a BLOCKER. The ready gate is built; two of its parameters are orphans
 
-`lesson/tally_lines.json:25` carries `"gate_ready": "Say: I'm ready!"`.
-`app/tutor.py:214-217` declares it:
+**Fixed while this audit was being written.** On 554dc0d the gate was a line, a
+parameter, a bound, a comment and two tests, and no code. On c9e8224
+`web/course/app.js` has it: `gateSteps()`, `STEP_FRAME`, `openStep`, `turnStep`,
+the three steps `hands`, `pose`, `ready`, the pose step skipped for a child who
+has passed it before, and a Ready button for a browser with no microphone.
 
-```python
-# Lines the page says and the tutor never renders: the three steps of the start
-# gate. They live in the same file because Tally has one voice, and the server
-# hands them to the page rather than the page writing them out again.
-PAGE_LINE_KEYS = ("gate_ready",)
-```
+Driven at c9e8224 it walks all three steps and reaches "Say: I'm ready!", and
+the step dots advance with it, which also clears the step-2 dot bug reported
+from the earlier run. What is left of the finding is small and worth fixing
+before it rots:
 
-The server does not hand it to the page. `grep -n "gate" app/server.py` returns
-**nothing** outside `__pycache__`. `web/course/app.js` has no gate either: every
-`gate` in that file is `gateVoice` / `voice.gate`, which is the microphone
-answer gate and predates this. There is no "I'm ready" step at the start of any
-activity, no second or
-third step of a three step gate, and `gate_step_pause_ms` (1000, bounds
-`[500, 2000]`, `lesson/tutor_params.json:33`) is read by no production code at
-all. The comment on it at `app/tutor.py:171` says "gate_step_pause_ms is the
-page's", and the page does not have it.
+- **`gate_step_pause_ms`** (1000, bounds `[500, 2000]`, `lesson/tutor_params.json:33`)
+  is read by no production code. `app/tutor.py:171` requires it and comments
+  "gate_step_pause_ms is the page's"; `grep -c gate_step_pause_ms web/course/app.js`
+  is 0.
+- **`gate_ready_button_s`** is the mirror image. `web/course/app.js:454` reads it
+  through `timing(READY_BUTTON_KEY, READY_BUTTON_S)` and the comment says
+  "lesson/tutor_params.json owns the value". It is not in that file, so the page
+  silently falls back to its own 6.
 
-**And two green tests cover the hole.** `tests/test_opening.py:111-136`:
+So the gate has two policy parameters and neither is connected: one the file has
+and nobody reads, one the page reads and the file has not got. The fallback is
+graceful, which is why nothing failed, and which is why this will sit here.
 
-```python
-def test_the_gate_pause_is_read_as_written_for_every_child() -> None:
-        assert harness.tutor.effective("gate_step_pause_ms") == 1000
+The two tests named for the gate (`tests/test_opening.py:125-136`) still assert
+only that a constant and a string exist; they passed before the gate was built
+and they pass now. See 4b.
 
-def test_the_gate_says_its_third_step_from_the_line_file() -> None:
-    assert PAGE_LINE_KEYS == ("gate_ready",)
-    assert LINES["gate_ready"] == "Say: I'm ready!"
-```
-
-Both pass. Neither exercises a gate: one asserts that `effective()` returns a
-constant unscaled, the other that a tuple and a string exist. Two tests named
-after a feature, asserting only that its constants are present. They will keep
-passing for as long as the gate does not exist.
-
-To be fair to the pass: the rest of `tests/test_opening.py` covers behaviour that
-**is** built and works, the opening silence, the hands being called in, the
-ladder clock not running while the hands are away, the acknowledgement still
-landing during the opening silence. It is the ready gate specifically, the
-"I'm ready" step at the start of each activity, that is line, parameter, bound,
-comment and two tests, and no code.
-
-Either it lands or the artefacts come out. A bounded parameter nobody reads,
-inside the one file Loop 2 is designed to tune, is a trap. **DECISION NEEDED.**
 
 ### 2.4 BLOCKER, on `make demo`. The mock loop skips a scripted step every six seconds
 
@@ -219,22 +220,67 @@ loses that question. This is the exact command SPEC section 15 item 14 names.
 the same way it already does not fire inside the check (`in_check` at
 `app/server.py::mock_loop`). It is one condition on one line.
 
-### 2.5 BUG. Two ladders, two line files, two voices on the same moment
+### 2.4b BUG. The page sends `ready` and the server has no branch for it
 
-There are two complete intervention ladders running at once on every exercise.
+Found on c9e8224, after the gate landed. `web/course/app.js:675`:
+
+```js
+    sendLesson({ type: "ready", node: "check" });
+```
+
+`app/server.py::command` handles `start_node`, `hello`, `quit`, `check`, `next`,
+`hint`, `tts`, `speech`, `line_drop` and `repeat`. There is no `ready` branch and
+no `else`, so the message passes the ownership check and then falls out of the
+`if/elif` chain in silence. Not even a log line.
+
+This is the brief's "a message the page sends that the server ignores", and it
+is the direct cause of 2.4c.
+
+### 2.4c BUG. The camera check measures a threshold that is thrown away, twice over
+
+`docs/tutor_contract.md` 2.3: "It is computed once per server run." It is not.
+
+**First**, `end_check()` is never called on the gate path. `app/server.py:1257`
+calls `self.tutor.check_started()` when the node kind is `check`, which turns on
+the jitter collection. The only call to `check_ended()` is at `app/server.py:965`,
+inside `_end_session`. `_end_session` fires when the node's outcome count reaches
+its target, and **the gate records no outcome at all now that it asks no
+question**. The child leaves it through `quit`, and `_quit` (line 1330) calls
+`self.tutor.close("quit", ...)` and never `check_ended()`.
+
+So `_jitter_on` stays true for the rest of the run and `motion_threshold` is
+never set from what was measured. It stays at `MOTION_FLOOR`.
+
+**Second**, and this one would bite even if the first were fixed:
+`TutorLink.open` (`app/server.py:519-527`) calls `build_tutor` unconditionally,
+and `_start_node` calls `open` for **every node**. Each node therefore gets a
+brand new `Tutor`, whose `motion_threshold` starts at `MOTION_FLOOR` again. A
+threshold measured during the gate could not reach the lesson that follows it
+even if `end_check()` ran, because the object holding it is discarded when the
+lesson node starts.
+
+The consequence is quiet and total: the whole camera check feature, measure the
+jitter of this camera in this room and scale "the child is moving" to it, has no
+effect on any lesson. Invariant 1 runs on the hard floor for every child in every
+room. Nothing fails, nothing logs, and `effective_params.motion_threshold` on
+every `intervention` line reads 0.3 forever, which is exactly the number Loop 2
+would use to conclude the threshold does not matter.
+
+### 2.5 BUG. Two ladders on one voice, now sharing a line file
+
+Two complete intervention ladders run at once on every exercise.
 
 | | Server ladder | Tutor ladder |
 |---|---|---|
-| Clock | `HINT_AFTER_S = (5.0, 10.0, 20.0)`, `app/server.py:170` | `idle_nudge` 5.0, `hint_2_delay` 9.0, `rescue_delay` 14.0 |
-| Level | `hint_level` 0-3, `Lesson.hint_level` | `intervention_level` 0-4 |
-| Lines | `hint_1` / `hint_2` / `hint_3` in `lesson/tally_lines.json` | `hesitation_1` / `wrong_left` / `show` / `rescue` |
-| Reaches the child as | `reaction` → the `tally` field | `tutor_line` |
-| Read by the page? | `hint_level`: **no** (0 refs). `hint_auto`: **no** (0 refs). | `tutor_line`: yes |
+| Clock | `HINT_AFTER_S = (5.0, 10.0, 20.0)`, `app/server.py:176` | `idle_nudge` 5.0, `hint_2_delay` 9.0, `rescue_delay` 14.0 |
+| Level | `hint_level` 0-3 | `intervention_level` 0-4 |
+| Reaches the child as | `reaction` to `hint_event`, then the `tally` field | `tutor_line` |
+| Read by the page? | `hint_level` 0 refs, `hint_auto` 0 refs | `tutor_line`, yes |
 
-`web/course/app.js:1075` is `const tutorLine = m.tutor_line || m.tally;`. The
-tutor line wins when it exists, but it exists on only a handful of messages, so
+`web/course/app.js:1291` is `const tutorLine = m.tutor_line || m.tally;`. The
+tutor line wins where it exists, and it exists on only a handful of messages, so
 the server ladder's lines reach the child on every message in between. Nothing
-coordinates the two.
+coordinates the two clocks.
 
 On 331c4ef this was audible. One second apart in the mock run:
 
@@ -243,41 +289,42 @@ t=7  say: "That is it. Now count the tens, then the ones."      <- tally, correc
 t=8  say: "You have the pose. Now count the tens."              <- tutor, pose_ready
 ```
 
-The child was told to count the tens twice, in two different wordings, inside a
-second.
+**The canonical-lines pass fixed this properly, and it deserves saying.** It did
+not copy strings between two files. `lesson/tally.py` now keeps no text at all:
+it is a `KEYS` map from the moment to a key in the single
+`lesson/tally_lines.json`, and the overlapping moments point straight at the
+tutor's own canonical line:
 
-**The canonical-lines pass has since papered over the symptom, and only the
-symptom.** It merged both line files into `lesson/tally_lines.json` and made the
-overlapping texts identical, so on e15ab97:
-
+```python
+    "correct_pose": "pose_ready",
+    "hint_2": "show",
+    "recount_tens": "count_tens",
+    "no_contact": "not_touching",
 ```
-tally.phrase("correct_pose") == "Yes. Now count the fingers at the bottom, ..."
-LINES["pose_ready"]          == "Yes. Now count the fingers at the bottom, ..."
-```
 
-The page's `if (tutorLine !== lesson.said)` then swallows the repeat. Confirmed
-in the re-run: the doubled line is gone. But the dedupe is now **load-bearing on
-exact string equality between two independent code paths**, which is a rule
-nothing enforces. Change one word on either side and the double-speak is back,
-and neither file's tests would catch it.
+The comment above it is exactly right: "the pose being right is `pose_ready` and
+nothing else, which is how the second wording of that moment stopped existing."
+Confirmed in the re-run: the doubled line is gone, and where both ladders land on
+the same key the page's own `tutorLine !== lesson.said` swallows the repeat.
 
-And the alignment is only partial. The two ladders still speak different words
-at overlapping times:
+**What is left is the structure, not the wording.** The two ladders still fire on
+two clocks, and where they do not happen to share a key the child hears both:
 
-| Moment | Server ladder says | Tutor ladder says |
+| Moment | Server ladder | Tutor ladder |
 |---|---|---|
-| ~5 s idle | `hint_1`: "Look at your hands. One finger needs to move." | `hesitation_1`: "Take your time. I'm watching your hands." |
-| ~10 s | `hint_2`: "Move this finger here." | `wrong_left` / `wrong_right`, or `show` |
+| ~5 s idle | `hint_1`, "Look at your hands. One finger needs to move." | `hesitation_1`, "Take your time. I'm watching your hands." |
+| ~10 s | `hint_2` to `show` | `show` at L3, or `wrong_left` / `wrong_right` at L2 |
+| ~20 s | `hint_3`, "Watch me do it, then copy me." | `rescue`, gated by `rescue_delay` at 14 s |
 
-`hint_2` and the tutor's `show` are now the same sentence, by hand.
-`hint_1` and `hesitation_1` are not. Both reach the child.
+The dedupe is now load-bearing on two ladders landing on the same key at the
+same moment, which nothing enforces and no test covers. `hint_1` and
+`hesitation_1` already do not, at the same five seconds.
 
-`hint_level` and `hint_auto` are still computed, still latched, still put on the
-wire, and read by nobody but the server's own `first_try`. **DECISION NEEDED**:
-one ladder owns the voice. The contract says the tutor, so the server ladder
-should stop producing `reaction` lines and keep only what `Outcome.hint_level`
-needs. Keeping two ladders in step by copying strings between two files is not a
-structure that survives the weekend.
+`hint_level` and `hint_auto` are still computed, latched and sent, and read by
+nobody but the server's own `first_try`. **DECISION NEEDED**: one ladder owns the
+voice. The contract says the tutor, so the server ladder should stop producing
+`reaction` lines and keep only what `Outcome.hint_level` records.
+
 
 ### 2.6 BUG. `tutor_line_cuts` is dead, and a parallel mechanism does its job
 
@@ -433,35 +480,38 @@ pose 550 ms apart, and the child hears yes on the slower of the two clocks.
 
 ### 2.11 CLEANUP. Fields on the state message nobody renders
 
-Checked by name against `web/course/app.js` on 554dc0d.
+Counted by name against `web/course/app.js` at c9e8224.
 
 | Field | Refs in the page | Note |
 |---|---|---|
-| `pose_slip` | 0 | `app/server.py` docstring says it "rides along until the page has stopped reading it". The page has stopped. It can go. The contract (1.4) already says so. |
-| `hint_level` | 0 | Still needed by `Outcome.hint_level`, but nothing renders it. |
-| `hint_auto` | 0 | Feeds only the server's own `first_try`. Contract 1.4 already says the page must stop reading it, and it has. |
+| `pose_slip` | 0 | `app/server.py` says it "rides along until the page has stopped reading it". The page has stopped. It can go, and `docs/tutor_contract.md` 1.4 now says so. |
+| `hint_level` | 0 | Still needed by `Outcome.hint_level`; nothing renders it. |
+| `hint_auto` | 0 | Feeds only the server's own `first_try`, as the contract asked. |
 | `scored_gesture_error` | 0 | Latched on the server, on the wire, unread. |
 | `scored_math_error` | 0 | Same. |
 | `tutor_line_cuts` | 0 | See 2.6. |
-| `tutor_beat` | 0 | See 2.2. |
+| `tutor_beat` | 1 | Read as a bare truthy signal to clear the answer pill. Its contents are never used. See 2.2. |
 
-Seven of the message's fields are write-only. `first_try`, `tutor_line`,
-`tutor_state`, `tutor_visual`, `intervention_level` and `mode` are genuinely
-read.
+Seven of the message's fields are effectively write-only. `first_try`,
+`tutor_line`, `tutor_state`, `tutor_visual`, `intervention_level`, `mode`,
+`reasoning`, `fingers`, `state`, `exercise`, `tally`, `reaction`, `fact`,
+`node` and `demo` are genuinely read.
 
-### 2.12 CLEANUP. Messages the server handles that nothing sends
+### 2.12 CLEANUP. Messages nothing sends, and one nothing receives
 
 `app/server.py::command` accepts `start_node`, `hello`, `quit`, `check`, `next`,
 `hint`, `tts`, `speech`, `line_drop`, `repeat`.
 
 The page sends `start_node`, `check`, `hint`, `line_drop`, `next`, `quit`,
-`speech`, `tts`.
+`speech`, `tts`, **`ready`**.
 
-- `hello` is deliberate (a bare client with no course shell) and documented.
-- `repeat` has no sender at all. There is no `r` key in the tablet app: the
-  keydown handler at `app.js:1779-1794` handles digits, Backspace, Enter, `n`
-  and Escape only. `repeat` is a leftover of the `app/ui.py` OpenCV screen of
-  SPEC section 9, along with `p` and `d`, which are gone entirely.
+- `ready` is sent and not handled: 2.4b.
+- `hello` is deliberate, a bare client with no course shell, and documented.
+- `repeat` has no sender. `grep -c '"repeat"' web/course/app.js` is 0 and there
+  is no `r` key: the keydown handler takes digits, Backspace, Enter, `n` and
+  Escape. `repeat` is a leftover of the `app/ui.py` OpenCV screen of SPEC
+  section 9, along with `p` and `d`, which are gone entirely.
+
 
 ### 2.13 CLEANUP. Dead line keys and a dead module constant
 
@@ -497,7 +547,7 @@ follows the `if / elif / else` cannot fire, because every branch above assigns
 ## 3. Docs against code
 
 `docs/tutor_table.md` does not exist. `docs/tutor_contract.md` does, and had
-drifted on thirteen points. **All thirteen fixed in this commit** (`docs/` is
+drifted on eighteen points. **All eighteen fixed** (`docs/` is
 mine; nothing in `app/`, `lesson/`, `web/course/` or `tests/` was touched).
 
 | Section | Was | Now |
@@ -517,6 +567,11 @@ mine; nothing in `app/`, `lesson/`, `web/course/` or `tests/` was touched).
 | 4.1 | `POSE_READY` "has been held for `pose_stable`. The engine has latched." | the two clocks separated, with the 550 ms gap and what it costs F8 |
 | 4.2 | "the rescue has three triggers and **two** can raise it from any level… the child's third help request" | exactly one can. `hint_requested` passes its target through `_gate_level` like every other route, so `rescue_delay` gates it too; only two wrong answers bypass the clock, and `_answer_rescue`'s own docstring says so |
 | 5.2 | refers to `_count_pose_slip`, which no longer exists | `_score_gesture` / `_grace_spent`, with `POSE_GRACE_SECONDS` now the no-tutor fallback only |
+| 1.1 | `repeat` "not sent by the current page" | and never will be: there is no `r` key. Plus a new row for `ready`, which the page sends and the server drops |
+| 1.2 | the note said the page reads neither new field | `tutor_beat` is now read, as a bare signal, and still never played; the note says which half landed |
+| 2.2 | `gate_step_pause_ms` "belongs to the start gate, which is not built" | the gate is built; the paragraph now names both orphan parameters, the one the file has and the page ignores and the one the page reads and the file has not got |
+| 2.3 | the check node described as a 6 x 6 question | the three step gate as it is, with the `pairs` still ignored and what the banner said about an 8 and a 10 |
+| 2.3 | "computed once per server run" | a second block quote: `end_check()` never runs on the gate path, and the tutor is rebuilt per node, so the measured threshold reaches nothing |
 
 ### SPEC.md section 19, against the code
 
@@ -538,43 +593,55 @@ SPEC.md is not mine to edit, so these are reported, not fixed.
 - **SPEC section 9's key list** (`n`, `r`, `p`, `d`, `q`) describes the
   `app/ui.py` OpenCV screen, which no longer exists. The tablet app has `n`,
   Escape, digits, Backspace and Enter. Not urgent, but section 9 is the UI spec
-  and it now describes a program that is not in the repo.
+  and it now describes a program that is not in the repo. `p`, the recorded
+  landmark replay that section 9 calls "the safety net of the demo", is gone
+  with it, and SPEC section 14 still leans on a safety net existing.
+- **The start gate is in no amendment.** F7 bis brought in the scheduler and the
+  course nodes; nothing in section 19 mentions a three step gate in front of
+  every activity, its own line keys, or the two parameters of 2.3. It is the one
+  morning pass with no written decision behind it, and it is now the first screen
+  a child meets.
 
 ---
 
 ## 4. The mock flow and the demo replay
 
-Both were driven with playwright, chromium at
-`/opt/pw-browsers/chromium-1194/chrome-linux/chrome`, twice each: once on the
-pre-merge tree and once again on e15ab97 after main moved. The drivers are in
-the scratchpad, not committed.
+Driven with playwright, chromium at
+`/opt/pw-browsers/chromium-1194/chrome-linux/chrome`. Each flow was run on more
+than one tree as main moved; what follows is c9e8224 unless it says otherwise.
+The drivers live in the scratchpad and are not committed.
 
-**`python app/server.py --mock --no-open --port 8892`**: welcome, the name, the
-check, a lesson, the finish card.
+**`python app/server.py --mock --no-open --port <p>`**, welcome, the name, the
+start gate, a lesson, the finish card.
 
-- Welcome and the child roster work. The name is stored, the view routes.
-- The check reaches its third step and accepts an answer, but the answer is
-  judged against the wrong exercise: 2.1.
-- Its step-2 dot never lights, and not for the reason 2.1 gives. `setStepDots(2)`
-  lives in the `onStart` of the "Touch your 6 with your 6." line, and the queue
-  drops that line as `queue_full` before it is ever spoken, so its side effect
-  never runs. The child goes from step 1 straight to step 3 on screen. Putting a
-  screen transition inside the `onStart` of a line the queue is allowed to drop
-  is the shape of the bug, not this one line.
-- The lesson works: five questions, the counter, the hearts, the finish card,
-  70 XP both times.
-- The counter skipped a question in the run on e15ab97 ("1 of 5" straight to
-  "3 of 5"), the mock auto-skip of 2.4 again.
+- Welcome, the name and the child roster work. The record is stored per child and
+  the view routes.
+- The gate walks all three steps, `hands`, `pose`, `ready`, the step dots follow,
+  and it reaches "Say: I'm ready!". The step-2 dot bug seen on the earlier tree
+  is gone.
+- The gate's banner reads "That is a 6 and a 6" while the server is on 8 x 10:
+  2.1. The mock passes it only because the mock's hands always make whatever the
+  engine is on.
+- The lesson runs: five questions, the counter, the hearts, the finish card,
+  70 XP.
+- The counter skipped a question on one run ("1 of 5" straight to "3 of 5"), the
+  mock auto-skip of 2.4.
+- On the run at e15ab97 the success line never reached the bubble at all: the
+  `exercise_shown` line cut it. 2.2.
 
-**`python app/server.py --mock --demo --no-open --port 8893`**: the scripted
-scenario runs end to end and reaches the finish card, 83 XP on the first tree
-and 62 on e15ab97. Four of five steps both times, a different four each time:
-2.4.
+**`python app/server.py --mock --demo --no-open --port <p>`**: the scripted
+scenario runs end to end and reaches the finish card both times, 83 XP on the
+first tree and 62 on e15ab97. Four of the five steps both times, a different four
+each time. 2.4.
 
-No page errors in any run. One `ERR_CONNECTION_RESET` on first load, before
-the server finished binding; harmless.
+**A false alarm, recorded so nobody re-finds it.** A mock server of mine died
+mid session and the symptom, `ERR_CONNECTION_REFUSED`, matched the one that made
+50 `tests/test_voice.py` tests fail in an earlier run. It was neither: the server
+was a background job of a shell that exited, and the 50 failures were my own
+playwright sessions and pytest runs competing for the machine. An idle mock
+server polled every 20 s for two minutes stayed up and answered 200 every time.
+There is no server that dies on its own.
 
----
 
 ## 4b. The pattern under most of this
 
@@ -590,7 +657,8 @@ Nobody re-reads the pair, because each half has a green test.
 |---|---|---|---|
 | the success beat | `app/tutor.py` decides it (`tests/test_live_tutor.py:1560-1658`), `app/server.py` sends it (`tests/test_server.py:56`) | `web/course/app.js` plays it | both halves of the pipe are asserted; nothing asserts a beat is ever played |
 | the line that may cut | `app/tutor.py` sets `tutor_line_cuts`, the page's `say(opts.interrupt)` honours it | the wire between them | `tests/test_voice.py:895`, which sets the option by hand |
-| the ready gate | the line and the parameter exist and are in bounds | everything else | `tests/test_opening.py:125-136`, which asserts a constant and a string |
+| the ready gate | the line and the parameter exist and are in bounds | everything else, until it landed at c9e8224 | `tests/test_opening.py:125-136`, which asserts a constant and a string, and passed equally before and after the gate existed |
+| the `ready` message | the page sends it | `app/server.py::command` has no branch | nothing tests the pair, so nothing noticed |
 
 The test suite is 753 green and cannot see any of the three, because in each case
 the two ends were tested separately and the join was not tested at all. A field
@@ -606,18 +674,37 @@ spans two owners' files.
 
 ## 5. What needs an owner's decision
 
-1. **The start check's exercise** (2.1). Exempt `kind == "check"` from F10, or
-   take the check off the scheduler. Blocks the demo. Axel.
-2. **Where the success beat is enforced** (2.2). Server-side hold in `_advance`,
-   or page-side hold. Not both. Blocks the demo. Axel and whoever holds the page.
-3. **The ready gate** (2.3). Land it, or remove `gate_ready`,
-   `gate_step_pause_ms` and `PAGE_LINE_KEYS`. Blocks nothing today but a bounded
-   parameter nobody reads is a trap for Loop 2.
-4. **The mock auto-skip under `--demo`** (2.4). Blocks `make demo`. Axel.
+Ordered by cost if nobody touches it.
+
+1. **The gate's pose step and F10** (2.1). Exempt `kind == "check"` from the
+   uniform draw, or take the gate off the scheduler. Today the gate says "Touch
+   your 6 with your 6" while the engine is on another fact, so a child who obeys
+   cannot pass it. Axel.
+2. **Where the success beat is enforced** (2.2). The server holding `_advance`
+   for `total_ms`, or the page holding the render. One of them, not both, not
+   neither. Axel, with whoever holds the page.
+3. **The mock auto-skip under `--demo`** (2.4). One condition on one line, and
+   without it `make demo` is not reproducible, which is the whole point of
+   `demo/scenario.json`. Axel.
+4. **`ready` and `end_check`** (2.4b, 2.4c). The page sends a message the server
+   drops, and the camera check's threshold is both never fixed and thrown away
+   per node. Decide whether the measurement is meant to survive a node at all; if
+   it is, it cannot live on an object rebuilt per node. Axel and Ilan.
 5. **Which ladder speaks** (2.5). The server's `hint_1..3` or the tutor's L1..L4.
-   Axel and Ilan; the contract says the tutor.
-6. **`tutor_line_cuts`** (2.6). Page reads it, or it comes off the wire.
-7. **The line-drop vocabulary** (2.7). One list, in one place. Ilan owns the
-   tutor's end.
-8. **Params-file strictness** (2.9). The tutor tolerates a bad file, the engine
-   refuses to start on one, and the engine runs first.
+   The contract says the tutor. Keeping both in step by hoping they land on the
+   same line key is not a structure. Axel and Ilan.
+6. **`tutor_line_cuts`** (2.6). The page reads it, or it comes off the wire.
+   Right now the page guesses seven other names and gets the behaviour by
+   accident through `lineKind`.
+7. **The line-drop vocabulary** (2.7). One list, in one place. Two of the three
+   reasons the page sends are logged as `unknown`, and `interrupted` is
+   unreachable. Ilan owns the tutor's end.
+8. **Params-file strictness** (2.9). `build_tutor` decided a bad params file must
+   not stop the lesson; `Engine.__init__` raises on one, and runs first.
+9. **The two orphan gate parameters** (2.3). `gate_step_pause_ms` that nothing
+   reads, `gate_ready_button_s` that the page reads and the file has not got.
+   Small, and it will rot quietly because the fallback is graceful.
+
+And one that is nobody's feature but everybody's problem: **a test that a field
+is sent is not a test that anything reads it** (4b). The three blockers above all
+survived a green suite that way.

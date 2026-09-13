@@ -32,7 +32,8 @@ Existing, unchanged:
 | `quit` | `{type}` | Leaving the lesson, out of hearts, or the Back button. |
 | `hello` | `{type, state}` | A client with no course shell. Accepted by the server today, not sent by the current page. |
 | `hint` | `{type}` | The child asks for help. Accepted by the server today, not sent by the current page. It is the only child requested help, and the only help that costs first try (section 5). |
-| `repeat` | `{type}` | Replay the current exercise. Accepted by the server today, not sent by the current page. |
+| `repeat` | `{type}` | Replay the current exercise. Accepted by the server, and sent by nothing: there is no `r` key in the tablet app. A leftover of the `app/ui.py` screen of SPEC section 9. |
+| `ready` | `{type, node}` | **Sent by the page and handled by nobody.** `web/course/app.js` sends it when the start gate's last step passes; `app/server.py::command` has no branch for it and no `else`, so it is dropped in silence. It is why `end_check()` never runs on the gate path. |
 
 New:
 
@@ -155,13 +156,17 @@ Absent means false or null: a page that receives a message without one of these 
 `mode` as `"normal"`. The server always sends all ten; the rule exists so a page can talk to an older server
 without a special case.
 
-> **Neither of the last two is read today.** `web/course/app.js` contains no occurrence of `tutor_line_cuts` or of
-> `tutor_beat`. It infers the right to cut for itself instead, from `lineKind`/`ACK_STATES`, and it plays no beat
-> at all: `app/server.py::_check` pushes `answer_correct` and then `exercise_shown` in the same lock, so the cheer
-> class and the recap band are both replaced microseconds later and the success line is cut mid sentence by the
-> line announcing the next exercise. `success_beat_ms` and `next_pause_ms` therefore size nothing the child can
-> see. Whoever lands this has to decide where the beat is enforced, on the server by holding `_advance` or on the
-> page by holding the render, and do it in one place only.
+> **Neither of the last two is honoured today.** `web/course/app.js` contains no occurrence of `tutor_line_cuts`;
+> it infers the right to cut for itself from `lineKind` and `ACK_STATES`, so the behaviour is right by accident
+> rather than by the tutor's decision.
+>
+> `tutor_beat` is mentioned once, as a bare truthy signal to clear the answer pill, and never played:
+> `success_beat_ms` and `next_pause_ms` have zero occurrences in the page, and `parts` is never read. Nothing on
+> the server pauses either. `app/server.py::_check` pushes `answer_correct` and then `exercise_shown` inside the
+> same lock, so the cheer class and the recap band are replaced microseconds later, and the success line is cut
+> mid sentence by the line announcing the next exercise. Whoever lands this has to decide where the beat is
+> enforced, on the server by holding `_advance` for `total_ms` or on the page by holding the render, and do it in
+> exactly one place.
 
 ### 1.3 tutor_visual
 
@@ -386,11 +391,18 @@ of them: they are read as written and only clamped. Who reads each one, checked 
 arrived with the recovery, contact threshold and post-correction grace passes and belong to the owners of those
 passes; they are in the file on 554dc0d and are not documented here yet.
 
-`gate_step_pause_ms` (1000, bounds `[500, 2000]`) is read by nothing at all. It belongs to the start gate, which
-is not built: `lesson/tally_lines.json` carries `gate_ready` ("Say: I'm ready!"), `app/tutor.py` declares it in
-`PAGE_LINE_KEYS` with a comment saying the server hands it to the page, `app/server.py` has no occurrence of
-`gate`, and `web/course/app.js` has no gate either. A bounded parameter nobody reads is exactly what Loop 2 will
-later try to tune, so it should either be wired up or taken out.
+**The start gate has two policy parameters and neither is connected.** The gate itself is built, in
+`web/course/app.js`: three steps, `hands`, `pose` and `ready`, the pose step skipped for a child who has passed it
+before, `gate_ready` ("Say: I'm ready!") read from the line file by its key, and a Ready button for a browser with
+no microphone. But:
+
+- `gate_step_pause_ms` (1000, bounds `[500, 2000]`) is required by `app/tutor.py`, whose comment says it "is the
+  page's", and has zero occurrences in `web/course/app.js`.
+- `gate_ready_button_s` is the mirror image: the page reads it, its comment says "lesson/tutor_params.json owns
+  the value", and the file has not got it, so the page falls back to its own 6 seconds.
+
+The fallback is graceful, which is why nothing failed and why this will sit here. A bounded parameter nobody reads
+is exactly what Loop 2 will later try to tune, so one should be wired up and the other taken out.
 
 ### 2.3 motion_threshold is not in the file
 
@@ -413,13 +425,25 @@ practice path (`startCheck` in `web/course/app.js`, `{"id": "check", "kind": "ch
 Step 1 of that check is exactly a still hands measurement: the child holds both hands up, palms forward, while the
 numbers light up ten down to six, and nothing is being asked of them.
 
+The check is now the start gate, three steps: `hands`, `pose`, `ready`. It asks no arithmetic at all, and the
+pose step is skipped for a child who has passed it before, so the node is opened as
+`{"id": "check", "kind": "check", "steps": [...], "pairs": [[6, 6]]}` with the pairs present only when the pose
+step is.
+
 > **That `pairs` is ignored.** Amendment F10 removed node scoping from the draw: `Scheduler.set_scope` stores
-> `self.allowed` and its own docstring says "Neither one steers the draw", and `_choose` never consults it. The
-> check therefore serves a random fact while its screen is hard coded to 6 x 6, down to "That is a 6 and a 6" and
-> a pre-rendered 36 in `web/course/index.html`. Driven on the mock server the check served 9 x 9 on one run and
-> 7 x 7 on another, and answering 36 was marked wrong. The jitter measurement itself is unaffected, since step 1
-> asks nothing of the child, but the rest of the check is broken until the check node is exempted from F10 or
-> taken off the scheduler.
+> `self.allowed`, its own docstring says "Neither one steers the draw", and `_choose` never consults it. The gate
+> therefore serves a random fact while `gate_pose` says "Touch your 6 with your 6." and `gate_banner` says "That
+> is a 6 and a 6." Driven on the mock server at c9e8224 the gate's banner said that about an 8 and a 10. The
+> jitter measurement itself is unaffected, since the `hands` step asks nothing of the child, but a real child who
+> obeys the pose line holds 6 and 6 against an engine comparing against another fact, `correct_pose` never
+> arrives, and the gate does not pass.
+
+> **And the threshold does not survive the gate.** `end_check()` is called only from `app/server.py::_end_session`,
+> which fires when a node's outcome count reaches its target. The gate records no outcome now that it asks no
+> question, so the child leaves it through `quit`, which does not call `end_check()`. Beyond that,
+> `TutorLink.open` builds a fresh `Tutor` for every node, so a threshold fixed during the gate would be discarded
+> when the next node starts regardless. In practice `motion_threshold` is `MOTION_FLOOR` for every child in every
+> room, and the sentence above, "computed once per server run", is not true of the code.
 
 The measurement, in `app/tutor.py`:
 
