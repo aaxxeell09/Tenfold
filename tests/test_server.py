@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from datetime import timedelta
+from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -1311,3 +1313,305 @@ def test_a_missing_art_directory_is_not_a_broken_server(tmp_path, monkeypatch):
             await client.close()
             await srv.close()
     run(scenario())
+
+
+# --- live samples, app/live_samples.py ---------------------------------------
+
+
+def _window(offset: float = 0.0) -> Window:
+    """One perception window of plausible normalized points.
+
+    The offset shifts every point, so two windows are never the same
+    measurement and the writer's dedupe keeps both.
+    """
+    def hand(shift: float) -> HandFrame:
+        points = [(0.1 * index + shift, 0.05 * index + shift, 0.0) for index in range(21)]
+        return HandFrame(points=points, detection_conf=0.9,
+                         wrist_xy=(0.3 + shift, 0.5), scale=0.12)
+
+    return Window(left=[hand(offset) for _ in range(5)],
+                  right=[hand(offset + 1.0) for _ in range(5)])
+
+
+def _live(lesson, tmp_path, windows: int = 8, enabled: bool = True) -> Path:
+    """Point the lesson's writer at a temporary file, never data/live_samples.jsonl."""
+    path = tmp_path / "live_samples.jsonl"
+    lesson.live = server.LiveSampleWriter(path, windows, enabled,
+                                          logging.getLogger("test.server.live"))
+    return path
+
+
+def _rows(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def _start(lesson, name: str = "lea", pairs=((8, 7),), count: int = 1) -> None:
+    """A node for one named child, the way the page starts one."""
+    lesson.command({"type": "start_node", "state": {"learner_id": name},
+                    "node": _node("u2-l1", pairs=pairs, count=count)})
+
+
+def _hold(lesson, gesture, times, offset: float = 0.0, offer: bool = True) -> None:
+    """Hold one pose: a window offered on every frame, as the camera thread does.
+
+    offer is False for a writer that raises on the frame path: that path is
+    guarded inside server.camera_loop, and the camera tests below drive it.
+    """
+    for index, now in enumerate(times):
+        if offer:
+            lesson.live.offer(_window(offset + index * 0.05), gesture)
+        lesson.observe(gesture, [], 2, now)
+
+
+def _confirmed(lesson, offset: float = 0.0, offer: bool = True) -> str:
+    """The right pose, then the right answer. Returns the exercise title."""
+    pick = lesson.pick
+    _, right = _poses(lesson)
+    _hold(lesson, right, (0.0, 0.4, 0.8, 1.2, 1.6, 2.0), offset=offset, offer=offer)
+    title = lesson.engine.exercise.title
+    lesson.command({"type": "check", "value": pick.result})
+    return title
+
+
+def test_a_confirmed_exercise_writes_the_last_windows_it_saw(tmp_path):
+    """The one moment a lesson can label: a latched pose and a correct answer."""
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, windows=3)
+    _start(lesson)
+    pick = lesson.pick
+    title = _confirmed(lesson)
+
+    written = _rows(path)
+    assert len(written) == 3, "the last N windows of the hold, and no more"
+    for row in written:
+        assert row["confirmed_by_answer"] is True
+        assert row["exercise"] == title
+        assert row["label"] == {"method": "6-10", "left": pick.left,
+                                "right": pick.right, "contact": True}
+        assert row["seen_pose"] == row["label"], "the label is what was read"
+        assert row["target_pose"] == row["label"]
+        assert row["source"] == "live" and row["split"] == "live"
+        assert len(row["window"]) == 5
+    # The last three offered, not the first three: the thumb tip of _window(o)
+    # sits at x = 0.4 + o, and the six holds are offered 0.05 apart.
+    tips = [row["window"][-1]["left"]["points"][4][0] for row in written]
+    assert tips == pytest.approx([0.55, 0.60, 0.65])
+
+
+def test_only_a_scored_gesture_error_writes_a_hard_negative(tmp_path):
+    """A wrong finger is how the input works. Held past the grace, it is an error."""
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, windows=2)
+    _start(lesson)
+    pick = lesson.pick
+    wrong, _ = _poses(lesson)
+
+    _hold(lesson, wrong, (0.0, 0.4, 0.4 + server.POSE_GRACE_SECONDS - 0.1))
+    assert lesson.scored_gesture_error is False
+    assert _rows(path) == [], "a wrong pose inside the grace is not a negative"
+
+    _hold(lesson, wrong, (0.4 + server.POSE_GRACE_SECONDS,), offset=1.0)
+    assert lesson.scored_gesture_error is True
+
+    written = _rows(path)
+    assert len(written) == 2, "the windows of the held pose, N of them"
+    for row in written:
+        assert row["confirmed_by_answer"] is False
+        assert row["seen_pose"] == {"method": "6-10", "left": wrong.left,
+                                    "right": wrong.right, "contact": False}
+        assert row["target_pose"] == {"method": "6-10", "left": pick.left,
+                                      "right": pick.right, "contact": True}
+        assert row["label"] == row["seen_pose"]
+        assert row["exercise"] == lesson.engine.exercise.title
+
+    # Scored once per exercise, so a pose still held writes nothing more.
+    _hold(lesson, wrong, (12.0, 12.4), offset=2.0)
+    assert len(_rows(path)) == 2
+
+
+def test_a_mock_run_and_a_demo_run_record_nothing():
+    """Neither is a child in front of a camera, so neither is a sample."""
+    for flags in ({"mock": True}, {"demo": True}, {"mock": True, "demo": True}):
+        lesson = server.create_app(**flags)[server.LESSON_KEY]
+        assert lesson.live.enabled is False, flags
+
+    live = server.create_app()[server.LESSON_KEY].live
+    assert live.enabled is True, "a real camera in front of a real child records"
+    assert live.path == server.LIVE_SAMPLES_PATH
+    assert live.path.name == "live_samples.jsonl", "never the frozen dataset"
+
+
+def test_a_disabled_writer_plays_a_whole_exercise_and_writes_nothing(tmp_path):
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, enabled=False)
+    _start(lesson)
+    wrong, _ = _poses(lesson)
+    _hold(lesson, wrong, (0.0, 0.4, 0.4 + server.POSE_GRACE_SECONDS))
+    assert lesson.scored_gesture_error is True
+    _confirmed(lesson, offset=2.0)
+    assert not path.exists()
+
+
+def test_a_lesson_never_opens_the_frozen_dataset(tmp_path, monkeypatch):
+    """data/samples.jsonl and the held out set are frozen by the contract."""
+    import builtins
+
+    opened: list[tuple[str, str]] = []
+    real_open = builtins.open
+
+    def spy(file, mode="r", *args, **kwargs):
+        opened.append((str(file), mode))
+        return real_open(file, mode, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", spy)
+
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, windows=2)
+    _start(lesson)
+    _confirmed(lesson)
+
+    assert _rows(path), "the lesson did record something"
+    assert not any(Path(name).name in ("samples.jsonl", "test.jsonl")
+                   for name, _ in opened)
+    written = {name for name, mode in opened if any(c in mode for c in "wax+")}
+    assert written == {str(path)}, "one file is written, and it is the live one"
+
+
+def test_a_row_carries_a_hash_of_the_name_and_never_the_name(tmp_path):
+    """The name keeps the profiles apart on the device; the dataset gets an id."""
+    import hashlib
+
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, windows=2)
+    _start(lesson, name="  Lea  ")
+    _confirmed(lesson)
+
+    digest = hashlib.sha256(b"lea").hexdigest()[:12]
+    written = _rows(path)
+    assert written
+    for row in written:
+        assert row["learner_id"] == digest and row["person"] == digest
+        assert "lea" not in json.dumps(list(row.values())).lower()
+
+    assert server.live_learner_id("Lea") == digest, "trimmed, lowercased, stable"
+    assert server.live_learner_id("Noe") != digest, "two children, two learners"
+    assert server.live_learner_id("") == "" and server.live_learner_id(None) == ""
+
+
+def test_the_window_count_comes_from_the_tutor_params_file():
+    raw = json.loads(server.TUTOR_PARAMS_PATH.read_text(encoding="utf-8"))
+    assert raw["global"]["live_sample_windows"] == 8
+    assert raw["bounds"]["live_sample_windows"] == [4, 32]
+    assert server.windows_from_params(server.load_tutor_params()) == 8
+    assert server.create_app(mock=True)[server.LESSON_KEY].live.windows == 8
+
+
+def test_the_window_count_falls_back_to_eight_without_the_key(tmp_path):
+    """A file that is gone, broken or silent on the key costs a lesson nothing."""
+    missing = tmp_path / "not-there.json"
+    broken = tmp_path / "broken.json"
+    broken.write_text("{ not json", encoding="utf-8")
+    silent = tmp_path / "silent.json"
+    silent.write_text(json.dumps({"global": {"fps": 15}}), encoding="utf-8")
+    for path in (missing, broken, silent):
+        assert server.load_tutor_params(path) in ({}, {"global": {"fps": 15}})
+        assert server.windows_from_params(server.load_tutor_params(path)) == 8
+
+    chosen = tmp_path / "chosen.json"
+    chosen.write_text(json.dumps({"global": {"live_sample_windows": 5}}),
+                      encoding="utf-8")
+    assert server.windows_from_params(server.load_tutor_params(chosen)) == 5
+
+
+class ExplodingWriter:
+    """A writer whose every call raises, which is what a writer must never do."""
+
+    enabled = True
+
+    def offer(self, window, state):
+        raise RuntimeError("the disk is on fire")
+
+    def confirm_correct(self, *args):
+        raise RuntimeError("the disk is on fire")
+
+    def record_gesture_error(self, *args):
+        raise RuntimeError("the disk is on fire")
+
+
+def test_a_writer_that_raises_never_costs_the_child_the_lesson():
+    lesson = _lesson()
+    lesson.live = ExplodingWriter()
+    _start(lesson)
+    pick = lesson.pick
+    wrong, _ = _poses(lesson)
+    _hold(lesson, wrong, (0.0, 0.4, 0.4 + server.POSE_GRACE_SECONDS), offer=False)
+    assert lesson.scored_gesture_error is True, "the lesson scored it all the same"
+    _confirmed(lesson, offset=2.0, offer=False)
+
+    assert lesson.scheduler.outcomes[0].given == pick.result
+    assert lesson.hub.message["type"] == "node_end", "the node finished"
+
+
+class FramingCamera:
+    """A capture that delivers a few lit frames and then asks the loop to stop."""
+
+    def __init__(self, stop: threading.Event, frames: int = 3) -> None:
+        self._stop = stop
+        self._frames = frames
+        self.calls = 0
+        self.released = False
+
+    def read(self):
+        import numpy as np
+
+        self.calls += 1
+        if self.calls >= self._frames:
+            self._stop.set()
+        return True, np.zeros((48, 64, 3), dtype="uint8")
+
+    def release(self) -> None:
+        self.released = True
+
+
+def _camera_run(lesson, monkeypatch, gesture) -> FramingCamera:
+    """The real camera thread, with a fake camera and a fixed classifier."""
+    import app.camera as camera_module
+    import app.landmarks as landmarks
+    import classifier.loader as loader
+
+    stop = threading.Event()
+    camera = FramingCamera(stop)
+    monkeypatch.setattr(camera_module, "open_camera", lambda index=None: (camera, 0))
+    monkeypatch.setattr(landmarks, "HandDetector", FakeDetector)
+    monkeypatch.setattr(loader, "load_classifier", lambda: (lambda window: gesture))
+    server.camera_loop(lesson, stop, None)
+    return camera
+
+
+def test_the_camera_thread_only_buffers_and_touches_no_file(tmp_path, monkeypatch):
+    """offer is on the frame path, so it may never do IO there."""
+    lesson = _lesson()
+    path = _live(lesson, tmp_path)
+    gesture = GestureState(method="6-10", left=8, right=7, contact=True, confidence=0.9)
+    camera = _camera_run(lesson, monkeypatch, gesture)
+
+    assert camera.calls >= 3 and camera.released
+    assert not path.exists(), "the frame path never writes"
+    # The windows the classifier saw were kept, so an event can still write one.
+    assert lesson.live.confirm_correct("lea", "8 x 7", (8, 7)) == 1
+    assert _rows(path)[0]["label"] == {"method": "6-10", "left": 8, "right": 7,
+                                       "contact": True}
+
+
+def test_a_writer_that_raises_on_the_frame_path_is_not_a_camera_failure(monkeypatch):
+    lesson = _lesson()
+    lesson.live = ExplodingWriter()
+    gesture = GestureState(method="6-10", left=8, right=7, contact=True, confidence=0.9)
+    camera = _camera_run(lesson, monkeypatch, gesture)
+
+    assert camera.calls >= 3 and camera.released
+    assert lesson.hub.message["tally"] != server.CAMERA_LOST
+    assert lesson.fault is None, "a sample is never worth the camera"

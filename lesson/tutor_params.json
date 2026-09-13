@@ -20,7 +20,8 @@
     "max_unsolicited_verbal": 3,
     "max_visibility_reminders": 2,
     "supportive_mode_factor": 0.8,
-    "independent_mode_factor": 1.4
+    "independent_mode_factor": 1.4,
+    "live_sample_windows": 8
   },
   "bounds": {
     "fps": [15, 15],
@@ -43,7 +44,8 @@
     "max_unsolicited_verbal": [2, 4],
     "max_visibility_reminders": [1, 3],
     "supportive_mode_factor": [0.65, 1.0],
-    "independent_mode_factor": [1.1, 2.0]
+    "independent_mode_factor": [1.1, 2.0],
+    "live_sample_windows": [4, 32]
   },
   "invariants": [
     "Movement means Tally is silent.",

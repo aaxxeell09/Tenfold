@@ -62,6 +62,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import logging
@@ -84,6 +85,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from aiohttp import WSMsgType, web  # noqa: E402
 
+from app.live_samples import (  # noqa: E402
+    LIVE_SAMPLES_PATH,
+    LiveSampleWriter,
+    windows_from_params,
+)
 from classifier import features  # noqa: E402
 from classifier.schema import FINGER_NUMBERS, GestureState, Window  # noqa: E402
 from lesson import tally  # noqa: E402
@@ -127,6 +133,14 @@ INDEX = COURSE_DIR / "index.html"
 ART_DIR = COURSE_DIR / "art"
 # Five exercises for a lesson, eight for a boss, matching web/course/levels.js.
 NODE_LENGTH = {"lesson": 5, "boss": 8, "check": 1}
+
+# lesson/tutor_params.json, read here for one key, live_sample_windows: how many
+# perception windows one live sample event is worth. app/tutor.py reads the same
+# file for its own timings and owns every other key in it.
+TUTOR_PARAMS_PATH = REPO_ROOT / "lesson" / "tutor_params.json"
+# How many hex characters of the learner hash a live sample row carries. Twelve
+# is what lesson/scheduler.py already gives a learner id, so the two read alike.
+LEARNER_HASH_LENGTH = 12
 
 DEFAULT_PORT = 8000
 VIDEO_FPS = 20.0
@@ -587,6 +601,60 @@ class TutorLink:
             self.fields.update(payload)
 
 
+# --- the live sample writer, app/live_samples.py -----------------------------
+
+
+_LIVE_FAULTS: set[str] = set()
+
+
+def load_tutor_params(path: Path = TUTOR_PARAMS_PATH) -> dict[str, Any]:
+    """The tutor parameter file as plain JSON, or nothing at all.
+
+    app/tutor.py validates that file and refuses to start on a bad one. Here it
+    is read for a single number, so a file that is missing or unreadable is not
+    an error: windows_from_params falls back to its own default and the lesson
+    runs. Nothing is written back, ever.
+    """
+    try:
+        with open(path, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        log.warning("server: %s could not be read, live samples use the default", path)
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def live_learner_id(learner_id: Any) -> str:
+    """Who a live sample row belongs to: a hash of the child's identity.
+
+    The identity on this device stays the first name from the welcome screen,
+    trimmed and lowercased, and that is what keeps profiles, XP, tutor factors
+    and the tutor log apart per child. data/live_samples.jsonl is a dataset that
+    may one day reach the critic, so it carries a stable id derived from that
+    name instead: the same child is the same learner on the same machine, two
+    children stay two learners, and no row carries a child's first name.
+
+    Reverting to the plain name is the one return below.
+    """
+    name = str(learner_id or "").strip().lower()
+    if not name:
+        return ""
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:LEARNER_HASH_LENGTH]
+
+
+def live_failed(name: str) -> None:
+    """A live sample call that raised. Logged once per call site, then ignored.
+
+    app/live_samples.py swallows its own failures; this is the second belt, so
+    that a writer which is missing a method or raises anyway costs a child in
+    front of the camera nothing. Same discipline as call_tutor.
+    """
+    if name in _LIVE_FAULTS:
+        return
+    _LIVE_FAULTS.add(name)
+    log.exception("server: live_samples %s raised, carrying on without it", name)
+
+
 # --- shared state between the camera thread and the event loop --------------
 
 
@@ -721,6 +789,10 @@ class Lesson:
         # how much the hands are moving, and the per learner factors.
         self.tutor = TutorLink()
         self.motion = MotionMeter()
+        # Real windows from real lessons, app/live_samples.py. Disabled here, so
+        # a Lesson built by hand records nothing; create_app hands over the one
+        # that writes, and only when the camera is a real child's camera.
+        self.live = LiveSampleWriter()
         # The tutor can ask for an early stop. It does not call the scheduler,
         # so the one mastered fact and the close are served from here.
         self.early_stop = False
@@ -740,6 +812,11 @@ class Lesson:
             message["tally"] = self.fault
         self.hub.publish(message)
         self._last_push = time.monotonic()
+
+    @property
+    def live_learner(self) -> str:
+        """Whose live sample rows these are. The hash, never the child's name."""
+        return live_learner_id(self.learner.learner_id)
 
     def decided(self) -> dict[str, Any]:
         """The eight tutor fields for this message.
@@ -918,6 +995,17 @@ class Lesson:
                             hint=dict(current.hint))
             self._follow_tutor()
             scored = self._score_gesture(gesture, hands_seen, now)
+            if scored and self.pick is not None:
+                # A hard negative, and the only kind a lesson can label: the pose
+                # the classifier read on the windows just offered, against the
+                # pose the exercise asked for. A wrong pose on its own is not one
+                # of these: the child is still assembling the gesture.
+                try:
+                    self.live.record_gesture_error(
+                        self.live_learner, current.exercise.title, gesture,
+                        (self.pick.left, self.pick.right))
+                except Exception:
+                    live_failed("record_gesture_error")
             if update is not None:
                 self.push(update, reaction=reaction)
             elif reaction is not None:
@@ -1219,6 +1307,16 @@ class Lesson:
         self.push(update, reaction=reaction)
         if not correct:
             return
+        # A correct pose the engine latched, corroborated by a correct answer:
+        # the one moment in a lesson where the windows behind it are worth
+        # keeping. engine.check answers nothing without a latch, so correct_pose
+        # is already true here; it is named because it is the rule.
+        if self.correct_pose:
+            try:
+                self.live.confirm_correct(self.live_learner, update.exercise.title,
+                                          (self.pick.left, self.pick.right))
+            except Exception:
+                live_failed("confirm_correct")
         self._record(correct=True, given=value)
         self._advance()
 
@@ -1330,9 +1428,17 @@ def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None)
             frame = cv2.flip(frame, 1)
             lesson.hub.set_frame(encode_jpeg(frame))
             window = normalizer.update(detector.detect(frame))
+            verdict = classify(window)
+            # Every window, right off the classifier. It only buffers: no file
+            # is touched here, because this thread has 100 ms per frame and
+            # MediaPipe spends most of it.
+            try:
+                lesson.live.offer(window, verdict)
+            except Exception:
+                live_failed("offer")
             fingers = fingers_from_window(window)
             hands_seen = len({f["hand"] for f in fingers})
-            lesson.observe(classify(window), fingers, hands_seen, time.monotonic(),
+            lesson.observe(verdict, fingers, hands_seen, time.monotonic(),
                            palm=palm_size(window))
     except Exception:
         log.exception("server: the camera thread stopped")
@@ -1595,6 +1701,14 @@ def create_app(mock: bool = False, camera: int | None = None,
     # data/tutor_log.jsonl is the dataset Loop 2 is built on, so a run with no
     # camera in front of a child never writes a line into it.
     lesson.tutor.keep_log = not mock
+    # Real windows from real lessons, into data/live_samples.jsonl. The mock
+    # camera has no hands in front of it and the demo is a rehearsed script, so
+    # neither is a child and neither records a sample. How many windows one
+    # event is worth comes from lesson/tutor_params.json, key
+    # live_sample_windows, and falls back to eight without it.
+    lesson.live = LiveSampleWriter(LIVE_SAMPLES_PATH,
+                                   windows_from_params(load_tutor_params()),
+                                   enabled=not (mock or demo), log=log)
     lesson.trace = make_tracer()
     stop = threading.Event()
     worker = threading.Thread(
