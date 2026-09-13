@@ -11,8 +11,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -50,27 +52,51 @@ def version_rows(metrics: dict | None, repo: Path, with_diff: bool) -> list[dict
     return rows
 
 
-def retrospective(repo: Path, best: str | None) -> dict | None:
-    """The latest validation rétrospective report from eval/retro_validate.py for the running version, strict scores.
-    Kept apart from the held-out fields on purpose: the critic saw these holds and participants are not identified."""
+def retro_reports(repo: Path) -> list[dict]:
+    """Every readable validation rétrospective report from eval/retro_validate.py, oldest first, strict scores."""
     base = repo.parent / "tenfold-validation"
-    reports = sorted(base.glob("*/report-*.json"), key=lambda p: p.stat().st_mtime) if base.is_dir() else []
-    for path in reversed(reports):
+    out = []
+    for path in sorted(base.glob("*/report-*.json"), key=lambda p: p.stat().st_mtime) if base.is_dir() else []:
         r = read_json(path)
-        if not r or (best and (r.get("b") or {}).get("commit") != best):
+        if not r:
             continue
         try:
-            side = {k: {"commit": r[k]["commit"], "rules_sha256": r[k]["sha256"],
-                        "exact_match": r["metrics"][f"{k}_strict"]["exact_match"],
-                        "ci95": r["metrics"][f"{k}_strict"]["exact_match_ci95"]} for k in ("a", "b")}
-            return {"label": r["label"], "caveat": r.get("caveat"), "name": r["validation"].get("manifest"),
-                    "holds": r["validation"]["holds"], "windows": r["validation"]["windows"],
-                    "validation_sha256": r["validation"]["sha256"], "source_sha256": r["validation"].get("source_sha256"),
-                    "scoring": "strict: a missing prediction fails", **side,
-                    "paired": r["paired_exact_match_per_hold"]["strict"]}
+            side = {}
+            for k in ("a", "b"):
+                m = r["metrics"][f"{k}_strict"]
+                side[k] = {"commit": r[k]["commit"], "rules_sha256": r[k]["sha256"], "exact_match": m["exact_match"],
+                           "ci95": m["exact_match_ci95"], "near_contact_accuracy": m.get("near_contact_accuracy"),
+                           "contact_accuracy": m.get("contact_accuracy"), "false_unknown_rate": m.get("false_unknown_rate")}
+            near = [c for name, c in (r.get("per_class") or {}).items() if name.startswith("near:")]
+            out.append({"label": r["label"], "caveat": r.get("caveat"), "name": r["validation"].get("manifest"),
+                        "holds": r["validation"]["holds"], "windows": r["validation"]["windows"],
+                        "near_holds": sum(c.get("holds") or 0 for c in near), "near_windows": sum(c.get("windows") or 0 for c in near),
+                        "validation_sha256": r["validation"]["sha256"], "source_sha256": r["validation"].get("source_sha256"),
+                        "scoring": "strict: a missing prediction fails", **side,
+                        "paired": r["paired_exact_match_per_hold"]["strict"]})
         except (KeyError, TypeError):
             continue
-    return None
+    return out
+
+
+def retrospective(repo: Path, best: str | None) -> dict | None:
+    """The latest validation rétrospective report for the running version. Kept apart from the held-out fields on
+    purpose: the critic saw these holds and participants are not identified."""
+    return next((r for r in reversed(retro_reports(repo)) if not best or r["b"]["commit"] == best), None)
+
+
+def retrospective_versions(repo: Path) -> list[dict]:
+    """The latest report per compared version, all against the same baseline and the same validation file as the
+    newest report, so the dashboard can draw every version's plausible range on one axis."""
+    reports = retro_reports(repo)
+    if not reports:
+        return []
+    newest = reports[-1]
+    latest = {}
+    for r in reports:
+        if r["a"]["commit"] == newest["a"]["commit"] and r["validation_sha256"] == newest["validation_sha256"]:
+            latest[r["b"]["commit"]] = r
+    return list(latest.values())
 
 
 EXAMPLE_CLASSES = ("near:6x10", "near:6x6", "near:10x8", "near:9x10", "6x6", "7x8", "10x10")
@@ -118,6 +144,27 @@ def explorer(repo: Path, informed: dict | None) -> dict | None:
 
     def summary(m: dict) -> dict:
         return {**{k: m.get(k) for k in METRICS}, "per_class": m.get("per_class")}
+
+    # The first committed rules.py (V0) and the running one, scored on this same file with the same scorers, so the
+    # dashboard's "before the AI" numbers never mix datasets.
+    compare = None
+    first = git(repo, "log", "--reverse", "--format=%H", "--", "classifier/rules.py").split()
+    if first:
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                first_path = Path(tmp) / "rules_first.py"
+                first_path.write_text(git(repo, "show", f"{first[0]}:classifier/rules.py"))
+                first_mod = load_rules(first_path)
+                first_metrics, _ = evaluate(first_mod.classify, samples)
+            now_metrics, _ = evaluate(mod.classify, samples)
+            near = [s for s in samples if s.get("kind") == "near_contact"]
+            last = git(repo, "log", "-1", "--format=%H", "--", "classifier/rules.py").strip()
+            compare = {"a": {"commit": first[0], "constants": numeric_constants(first_mod), **{k: first_metrics.get(k) for k in METRICS}},
+                       "b": {"commit": last, "constants": constants, **{k: now_metrics.get(k) for k in METRICS}},
+                       "windows": len(samples), "holds": len({s.get("hold_id", s["id"]) for s in samples}),
+                       "near_windows": len(near), "near_holds": len({s.get("hold_id", s["id"]) for s in near})}
+        except Exception as e:  # a V0 that no longer loads must not take the rest of the snapshot down
+            compare = {"error": f"{type(e).__name__}: {e}"}
 
     sweep = {}
     for name, value in constants.items():
@@ -176,8 +223,27 @@ def explorer(repo: Path, informed: dict | None) -> dict | None:
     return {"data": "train side only" if os.environ.get("TENFOLD_TRAIN_SAMPLES") else "whole dataset (no split active)",
             "data_sha": data_sha, "windows": len(samples),
             "rules_sha256": hashlib.sha256(rules_path.read_bytes()).hexdigest(),
-            "constants": constants, "gate_base": {"tag": base_tag, **summary(base)},
+            "constants": constants, "gate_base": {"tag": base_tag, **summary(base)}, "compare": compare,
             "sweep": sweep, "examples": examples}
+
+
+REFUSALS = (("gate", re.compile(r"^(\S+) metric gate rejected: (.+)$")),
+            ("guard", re.compile(r"^(\S+) patch attempt \d+ rejected: GUARD_REJECT agent: (.+)$")))
+
+
+def refusals(repo: Path) -> list[dict]:
+    """Every patch the guard agent or the metric gate refused, from the loop's logs (loop/*.log, loop/*.out), across
+    runs, deduplicated by time and stage. The metrics files only keep the refusals of the run that wrote them."""
+    seen, out = set(), []
+    logs = sorted((repo / "loop").glob("*.log")) + sorted((repo / "loop").glob("*.out"))
+    for path in logs:
+        for line in path.read_text(errors="replace").splitlines():
+            for stage, pattern in REFUSALS:
+                m = pattern.match(line)
+                if m and (m.group(1), stage) not in seen:
+                    seen.add((m.group(1), stage))
+                    out.append({"stage": stage, "ts": m.group(1), "reason": m.group(2)[:240]})
+    return sorted(out, key=lambda r: r["ts"])
 
 
 def build(repo: Path) -> dict:
@@ -196,10 +262,12 @@ def build(repo: Path) -> dict:
         "informed": version_rows(informed, repo, with_diff=True),
         "blind": version_rows(blind, repo, with_diff=False),
         "rejected": rejected,
+        "refused": refusals(repo),
         "critic_commits": commits,
         "knn_heldout": slim((knn or {}).get("metrics")),
         "detection_ceiling": read_json(repo / "data" / "detection_ceiling.json"),
         "retrospective_validation": retrospective(repo, best),
+        "retrospective_versions": retrospective_versions(repo),
         "explorer": explorer(repo, informed),
     }
 

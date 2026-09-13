@@ -51,9 +51,18 @@ def full_snapshot() -> dict:
              "per_class": {"near:6x10": 0.7 + d, "6x6": 0.67}, "gate": "PASS" if d > 0 else "FAIL",
              "why": "exact_match 0.492 -> 0.497" if d > 0 else "no improvement"}
             for value, d in ((0.25, -0.01), (0.2826, 0.005), (0.2975, 0.0))]
+    snap["refused"] = [{"stage": "guard", "ts": "2026-09-12T22:29:09+00:00", "reason": "VERDICT: REJECT | Rule 1 | not allowed"},
+                       {"stage": "gate", "ts": "2026-09-12T23:34:54+00:00", "reason": "class 9x9 fell 1.00 -> 0.67 (limit 5 points)"}]
+    second = copy.deepcopy(snap["retrospective_validation"])
+    second["b"]["commit"] = "c" * 40
+    second["paired"].update(mean_difference=0.024, ci95=[-0.012, 0.073])
+    snap["retrospective_versions"] = [snap["retrospective_validation"], second]
     snap["explorer"] = {
         "data": "train side only", "data_sha": "448d3292a217", "windows": 483, "rules_sha256": "2" * 64,
         "constants": {"CONTACT_THRESHOLD": 0.2975, "UNKNOWN_THRESHOLD": 0.525},
+        "compare": {"a": {"commit": "a" * 40, "constants": {"CONTACT_THRESHOLD": 0.35}, "exact_match": 0.464, "near_contact_accuracy": 0.40},
+                    "b": {"commit": "b" * 40, "constants": {"CONTACT_THRESHOLD": 0.2975}, "exact_match": 0.5, "near_contact_accuracy": 0.78},
+                    "windows": 483, "holds": 220, "near_windows": 72, "near_holds": 24},
         "gate_base": {"tag": "v2", "exact_match": 0.492, "near_contact_accuracy": 0.73, "false_unknown_rate": 0.047,
                       "per_class": {"near:6x10": 0.7, "6x6": 0.67}},
         "sweep": {"CONTACT_THRESHOLD": {"current": 0.2975, "rows": rows}},
@@ -84,6 +93,27 @@ def test_snapshot_explorer_is_computed_from_the_train_file_with_the_real_rules(t
     for example in explorer["examples"]:
         assert len(example["left"]) == len(example["right"]) == 21 and len(example["tip_distances"]) == 5
         assert len(example["answers_by_contact_threshold"]) == 33
+    # "before the AI" is the first committed rules.py scored on the same file; in this repo it is the running one
+    compare = explorer["compare"]
+    assert "error" not in compare and compare["windows"] == windows
+    assert compare["a"]["commit"] == compare["b"]["commit"] and compare["a"]["exact_match"] == compare["b"]["exact_match"]
+    assert compare["a"]["constants"]["CONTACT_THRESHOLD"] == 0.35
+
+
+def test_snapshot_collects_refusals_from_every_run_log_once(tmp_path):
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_guard_and_loop import make_repo
+    repo = make_repo(tmp_path)
+    gate_line = "2026-09-12T23:34:54+00:00 metric gate rejected: class 9x9 fell 1.00 -> 0.67 (limit 5 points), 1 class(es) regressed"
+    guard_line = "2026-09-12T22:29:09+00:00 patch attempt 1 rejected: GUARD_REJECT agent: VERDICT: REJECT | Rule 1 | not allowed"
+    (repo / "loop" / "nightly-run1.log").write_text(f"{guard_line}\n2026-09-12T22:30:00+00:00 diagnosis: something\n{gate_line}\n")
+    (repo / "loop" / "nightly.log").write_text(f"{gate_line}\n")  # the latest log repeats a run already archived
+    p = subprocess.run([sys.executable, "loop/snapshot.py", "--repo", str(repo)], cwd=repo, capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": str(repo)})
+    assert p.returncode == 0, p.stderr
+    refused = json.loads((repo / "data" / "snapshot.json").read_text())["refused"]
+    assert [(r["stage"], r["ts"][:13]) for r in refused] == [("guard", "2026-09-12T22"), ("gate", "2026-09-12T23")]
+    assert refused[1]["reason"].startswith("class 9x9 fell")
 
 
 def test_snapshot_carries_the_retrospective_validation_under_its_own_name(tmp_path):
