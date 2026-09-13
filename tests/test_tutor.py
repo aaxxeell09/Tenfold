@@ -209,6 +209,88 @@ def test_call_records_model_usage_and_latency(monkeypatch):
     assert isinstance(record["latency_ms"], int)
 
 
+# ---------- the correction reaches the model with and without Weave ----------
+
+SERVER_HINT = {"hand": "right", "move_from": 9, "move_to": 7}   # the shape app/server.py puts in context["hint"]
+
+
+def _fake_http(monkeypatch, sent, fail=False):
+    class Resp:
+        def raise_for_status(self):
+            if fail:
+                raise RuntimeError("503")
+
+        def json(self):
+            return {"model": "served/model", "usage": {}, "choices": [{"message": {"content": "Slide it to 7."}}]}
+
+    def post(url, headers, timeout, json):
+        sent.append(json["messages"][1]["content"])
+        return Resp()
+    monkeypatch.setattr(tmod.httpx, "post", post)
+
+
+def _fake_weave(monkeypatch, recorded):
+    def op(name):
+        def wrap(fn):
+            def traced(event, context, model):
+                recorded.append(context)
+                return fn(event, context, model)
+            return traced
+        return wrap
+    monkeypatch.setitem(sys.modules, "weave", types.SimpleNamespace(init=lambda project: None, op=op))
+    monkeypatch.setattr(tmod, "_WEAVE", {"tried": False, "op": None})
+
+
+def test_traced_and_untraced_paths_send_the_same_correction(monkeypatch):
+    sent, recorded = [], []
+    _fake_http(monkeypatch, sent)
+    _fake_weave(monkeypatch, recorded)
+    ctx = {"hint": dict(SERVER_HINT), "answer": None, "exercise": "7 x 7"}
+    lines = {}
+    for trace in (False, True):
+        t = tmod.Tutor(fallback=tally.phrase, api_key="k", timeout=1.0, trace=trace)
+        t.phrase("wrong_right_finger", ctx); _wait_idle(t)
+        lines[trace] = t.phrase("wrong_right_finger", ctx)
+    assert lines == {False: "Slide it to 7.", True: "Slide it to 7."}
+    untraced, traced = sent
+    assert traced == untraced
+    assert "from 9 to 7" in traced and "Move your right finger from 9 to 7." in traced
+    assert len(recorded) == 1 and recorded[0]["hint"] == SERVER_HINT   # Weave records the move too
+    assert ctx["hint"] == SERVER_HINT                                   # the caller's context is untouched
+
+
+def test_traced_path_reads_a_hint_object(monkeypatch):
+    sent, recorded = [], []
+    _fake_http(monkeypatch, sent)
+    _fake_weave(monkeypatch, recorded)
+    t = tmod.Tutor(fallback=tally.phrase, api_key="k", trace=True)
+    t._traced_call("wrong_right_finger", {"hint": types.SimpleNamespace(**SERVER_HINT), "exercise": "7 x 7"})
+    assert "from 9 to 7" in sent[0] and "Move your right finger from 9 to 7." in sent[0]
+    assert recorded[0]["hint"] == SERVER_HINT
+
+
+def test_no_key_never_calls_the_model_and_keeps_tallys_line(monkeypatch):
+    monkeypatch.delenv("WANDB_API_KEY", raising=False)
+    sent = []
+    _fake_http(monkeypatch, sent)
+    t = tmod.Tutor(fallback=tally.phrase)
+    ctx = {"hint": dict(SERVER_HINT), "answer": None, "exercise": "7 x 7"}
+    for _ in range(3):
+        assert t.phrase("wrong_right_finger", ctx) == "Almost. Your left hand is good. Move your right finger from 9 to 7."
+    assert not t.enabled and not t.trace and sent == [] and not t._inflight
+
+
+def test_traced_model_failure_keeps_tallys_line(monkeypatch):
+    sent, recorded = [], []
+    _fake_http(monkeypatch, sent, fail=True)
+    _fake_weave(monkeypatch, recorded)
+    t = tmod.Tutor(fallback=tally.phrase, api_key="k", timeout=0.5, trace=True)
+    ctx = {"hint": dict(SERVER_HINT), "answer": None, "exercise": "7 x 7"}
+    fb = t.phrase("wrong_right_finger", ctx); _wait_idle(t)
+    assert fb == tally.phrase("wrong_right_finger", ctx) and "from 9 to 7" in fb
+    assert t.phrase("wrong_right_finger", ctx) == fb and t.stats["errors"] == 1 and len(sent) == 1
+
+
 def test_kill_switch_keeps_the_fallback(monkeypatch):
     monkeypatch.setenv("TENFOLD_TUTOR", "0")
     t = tmod.Tutor(fallback=tally.phrase, api_key="k")

@@ -81,6 +81,15 @@ def _hint_fields(ctx: dict[str, Any]) -> tuple[Any, Any]:
     return ctx.get("move_from"), ctx.get("move_to")
 
 
+def _plain_hint(hint: Any) -> Optional[dict[str, Any]]:
+    """The hint as a plain dict, so Weave can record it and _hint_fields and tally.phrase still read the move."""
+    if hint is None:
+        return None
+    if isinstance(hint, dict):
+        return dict(hint)
+    return {name: getattr(hint, name, None) for name in ("hand", "move_from", "move_to")}
+
+
 class Line(str):
     """The model's words for one moment, carrying the served model, token usage and latency of the call."""
     model: Optional[str] = None
@@ -191,7 +200,9 @@ class Tutor:
             # one op per instance, so a second Tutor never runs with the first one's key or model
             self._op = _WEAVE["op"](name="tutor.call")(lambda event, context, model: as_record(self._call(event, context)))
         if self.trace and getattr(self, "_op", None) is not None:
-            out = self._op(event, {k: v for k, v in ctx.items() if k != "hint"} | {"hint": _hint_fields(ctx)}, self.model)
+            # the op must hand _call the same correction as the untraced path, so the hint stays a mapping
+            context = {**ctx, "hint": _plain_hint(ctx["hint"])} if "hint" in ctx else dict(ctx)
+            out = self._op(event, context, self.model)
             return out["text"] if isinstance(out, dict) else out
         return self._call(event, ctx)
 
