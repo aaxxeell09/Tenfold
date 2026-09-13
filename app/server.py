@@ -1118,7 +1118,7 @@ class Lesson:
                                  message.get("tab"))
             elif kind == "hello":
                 self._hello(message.get("state"), client)
-            elif not self._may_change(client):
+            elif not self._may_change(client, message.get("tab")):
                 # A second tab was refused its node but keeps its buttons, its keys
                 # and its microphone. None of them may reach the first tab's lesson.
                 log.info("server: ignored %s from a client that does not own the session", kind)
@@ -1137,14 +1137,20 @@ class Lesson:
             elif kind == "repeat":
                 self.push(self.engine.repeat())
 
-    def _may_change(self, client: object | None) -> bool:
+    def _may_change(self, client: object | None, tab: Any = None) -> bool:
         """Whether this client may change the running session. Call with the lock held.
 
-        Only the socket that started it may. A session whose owner went away has
-        nobody to take commands from until a start_node claims it back, which is
-        what a reconnecting page sends first.
+        Only the socket that started it may, with one opening: the same page on a
+        new socket rather than a second tab. Concretely,
+        a client naming the page load that owns the session is that page on a new
+        socket, whatever order its messages arrive in: a reconnect sends its tts
+        and its speech as soon as Tally talks, which is often before its
+        start_node lands. An ownerless node still takes nothing until a
+        start_node claims it back.
         """
-        return client is None or not self.running or client is self.owner
+        if client is None or not self.running or client is self.owner:
+            return True
+        return isinstance(tab, str) and bool(tab) and tab == self.owner_tab
 
     def _tts(self, speaking: bool) -> None:
         """The page has started or finished saying a line.

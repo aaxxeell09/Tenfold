@@ -122,7 +122,9 @@ def test_the_page_is_served_at_the_root():
             response = await client.get("/")
             assert response.status == 200
             body = await response.text()
-            assert 'id="course"' in body, "the course shell is the page now"
+            # the page is the export's own markup now, one view per export page
+            for view in ('welcome', 'home', 'practice', 'check', 'lesson', 'profile'):
+                assert f'id="{view}"' in body, f"the {view} view is part of the page"
             assert 'src="app.js' in body and 'src="levels.js' in body
         finally:
             await client.close()
