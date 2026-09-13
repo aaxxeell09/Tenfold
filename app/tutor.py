@@ -171,9 +171,12 @@ FRAME_PARAMS = ("pose_confirm_frames",)
 # gate_step_pause_ms is the page's: the beat it holds after a gate step passes
 # so the child hears the confirmation before the next instruction. The tutor
 # reads it only to hand it over, bounded like everything else.
+# post_line_grace_ms is the quiet after any line Tally says, the floor under
+# min_verbal_gap. The two are measured from the same moment, the last line, so
+# the quiet is the longer of them and never the sum.
 MS_PARAMS = ("pose_confirm_ms", "ack_delay_ms", "check_step_min_ms",
              "answer_first_number_ms", "pose_ready_delay_ms", "recovery_grace_ms",
-             "visibility_prompt_ms", "gate_step_pause_ms")
+             "visibility_prompt_ms", "gate_step_pause_ms", "post_line_grace_ms")
 LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
 # The success beat, in milliseconds: how long the celebration itself runs, and
 # how long the silence after it lasts before the next exercise is announced.
@@ -537,6 +540,7 @@ class Tutor:
         self._raw_key: tuple[int, int, bool] | None = None
         self._raw_since = 0.0
         self._raw_misses = 0
+        self._raw_frames = 0
         self._held_key: tuple[int, int, bool] | None = None
         self._gone_since: float | None = None
         self._hands_ok = False
@@ -1164,7 +1168,7 @@ class Tutor:
                           keys=keys, problem=problem, visibility=visibility)
             return None
         if self._last_line_ped is not None:
-            if self._ped - self._last_line_ped < self.effective("min_verbal_gap"):
+            if self._ped - self._last_line_ped < self._quiet_after_a_line():
                 self._suppress(REASON_MIN_VERBAL_GAP)
                 return None
         if rescue:
@@ -1183,6 +1187,19 @@ class Tutor:
         self._deliver(moment, level, line, solicited=False, reason=reason,
                       keys=keys, problem=problem, visibility=visibility)
         return line
+
+    def _quiet_after_a_line(self) -> float:
+        """How long nothing is said after Tally has said something.
+
+        Two rules answer the same question from different sides: min_verbal_gap
+        is the pace of the dialogue, post_line_grace_ms is the beat a child needs to
+        change a pose without being judged mid movement. They start at the same
+        moment, the last line, so the quiet is the longer of the two and never
+        their sum. Nothing here touches the acknowledgement of a right pose,
+        which goes nowhere near this gate.
+        """
+        return max(self.effective("min_verbal_gap"),
+                   self.effective("post_line_grace_ms") / MS_PER_S)
 
     def _deliver(self, moment: float, level: int, line: str | None,
                  solicited: bool, reason: str, keys: Sequence[str],
@@ -1771,17 +1788,26 @@ class Tutor:
             self._raw_key = key
             self._raw_since = moment
             self._raw_misses = 0
+            self._raw_frames = 1
         elif key == self._raw_key:
             self._raw_misses = 0
+            self._raw_frames += 1
         else:
             self._raw_misses += 1
             if self._raw_misses > tolerance:
                 self._raw_key = key
                 self._raw_since = moment
                 self._raw_misses = 0
+                self._raw_frames = 1
         if self._raw_key is None:
             return
-        if moment - self._raw_since >= self.effective("pose_stable"):
+        # A pose is evaluated on time and on frames, both: a new pose has to
+        # have been seen pose_confirm_frames times before anything is decided
+        # about it, so a camera that drops frames cannot have a pose judged on
+        # two of them.
+        frames = int(self.effective("pose_confirm_frames"))
+        if (moment - self._raw_since >= self.effective("pose_stable")
+                and self._raw_frames >= frames):
             self._held_key = self._raw_key
             self._ever_stable = True
             if self._condition(self._held_key) == SIT_CORRECT:
@@ -1999,6 +2025,7 @@ class Tutor:
         self._raw_key = None
         self._raw_since = moment
         self._raw_misses = 0
+        self._raw_frames = 0
         self._gone_since = None
 
     def _decision(self, line: str | None = None, cuts: bool = False) -> Decision:
