@@ -19,7 +19,10 @@ Two ways to use it.
    `on_phrase(text, state_id, source)` is called at once with the fallback ("fallback"), then with the model's
    line ("model") if it arrives within `timeout` seconds.
 
-Model calls are traced in Weave (op `tutor.call`, project tenfold) when WANDB_API_KEY comes from the environment.
+The model never invents the lesson: it gets the moment and Tally's own line for it, and says the same thing in its own
+words (build_messages). Model calls are traced in Weave (op `tutor.call`, project tenfold) with the line, the served
+model, token usage and latency, when WANDB_API_KEY comes from the environment. TENFOLD_TUTOR=0 switches the model off
+and keeps Tally's phrases, for a stage with no network.
 """
 from __future__ import annotations
 
@@ -47,10 +50,10 @@ DEFAULT_FALLBACKS: dict[str, str] = {
 }
 
 SYSTEM = ("You are Tally, a warm math tutor for a 7 year old learning finger multiplication (fingers numbered 6 to 10, "
-          "touch two fingertips, tens below, units above). Reply with ONE sentence under 20 words, in English, "
-          "encouraging, never the words 'wrong', 'no' or 'incorrect'. Say 'almost' and name the finger to move and "
-          "where to move it when the pose is off. Never reveal the result of the multiplication before the child "
-          "types it.")
+          "touch two fingertips, tens below, units above). Reply with at most two short sentences, under 20 words in "
+          "total, in English, encouraging, never the words 'wrong', 'no' or 'incorrect'. Say 'almost' and name the "
+          "finger to move and where to move it when the pose is off. Never reveal the result of the multiplication "
+          "before the child types it. Reply with the words Tally says and nothing else: no quotes, no emoji.")
 
 _WEAVE = {"tried": False, "op": None}
 RETRY_S = 15.0      # after a failed model call, the same moment is not retried for this long
@@ -78,6 +81,54 @@ def _hint_fields(ctx: dict[str, Any]) -> tuple[Any, Any]:
     return ctx.get("move_from"), ctx.get("move_to")
 
 
+def _plain_hint(hint: Any) -> Optional[dict[str, Any]]:
+    """The hint as a plain dict, so Weave can record it and _hint_fields and tally.phrase still read the move."""
+    if hint is None:
+        return None
+    if isinstance(hint, dict):
+        return dict(hint)
+    return {name: getattr(hint, name, None) for name in ("hand", "move_from", "move_to")}
+
+
+class Line(str):
+    """The model's words for one moment, carrying the served model, token usage and latency of the call."""
+    model: Optional[str] = None
+    usage: Optional[dict] = None
+    latency_ms: Optional[int] = None
+
+
+def build_messages(event: str, ctx: dict[str, Any], line: str) -> list[dict[str, str]]:
+    """The chat prompt for one moment: what the camera and the lesson saw, and Tally's own line to say again."""
+    move_from, move_to = _hint_fields(ctx)
+    parts = [f"Event: {event}.", f"Exercise: {ctx.get('exercise') or 'none yet'}."]
+    if ctx.get("operands"):
+        parts.append(f"Expected fingers: {ctx.get('operands')}.")
+    if ctx.get("detected"):
+        parts.append(f"Detected: {ctx.get('detected')}.")
+    if move_to is not None:
+        parts.append(f"The child should move a finger from {move_from} to {move_to}.")
+    if event.startswith("answer") and ctx.get("answer") is not None:
+        parts.append(f"The child typed {ctx.get('answer')}.")
+    parts.append(f"Child: {ctx.get('child', 'the child')}.")
+    parts.append(f'Tally\'s line for this moment: "{line}"')
+    parts.append("Say the same thing in your own words: keep every number and every instruction in it, and add "
+                 "nothing the child has not done yet.")
+    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": " ".join(parts)}]
+
+
+def clean_reply(content: str | None) -> str:
+    """The first spoken line of a reply: reasoning, blank lines and wrapping quotes removed, capped at 160 chars."""
+    text = str(content or "").split("</think>")[-1]
+    first = next((l.strip() for l in text.splitlines() if l.strip()), "")
+    return first.strip('"“” ')[:160]
+
+
+def as_record(text: str) -> dict[str, Any]:
+    """What the tutor.call op returns, so Weave shows the line next to its model, usage and latency."""
+    return {"text": str(text), "model": getattr(text, "model", None), "usage": getattr(text, "usage", None),
+            "latency_ms": getattr(text, "latency_ms", None)}
+
+
 class Tutor:
     def __init__(self, fallback: Optional[Callable[..., str]] = None, timeout: float = 1.5,
                  model: Optional[str] = None, base_url: Optional[str] = None, api_key: Optional[str] = None,
@@ -88,7 +139,7 @@ class Tutor:
         self.base_url = (base_url or os.environ.get("WANDB_INFERENCE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
         self.api_key = api_key or os.environ.get("WANDB_API_KEY")
         self.project = project or os.environ.get("WANDB_INFERENCE_PROJECT")  # "entity/project"
-        self.enabled = bool(self.api_key)
+        self.enabled = bool(self.api_key) and os.environ.get("TENFOLD_TUTOR", "1") != "0"
         # trace only with the environment's own key, never with a key injected by tests or callers
         self.trace = trace if trace is not None else (api_key is None and self.enabled and os.environ.get("TENFOLD_TRACE", "1") != "0")
         self.cache: dict[tuple, str] = {}
@@ -120,27 +171,20 @@ class Tutor:
 
     # ---------- model call ----------
     def _call(self, event: str, ctx: dict[str, Any]) -> str:
-        move_from, move_to = _hint_fields(ctx)
-        parts = [f"Event: {event}.", f"Exercise: {ctx.get('exercise') or 'none yet'}."]
-        if ctx.get("operands"):
-            parts.append(f"Expected fingers: {ctx.get('operands')}.")
-        if ctx.get("detected"):
-            parts.append(f"Detected: {ctx.get('detected')}.")
-        if move_to is not None:
-            parts.append(f"The child should move a finger from {move_from} to {move_to}.")
-        if event.startswith("answer") and ctx.get("answer") is not None:
-            parts.append(f"The child typed {ctx.get('answer')}.")
-        parts.append(f"Child: {ctx.get('child', 'the child')}.")
         headers = {"Authorization": f"Bearer {self.api_key}"}
         if self.project:
             headers["OpenAI-Project"] = self.project
+        t0 = time.monotonic()
         r = httpx.post(f"{self.base_url}/chat/completions", headers=headers, timeout=max(self.timeout, 5.0), json={
             "model": self.model, "max_tokens": 60, "temperature": 0.7,
-            "messages": [{"role": "system", "content": SYSTEM}, {"role": "user", "content": " ".join(parts)}],
+            "messages": build_messages(event, ctx, self.fallback(event, ctx)),
         })
         r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"].strip().split("\n")[0]
-        return text[:160]
+        body = r.json()
+        line = Line(clean_reply(body["choices"][0]["message"]["content"]))
+        line.model, line.usage = body.get("model") or self.model, body.get("usage")
+        line.latency_ms = int((time.monotonic() - t0) * 1000)
+        return line
 
     def _traced_call(self, event: str, ctx: dict[str, Any]) -> str:
         if self.trace and not _WEAVE["tried"]:
@@ -154,9 +198,12 @@ class Tutor:
                 _WEAVE["op"] = None
         if self.trace and _WEAVE["op"] is not None and getattr(self, "_op", None) is None:
             # one op per instance, so a second Tutor never runs with the first one's key or model
-            self._op = _WEAVE["op"](name="tutor.call")(lambda event, context, model: self._call(event, context))
+            self._op = _WEAVE["op"](name="tutor.call")(lambda event, context, model: as_record(self._call(event, context)))
         if self.trace and getattr(self, "_op", None) is not None:
-            return self._op(event, {k: v for k, v in ctx.items() if k != "hint"} | {"hint": _hint_fields(ctx)}, self.model)
+            # the op must hand _call the same correction as the untraced path, so the hint stays a mapping
+            context = {**ctx, "hint": _plain_hint(ctx["hint"])} if "hint" in ctx else dict(ctx)
+            out = self._op(event, context, self.model)
+            return out["text"] if isinstance(out, dict) else out
         return self._call(event, ctx)
 
     # ---------- drop-in for tally.phrase ----------
