@@ -110,6 +110,33 @@ Chart mapping (SPEC section 10): held-out `exact_match` by version for `informed
 (solid grey), train dashed, `knn_heldout.exact_match` dotted, `detection_ceiling.both_hands_contact_frames`
 horizontal, CI bands from `exact_match_ci95`, commit subject on hover, `diff` under the fold.
 
+### Tutor quality input
+
+`data/tutor_quality.json`, written by `eval/tutor_quality.py` (`make tutor-quality`) from Weave, read only: no model
+call, no evaluation. The dashboard's part 2 reads it the same way it reads `data/snapshot.json`
+(`TENFOLD_TUTOR_QUALITY`, then the repository, then GitHub main). A Weave that cannot be read keeps the previous file
+and adds `last_refresh_error`.
+
+```json
+{
+  "generated_at": "...", "source": "Weave, read only", "weave_url": "...",
+  "offline": {"status": "ok or unavailable", "evaluation": "tally-voice-v2", "rules_versions": ["v2"], "moments": 40,
+              "published_at": "...", "leaderboard_url": "...",
+              "runs": [{"model", "started_at", "url", "rules_version", "rules": {"<rule>": {"pass_fraction", "pass_count", "decided"}},
+                        "warmth", "clarity", "latency_ms_mean"}],
+              "other_versions": [{"evaluation", "rules_version", "runs"}]},
+  "live": {"status": "ok or unavailable", "calls_read": 56, "read_limit_reached": false, "first_scored_at": "...",
+           "states": {"scored", "pending", "score_missing", "before_scoring"}, "scored_by_origin": {"synthetic_check", "not_identified"},
+           "lesson_summary": {"lines", "cancelled_excluded", "checks_decided", "checks_passed", "top_failures", "median_latency_ms", "rules_versions"},
+           "rows": [{"id", "started_at", "origin", "state", "event", "exercise", "hint", "answer", "model", "text", "latency_ms",
+                     "exception", "rules_version", "checks": {"<rule>": {"status", "reason"}}, "delivery": ["<status>"], "url"}]}
+}
+```
+
+A rule fraction is pass among pass or fail. `in_time` is timing and never enters a quality rate. `origin` is
+`synthetic_check` or `not_identified`: `tutor.call` carries no lesson marker today, so the lesson summary stays empty
+until it does. No line is described as spoken.
+
 ## 6. Commands
 
 ```

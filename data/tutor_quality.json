@@ -1,0 +1,408 @@
+{
+  "generated_at": "2026-09-13T19:33:32+00:00",
+  "source": "Weave, read only",
+  "weave_url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/weave",
+  "offline": {
+    "status": "ok",
+    "evaluation": "tally-voice-v2",
+    "scorer": "tally_rules_v2",
+    "rules_versions": [
+      "v2"
+    ],
+    "moments": 40,
+    "published_at": "2026-09-13T19:16:20+00:00",
+    "leaderboard_url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/weave/leaderboards/tally-voice-leaderboard-v2",
+    "runs": [
+      {
+        "evaluation": "tally-voice-v2",
+        "model": "DeepSeek-V4-Flash",
+        "started_at": "2026-09-13T19:16:17+00:00",
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c32-e967-7bb1-9808-fc1fc91b4da8",
+        "scorer": "tally_rules_v2",
+        "rules_version": "v2",
+        "rules": {
+          "non_empty": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "concise": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "safe_words": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "no_spoiler": {
+            "pass_fraction": 1.0,
+            "pass_count": 33,
+            "decided": 33
+          },
+          "correction_consistency": {
+            "pass_fraction": 1.0,
+            "pass_count": 7,
+            "decided": 7
+          },
+          "in_time": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "keeps_numbers": {
+            "pass_fraction": 0.825,
+            "pass_count": 33,
+            "decided": 40
+          }
+        },
+        "warmth": 3.625,
+        "clarity": 4.0,
+        "latency_ms_mean": 493.45
+      },
+      {
+        "evaluation": "tally-voice-v2",
+        "model": "Llama-3.3-70B-Instruct",
+        "started_at": "2026-09-13T19:16:14+00:00",
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c32-dcc5-7783-8707-bf07d52c00be",
+        "scorer": "tally_rules_v2",
+        "rules_version": "v2",
+        "rules": {
+          "non_empty": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "concise": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "safe_words": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "no_spoiler": {
+            "pass_fraction": 1.0,
+            "pass_count": 33,
+            "decided": 33
+          },
+          "correction_consistency": {
+            "pass_fraction": 1.0,
+            "pass_count": 8,
+            "decided": 8
+          },
+          "in_time": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "keeps_numbers": {
+            "pass_fraction": 0.9,
+            "pass_count": 36,
+            "decided": 40
+          }
+        },
+        "warmth": 3.225,
+        "clarity": 3.6,
+        "latency_ms_mean": 309.575
+      },
+      {
+        "evaluation": "tally-voice-v2",
+        "model": "Qwen3-235B-A22B-Instruct-2507",
+        "started_at": "2026-09-13T19:16:06+00:00",
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c32-bfb0-7e32-8f8d-68daa6aba269",
+        "scorer": "tally_rules_v2",
+        "rules_version": "v2",
+        "rules": {
+          "non_empty": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "concise": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "safe_words": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "no_spoiler": {
+            "pass_fraction": 1.0,
+            "pass_count": 33,
+            "decided": 33
+          },
+          "correction_consistency": {
+            "pass_fraction": 1.0,
+            "pass_count": 8,
+            "decided": 8
+          },
+          "in_time": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "keeps_numbers": {
+            "pass_fraction": 0.9,
+            "pass_count": 36,
+            "decided": 40
+          }
+        },
+        "warmth": 3.85,
+        "clarity": 4.125,
+        "latency_ms_mean": 542.725
+      },
+      {
+        "evaluation": "tally-voice-v2",
+        "model": "Qwen3-30B-A3B-Instruct-2507",
+        "started_at": "2026-09-13T19:16:11+00:00",
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c32-d080-799b-a7d2-29c74044a0ed",
+        "scorer": "tally_rules_v2",
+        "rules_version": "v2",
+        "rules": {
+          "non_empty": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "concise": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "safe_words": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "no_spoiler": {
+            "pass_fraction": 1.0,
+            "pass_count": 33,
+            "decided": 33
+          },
+          "correction_consistency": {
+            "pass_fraction": 1.0,
+            "pass_count": 9,
+            "decided": 9
+          },
+          "in_time": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          },
+          "keeps_numbers": {
+            "pass_fraction": 1.0,
+            "pass_count": 40,
+            "decided": 40
+          }
+        },
+        "warmth": 3.825,
+        "clarity": 4.15,
+        "latency_ms_mean": 269.525
+      },
+      {
+        "evaluation": "tally-voice-v2",
+        "model": "gpt-oss-120b",
+        "started_at": "2026-09-13T19:16:20+00:00",
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c32-f6e6-7f27-80d7-246f71bb9d36",
+        "scorer": "tally_rules_v2",
+        "rules_version": "v2",
+        "rules": {
+          "non_empty": {
+            "pass_fraction": 0.0,
+            "pass_count": 0,
+            "decided": null
+          },
+          "in_time": {
+            "pass_fraction": 0.05,
+            "pass_count": 2,
+            "decided": 40
+          }
+        },
+        "warmth": null,
+        "clarity": null,
+        "latency_ms_mean": 2761.0
+      }
+    ],
+    "other_versions": [
+      {
+        "evaluation": "tally-voice",
+        "rules_version": "v1",
+        "runs": 5
+      }
+    ]
+  },
+  "live": {
+    "status": "ok",
+    "calls_read": 56,
+    "read_limit_reached": false,
+    "first_scored_at": "2026-09-13T19:08:14+00:00",
+    "states": {
+      "scored": 3,
+      "before_scoring": 53
+    },
+    "scored_by_origin": {
+      "not_identified": 2,
+      "synthetic_check": 1
+    },
+    "lesson_summary": {
+      "lines": 0,
+      "cancelled_excluded": 0,
+      "checks_decided": 0,
+      "checks_passed": 0,
+      "top_failures": [],
+      "median_latency_ms": null,
+      "rules_versions": []
+    },
+    "rows": [
+      {
+        "id": "01a09c2c-c422-7e94-a931-1b2cc7f5a024",
+        "started_at": "2026-09-13T19:09:34+00:00",
+        "origin": "not_identified",
+        "state": "scored",
+        "event": "no_contact",
+        "exercise": "7 x 8",
+        "hint": null,
+        "answer": null,
+        "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "text": "You found the fingers for 7 and 8. Touch them together now.",
+        "text_redacted": false,
+        "latency_ms": 296,
+        "exception": false,
+        "rules_version": "v2",
+        "checks": {
+          "non_empty": {
+            "status": "pass",
+            "reason": "says something"
+          },
+          "concise": {
+            "status": "pass",
+            "reason": "12 words"
+          },
+          "safe_words": {
+            "status": "pass",
+            "reason": "no wrong, no or incorrect"
+          },
+          "no_spoiler": {
+            "status": "pass",
+            "reason": "56 is not said in digits or English words"
+          },
+          "correction_consistency": {
+            "status": "not_applicable",
+            "reason": "not a correction moment"
+          },
+          "in_time": {
+            "status": "pass",
+            "reason": "296 ms, inside 1500 ms"
+          }
+        },
+        "delivery": [],
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c2c-c422-7e94-a931-1b2cc7f5a024"
+      },
+      {
+        "id": "01a09c2c-c243-723b-b35b-9a35d96dfe59",
+        "started_at": "2026-09-13T19:09:34+00:00",
+        "origin": "not_identified",
+        "state": "scored",
+        "event": "wrong_right_finger",
+        "exercise": "7 x 8",
+        "hint": {
+          "hand": "right",
+          "move_from": 9,
+          "move_to": 8
+        },
+        "answer": null,
+        "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "text": "Almost. Your left hand is good. Move your right finger from 9 to 8.",
+        "text_redacted": false,
+        "latency_ms": 474,
+        "exception": false,
+        "rules_version": "v2",
+        "checks": {
+          "non_empty": {
+            "status": "pass",
+            "reason": "says something"
+          },
+          "concise": {
+            "status": "pass",
+            "reason": "14 words"
+          },
+          "safe_words": {
+            "status": "pass",
+            "reason": "no wrong, no or incorrect"
+          },
+          "no_spoiler": {
+            "status": "pass",
+            "reason": "56 is not said in digits or English words"
+          },
+          "correction_consistency": {
+            "status": "pass",
+            "reason": "moves the right hand; from 9 to 8"
+          },
+          "in_time": {
+            "status": "pass",
+            "reason": "474 ms, inside 1500 ms"
+          }
+        },
+        "delivery": [
+          "late_held",
+          "moment_ended_unserved"
+        ],
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c2c-c243-723b-b35b-9a35d96dfe59"
+      },
+      {
+        "id": "01a09c2b-8bc3-7ff7-b3e6-e273ad4ed23b",
+        "started_at": "2026-09-13T19:08:14+00:00",
+        "origin": "synthetic_check",
+        "state": "scored",
+        "event": "wrong_right_finger",
+        "exercise": "7 x 8",
+        "hint": {
+          "hand": "right",
+          "move_from": 9,
+          "move_to": 8
+        },
+        "answer": null,
+        "model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+        "text": "Almost. Your left hand is good. Move your right finger from 9 to 8.",
+        "text_redacted": false,
+        "latency_ms": 471,
+        "exception": false,
+        "rules_version": "v2",
+        "checks": {
+          "non_empty": {
+            "status": "pass",
+            "reason": "says something"
+          },
+          "concise": {
+            "status": "pass",
+            "reason": "14 words"
+          },
+          "safe_words": {
+            "status": "pass",
+            "reason": "no wrong, no or incorrect"
+          },
+          "no_spoiler": {
+            "status": "pass",
+            "reason": "56 is not said in digits or English words"
+          },
+          "correction_consistency": {
+            "status": "pass",
+            "reason": "moves the right hand; from 9 to 8"
+          },
+          "in_time": {
+            "status": "pass",
+            "reason": "471 ms, inside 1500 ms"
+          }
+        },
+        "delivery": [],
+        "url": "https://wandb.ai/ilan-sainteagathe-synthetic-swarm/tenfold/r/call/01a09c2b-8bc3-7ff7-b3e6-e273ad4ed23b"
+      }
+    ]
+  }
+}

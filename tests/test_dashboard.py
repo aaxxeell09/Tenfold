@@ -14,11 +14,14 @@ REPO = Path(__file__).resolve().parents[1]
 NOTEBOOK = REPO / "dashboard" / "loop_dashboard.py"
 
 
-def run_notebook(snapshot: Path | None) -> subprocess.CompletedProcess:
+def run_notebook(snapshot: Path | None, tutor_quality: Path | None = None) -> subprocess.CompletedProcess:
     env = {**os.environ, "MPLBACKEND": "Agg", "PYTHONPATH": str(REPO)}
     env.pop("WANDB_API_KEY", None)
+    env.pop("TENFOLD_TUTOR_QUALITY", None)
     if snapshot is not None:
         env["TENFOLD_SNAPSHOT"] = str(snapshot)
+    if tutor_quality is not None:
+        env["TENFOLD_TUTOR_QUALITY"] = str(tutor_quality)
     return subprocess.run([sys.executable, str(NOTEBOOK)], cwd=REPO, env=env, capture_output=True, text=True, timeout=180)
 
 
@@ -197,6 +200,45 @@ print("RESULT", effect("Lowered SOME_NEW_LIMIT from 0.3 to 0.2", "") + " | " + d
     assert "keep moving apart" in results[5]
     assert results[6] == "Fingertips moving apart a little more slowly now also count as leaving a gesture"
     assert results[7] == "A setting of the rule was fine-tuned | some_new_limit 0.3 → 0.2"  # values once, not twice
+
+
+def tutor_quality_state(case: str) -> dict | str | None:
+    """Synthetic tutor quality files, one per state the page must survive; never shown as real results."""
+    sys.path.insert(0, str(REPO))
+    from datetime import datetime, timedelta, timezone
+    from eval import tutor_quality as tq
+    now = datetime.now(timezone.utc)
+
+    def record(i, minutes_ago, feedback=()):
+        return {"id": f"fixture-{i}", "started_at": (now - timedelta(minutes=minutes_ago)).isoformat(timespec="seconds"),
+                "display_name": "nimble synthetic check", "attributes": {}, "exception": False, "url": None,
+                "inputs": {"event": "wrong_right_finger", "context": {"exercise": "7 x 8"}, "model": "test-model"},
+                "output": {"text": "Synthetic test line.", "latency_ms": 450, "model": "test-model"}, "feedback": list(feedback)}
+
+    score = {"type": "wandb.runnable.tutor_rules_v2", "created_at": None, "payload": {"output": {
+        "scorer_version": "tutor-rules-v2", "no_spoiler": {"status": "fail", "passed": False, "reason": "56 said"}}}}
+    run = {"display_name": "tally-voice-v2 test-model", "started_at": now.isoformat(), "url": None,
+           "output": {"tally_rules_v2": {"no_spoiler": {"passed": {"true_count": 3, "true_fraction": 0.75}}}}}
+    if case == "absent":
+        return None
+    if case == "unreadable":
+        return '{"generated_at": "2026-09-13T19:'
+    if case == "error":
+        return tq.build(lambda: (_ for _ in ()).throw(ConnectionError("down")), None, now)
+    calls = [] if case == "empty" else [record(1, 40, [score]), record(2, 2), record(3, 30)]
+    return tq.build(lambda: {"weave_url": None, "calls": calls, "evaluations": [] if case == "empty" else [run],
+                             "moments": None if case == "empty" else 4, "leaderboards": {}}, None, now)
+
+
+@pytest.mark.parametrize("case", ["absent", "unreadable", "error", "empty", "full"])
+def test_dashboard_runs_on_every_tutor_quality_state(tmp_path, case):
+    state = tutor_quality_state(case)
+    path = tmp_path / "tutor_quality.json"
+    if state is not None:
+        path.write_text(state if isinstance(state, str) else json.dumps(state))
+    p = run_notebook(None, path)
+    assert p.returncode == 0, p.stdout[-2000:] + p.stderr[-2000:]
+    assert "Traceback" not in p.stdout + p.stderr
 
 
 def test_dashboard_page_text_is_english():
