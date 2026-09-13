@@ -255,7 +255,7 @@ def run_weave(models: list[str], rows: list[dict], judge_model: str) -> list[dic
         columns += [leaderboard.LeaderboardColumn(evaluation_object_ref=ref, scorer_name="child_judge",
                                                   summary_metric_path=f"{k}.mean") for k in ("warmth", "clarity")]
         weave.publish(leaderboard.Leaderboard(
-            name="tally-voice", description=("Which W&B Inference model speaks for Tally. Rows are lesson moments from "
+            name="tally-voice-leaderboard", description=("Which W&B Inference model speaks for Tally. Rows are lesson moments from "
                                              "lesson/tally.py; scores are Tally's rules in code plus a judge model."),
             columns=columns))
     except Exception as e:
