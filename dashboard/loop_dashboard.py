@@ -505,7 +505,7 @@ def _(icon, informed, mo, pill, refused, refused_known, section):
         ("code", " tf-ai", "Patch agent", "Edits the rule", "Claude Code", ""),
         ("shield", " tf-ai", "Guard agent", "Checks the loop's rules", "W&B Inference", pill(f"{_guard} refused", "bad") if _guard else _unknown),
         ("scale", " tf-judge", "Referee", "No gesture may drop 5 pts", "metric gate", pill(f"{_gate} refused", "bad") if _gate else _unknown),
-        ("commit", " tf-judge", "Kept", "Commit and evaluation", "W&B Weave", pill(f"{_kept} kept", "good")),
+        ("commit", " tf-judge", "Kept", "Commit and evaluation", "W&B Weave", pill(f"{_kept} kept", "good") if informed else pill("no versions")),
     ]
     _cards = "".join(
         f'<div class="tf-stage{_kind}"><div class="tf-stage-head"><span class="tf-stage-icon">{icon(_icon, 18)}</span>'
@@ -569,11 +569,11 @@ def _(ACCENT, INK, INK2, alt, basis, em, get_selected, informed, mo, names_for, 
     _kept = sum(1 for v in informed if v.get("kind") == "patch")
     mo.vstack([
         section("versions", 3, "Every version, measured",
-                f"{_kept} fixes kept. {len(refused)} refused." if refused else f"{_kept} fixes kept.",
-                "Each dot is a version of the rule. Click one, or pick it in the menu below." if _rows else "No versions in this snapshot."),
+                (f"{_kept} fixes kept. {len(refused)} refused." if refused else f"{_kept} fixes kept.") if _rows else "No versions yet.",
+                "Each dot is a version of the rule. Click one, or pick it in the menu below." if _rows else "This snapshot has no evaluated versions."),
         mo.Html(f'<div class="tf tf-chart-head"><span>Exact reading on practice gestures, per version</span>'
-                f'{pill("Zoomed axis") if _rows and _lo > 0 else ""}</div>'),
-        version_chart,
+                f'{pill("Zoomed axis") if _lo > 0 else ""}</div>') if _rows else mo.md(""),
+        version_chart if _rows else mo.md(""),
         mo.Html('<div class="tf tf-kicker-note">A version without identified data and scorers stands alone: comparison not verified.</div>')
         if _unknown else mo.md(""),
     ], gap=1)
