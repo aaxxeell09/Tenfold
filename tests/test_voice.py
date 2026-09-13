@@ -56,18 +56,40 @@ window.__say = function (text, isFinal) {
 CAPTURE_SOCKET = """
 (() => {
   const Original = window.WebSocket;
+  // A silenced socket never hands the server's own messages to the page: its handler is
+  // kept aside for __feed and the real onmessage is left empty. A socket the page opens
+  // again after a drop is silenced the same way, or a reconnect in the middle of a test
+  // puts the live stream back behind the test's back.
+  function hush(ws) {
+    if (ws.__hushed) return;
+    ws.__hushed = true;
+    let stored = ws.onmessage || null;
+    if (stored) window.__page_onmessage = stored;
+    ws.onmessage = null;
+    Object.defineProperty(ws, "onmessage", {
+      configurable: true,
+      get: () => stored,
+      set: (fn) => { stored = fn; window.__page_onmessage = fn; },
+    });
+  }
   function Wrapped(url, protocols) {
     const ws = protocols === undefined ? new Original(url) : new Original(url, protocols);
     window.__socket = ws;
+    if (window.__silenced) hush(ws);
     return ws;
   }
   Wrapped.prototype = Original.prototype;
   ["CONNECTING", "OPEN", "CLOSING", "CLOSED"].forEach((name, i) => { Wrapped[name] = i; });
   window.WebSocket = Wrapped;
-  window.__silence = () => { window.__page_onmessage = window.__socket.onmessage; window.__socket.onmessage = () => {}; };
+  window.__silence = () => { window.__silenced = true; if (window.__socket) hush(window.__socket); };
   window.__feed = (message) => (window.__page_onmessage || window.__socket.onmessage)({ data: JSON.stringify(message) });
 })();
 """
+
+# The same capture, silenced before the page has opened its socket at all. Silencing
+# from the test leaves a gap the width of one round trip, and the camera can walk a
+# whole step of the check through it; this way no server message ever lands.
+SILENT_SOCKET = CAPTURE_SOCKET + "\nwindow.__silenced = true;\n"
 
 
 # The page now sends more than answers on that socket: the child speaking and the
@@ -430,10 +452,13 @@ def test_the_same_number_twice_in_a_row_is_one_answer(page):
     assert checks(tab) == [11]
 
 
-# A fake speechSynthesis: records every utterance, ends each one on the next tick so
-# the queue advances the way a real engine would, and takes a voice list from the test.
+# A fake speechSynthesis: records every utterance with the moment it went out, ends each
+# one on the next tick so the queue advances the way a real engine would, and takes a
+# voice list from the test. __endUpTo holds an utterance open (the engine never reports
+# the end) and __finish() then ends the oldest one by hand, which is how a line that is
+# still playing is kept playing for as long as a test needs it.
 FAKE_SYNTH = """
-window.__spoken = []; window.__cancelled = 0;
+window.__spoken = []; window.__cancelled = 0; window.__pending = [];
 window.__voices = (window.__voiceList || []).map((v) => Object.assign({ localService: true, default: false, voiceURI: v.name }, v));
 function SpeechSynthesisUtterance(text) { this.text = text; this.voice = null; this.rate = 1; this.pitch = 1; this.lang = ""; }
 window.SpeechSynthesisUtterance = SpeechSynthesisUtterance;
@@ -442,12 +467,19 @@ Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
   getVoices: () => window.__voices,
   cancel: () => { window.__cancelled += 1; },
   speak: (u) => {
-    window.__spoken.push({ text: u.text, voice: u.voice && u.voice.name, rate: u.rate, pitch: u.pitch, lang: u.lang });
+    window.__spoken.push({ text: u.text, voice: u.voice && u.voice.name, rate: u.rate, pitch: u.pitch, lang: u.lang, at: Date.now() });
+    window.__pending.push(u);
     if (u.onstart) u.onstart();
-    setTimeout(() => { if (u.onend && window.__spoken.length <= (window.__endUpTo ?? Infinity)) u.onend(); }, 0);
+    setTimeout(() => {
+      if (u.onend && window.__spoken.length <= (window.__endUpTo ?? Infinity)) {
+        window.__pending = window.__pending.filter((p) => p !== u);
+        u.onend();
+      }
+    }, 0);
   },
   addEventListener: (name, fn) => { (window.__onvoices = window.__onvoices || []).push(fn); },
 } });
+window.__finish = () => { const u = window.__pending.shift(); if (u && u.onend) u.onend(); };
 window.__loadVoices = (list) => {
   window.__voices = list.map((v) => Object.assign({ localService: true, default: false, voiceURI: v.name }, v));
   (window.__onvoices || []).splice(0).forEach((fn) => fn());
@@ -497,25 +529,57 @@ def test_tally_speaks_short_sentences_one_at_a_time(page):
     tab.evaluate("() => Tenfold.speak('Lovely work. Tomorrow we try 7 x 7.')")
     tab.wait_for_timeout(100)
     spoken = tab.evaluate("window.__spoken")
+    # the two sentences belong to one line: they go out back to back, with no beat
     assert [s["text"] for s in spoken] == ["Lovely work.", "Tomorrow we try 7 x 7."]
     assert all(s["voice"] == "Samantha" and s["rate"] == 0.92 and s["pitch"] == 1.05 and s["lang"] == "en-US" for s in spoken)
-    assert tab.evaluate("window.__cancelled") == 1
+    assert spoken[1]["at"] - spoken[0]["at"] < 500
+    assert tab.evaluate("window.__cancelled") == 0, "a line is never cancelled to make room"
 
 
-def test_a_new_sentence_cancels_the_one_still_queued(page):
+def test_two_lines_wait_for_each_other_and_never_overlap(page):
+    """The rhythm: a line asked for while Tally is still talking waits for the end of
+    that line plus one beat. It never cuts it off and never talks over it."""
     context, url = page
     tab = context.new_page()
-    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH + "window.__endUpTo = 0;")
+    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH)
     tab.goto(url + "#home", wait_until="domcontentloaded")
     tab.wait_for_function("!!window.Tenfold")
-    # the engine never ends the first utterance: the second sentence waits in the queue
-    tab.evaluate("() => Tenfold.speak('First one. Second one.')")
-    tab.wait_for_timeout(50)
-    assert [s["text"] for s in tab.evaluate("window.__spoken")] == ["First one."]
-    tab.evaluate("() => { window.__endUpTo = Infinity; Tenfold.speak('Something else.'); }")
-    tab.wait_for_timeout(100)
-    assert [s["text"] for s in tab.evaluate("window.__spoken")] == ["First one.", "Something else."]
-    assert tab.evaluate("window.__cancelled") == 2
+    # the engine never reports the end by itself: the first line stays on the air
+    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; }")
+    tab.evaluate("() => { Tenfold.speak('First line.'); Tenfold.speak('Second line.'); }")
+    tab.wait_for_timeout(300)
+    assert [s["text"] for s in tab.evaluate("window.__spoken")] == ["First line."], "the second line talked over the first"
+    assert tab.evaluate("window.__cancelled") == 0, "the first line was cut off instead of finished"
+
+    tab.evaluate("() => { window.__t0 = Date.now(); window.__finish(); }")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    spoken = tab.evaluate("window.__spoken")
+    assert spoken[1]["text"] == "Second line."
+    beat = spoken[1]["at"] - tab.evaluate("window.__t0")
+    assert beat >= 900, f"the second line followed {beat} ms after the first, with no beat between them"
+
+
+def test_a_line_the_child_has_moved_past_is_dropped(page):
+    """A line waiting its turn is spoken only if it is still true when its turn comes.
+    One that a newer state has superseded is dropped, never spoken late."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; window.__moved = false; }")
+    tab.evaluate("""() => {
+      Tenfold.speak('First line.');
+      Tenfold.say('Old news.', null, null, { still: () => !window.__moved });
+      Tenfold.say('Still true.', null, null, {});
+    }""")
+    tab.wait_for_timeout(200)
+    assert [s["text"] for s in tab.evaluate("window.__spoken")] == ["First line."]
+    # the child moves on while the line is still waiting its turn
+    tab.evaluate("() => { window.__moved = true; window.__finish(); }")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    tab.wait_for_timeout(400)
+    assert [s["text"] for s in tab.evaluate("window.__spoken")] == ["First line.", "Still true."]
 
 
 def test_the_first_sentence_waits_for_the_voices_and_the_pick_is_logged_once(page):
@@ -559,20 +623,253 @@ def test_the_mute_switch_silences_tally_and_is_remembered(page):
     assert [u["text"] for u in tab.evaluate("window.__spoken")] == ["Say the answer."]
 
 
-def test_every_check_sentence_is_spoken(page):
+BOTH_HANDS = [{"hand": hand, "number": 6, "x": 0.3 if hand == "left" else 0.7, "y": 0.5}
+              for hand in ("left", "right")]
+
+
+def open_check(tab, url):
+    """Land on the start check, with SILENT_SOCKET holding the camera stream back.
+
+    The page opens its socket and starts the node as usual; nothing the server pushes
+    reaches it, so the check only ever moves on the messages the test feeds it.
+    """
+    tab.goto(url + "#check", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.__socket && window.__socket.readyState === 1", timeout=15000)
+    tab.wait_for_function("!!window.__page_onmessage", timeout=15000)
+
+
+def feed_check(tab, **fields):
+    fields.setdefault("fingers", BOTH_HANDS)
+    tab.evaluate("(m) => window.__feed(m)", state_message("check", **fields))
+
+
+def said(tab):
+    return [u["text"] for u in tab.evaluate("window.__spoken")]
+
+
+def quiet(tab, timeout: int = 25000):
+    """Wait until Tally has stopped talking.
+
+    The dialogue is paced: the lines the server sent before the test took the stream
+    over are still in the queue, each with its beat. A test that counts lines waits
+    for that to run out first, which is one poll longer than the beat with nothing new
+    spoken.
+    """
+    tab.evaluate("() => { window.__quiet = -1; }")
+    tab.wait_for_function(
+        "() => { const n = window.__spoken.length;"
+        " if (n === window.__quiet) return true; window.__quiet = n; return false; }",
+        polling=1300, timeout=timeout)
+
+
+def quiet_tts(tab, timeout: int = 30000):
+    """The same wait for a page with no speech synthesis: there is nothing to record
+    but the pair, and a line with no engine stands for as long as it takes to read."""
+    tab.evaluate("() => { window.__quiet = -1; }")
+    tab.wait_for_function(
+        "() => { const t = window.__sent.filter((m) => m.type === 'tts');"
+        " if (t.length === window.__quiet && (!t.length || t[t.length - 1].speaking === false)) return true;"
+        " window.__quiet = t.length; return false; }",
+        polling=1500, timeout=timeout)
+
+
+def test_every_check_sentence_is_spoken_and_nothing_else_is(page):
+    """The rhythm of the check, end to end: an instruction, silence while the child
+    works, a short acknowledgement when they succeed, a beat, the next instruction.
+    The step dots, the banner and the result are shown and never spoken."""
     context, url = page
     tab = context.new_page()
     # with a working microphone step 3 asks for the answer out loud
-    tab.add_init_script(FAKE_RECOGNITION + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    feed_check(tab, state="waiting_pose")
+    tab.wait_for_function("window.__spoken.length === 3", timeout=10000)
+    feed_check(tab, state="correct_pose")
+    tab.wait_for_function("window.__spoken.length === 5", timeout=10000)
+    feed_check(tab, state="answer_correct", answer=36)
+    # "Thirty six. Exactly." is one line and two utterances
+    tab.wait_for_function("window.__spoken.length === 7", timeout=10000)
+    assert said(tab) == ["Show me both hands.", "Perfect.", "Touch your 6 with your 6.",
+                         "Yes, that's it.", "Say the answer.", "Thirty six.", "Exactly."]
+    assert tab.text_content("#check-banner").strip() == "That is a 6 and a 6."
+    assert tab.text_content("#check-result").strip() == "36"
+
+    # the node ends: the path opens once Tally has finished saying so
+    tab.evaluate("(m) => window.__feed(m)", {"type": "node_end", "node_id": "check", "correct": 1, "total": 1})
+    tab.wait_for_function("window.__spoken.some((u) => u.text === 'Your path is open.')", timeout=10000)
+    tab.wait_for_function("document.body.dataset.view === 'practice'", timeout=10000)
+
+
+def test_the_check_acknowledges_on_the_event_not_on_a_timer(page):
+    """The old check ran its steps off fixed timers, which could leave Tally ahead of
+    the child. Each acknowledgement now lands on the event that earned it, and the next
+    instruction one beat later."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    assert said(tab) == ["Show me both hands."]
+    # the child does nothing: no clock walks the check on without them
+    tab.wait_for_timeout(1500)
+    assert said(tab) == ["Show me both hands."]
+    assert tab.get_attribute("#check", "data-step") == "1"
+
+    tab.evaluate("() => { window.__t0 = Date.now(); }")
+    feed_check(tab, state="waiting_pose")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    spoken = tab.evaluate("window.__spoken")
+    assert spoken[1]["text"] == "Perfect."
+    delay = spoken[1]["at"] - tab.evaluate("window.__t0")
+    assert delay < 500, f"the acknowledgement waited {delay} ms, that is a clock and not the event"
+
+    tab.wait_for_function("window.__spoken.length === 3", timeout=5000)
+    spoken = tab.evaluate("window.__spoken")
+    assert spoken[2]["text"] == "Touch your 6 with your 6."
+    beat = spoken[2]["at"] - spoken[1]["at"]
+    assert beat >= 900, f"the instruction followed the acknowledgement after only {beat} ms"
+    # the screen moves with the instruction, not before it
+    tab.wait_for_function("document.querySelector('#check').dataset.step === '2'", timeout=5000)
+
+    # the pose is right: the same rhythm again, and the mic opens with the question
+    tab.wait_for_timeout(1200)
+    tab.evaluate("() => { window.__t0 = Date.now(); }")
+    feed_check(tab, state="correct_pose")
+    tab.wait_for_function("window.__spoken.length === 4", timeout=5000)
+    spoken = tab.evaluate("window.__spoken")
+    assert spoken[3]["text"] == "Yes, that's it."
+    delay = spoken[3]["at"] - tab.evaluate("window.__t0")
+    assert delay < 500, f"the acknowledgement waited {delay} ms, that is a clock and not the event"
+    assert tab.is_hidden("#check-mic"), "the answer was asked for before the question"
+
+    tab.wait_for_function("window.__spoken.length === 5", timeout=5000)
+    spoken = tab.evaluate("window.__spoken")
+    assert spoken[4]["text"] == "Say the answer."
+    beat = spoken[4]["at"] - spoken[3]["at"]
+    assert beat >= 900, f"the question followed the acknowledgement after only {beat} ms"
+    tab.wait_for_selector("#check-mic", state="visible", timeout=5000)
+    assert tab.evaluate("Tenfold.voice.gate") is True
+
+
+def test_a_check_correction_the_child_has_fixed_is_not_spoken(page):
+    """A correction is only worth saying while the pose is still wrong. One that the
+    child has already fixed by the time its turn comes is dropped."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    feed_check(tab, state="waiting_pose")
+    tab.wait_for_function("document.querySelector('#check').dataset.step === '2'", timeout=10000)
+    # the engine holds the line that is playing, so the correction has to queue behind it
+    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; }")
+    tab.evaluate("() => Tenfold.say('Almost, keep them touching.', null, null, {})")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
+    feed_check(tab, state="wrong_pose", tally="Move your left thumb down.")
+    feed_check(tab, state="wrong_pose", tally="Move your left thumb down.")
+    tab.wait_for_timeout(200)
+    assert said(tab) == ["Almost, keep them touching."], "the same correction was queued twice"
+    # the child fixes the pose before the correction is ever spoken
+    feed_check(tab, state="correct_pose")
+    tab.evaluate("() => window.__finish()")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    tab.wait_for_timeout(400)
+    assert said(tab) == ["Almost, keep them touching.", "Yes, that's it."]
+
+
+# The page's own socket, with every message it sends recorded as parsed JSON.
+SEND_SPY = """() => {
+  window.__sent = [];
+  const ws = window.__socket, send = ws.send.bind(ws);
+  ws.send = (data) => {
+    try { window.__sent.push(JSON.parse(data)); } catch (e) { window.__sent.push({}); }
+    return send(data);
+  };
+}"""
+
+def tts_pairs(tab):
+    return [m["speaking"] for m in tab.evaluate("window.__sent.filter((m) => m.type === 'tts')")]
+
+
+def test_the_tts_pair_brackets_every_line(page):
+    """The server's pedagogical clock stops while Tally talks. The pair goes out around
+    every line, whether the line is heard or not, or the clock waits for a voice that is
+    never coming."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
     tab.goto(url + "#home", wait_until="domcontentloaded")
-    tab.wait_for_function("!!window.Tenfold")
-    tab.click("a.door[href='#check']")
-    # step 3 shows "Say the answer." together with the mic pill, a moment after the match
-    tab.wait_for_selector("#check-mic", state="visible", timeout=30000)
-    tab.wait_for_timeout(300)
-    spoken = [u["text"] for u in tab.evaluate("window.__spoken")]
-    for line in ["Show me both hands.", "There they are.", "Touch your 6 with your 6.", "Six and six, touching.", "Say the answer."]:
-        assert line in spoken, f"{line!r} was shown but not spoken: {spoken}"
+    tab.wait_for_function("!!window.Tenfold && !!window.__socket && window.__socket.readyState === 1")
+    tab.evaluate(SEND_SPY)
+    tab.evaluate("() => Tenfold.speak('Ready when you are.')")
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=5000)
+    assert tts_pairs(tab) == [True, False]
+
+    # muted: nothing is heard, the pair is sent all the same
+    tab.click("#mute")
+    tab.evaluate("() => { window.__sent = []; window.__spoken = []; }")
+    tab.evaluate("() => Tenfold.speak('Say the answer.')")
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=8000)
+    assert tts_pairs(tab) == [True, False]
+    assert tab.evaluate("window.__spoken") == []
+    tab.click("#mute")      # the tabs of one context share the switch, leave it off
+
+    # no speech synthesis in this browser at all: same pair, same order
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + NO_SYNTH)
+    errors = []
+    tab.on("pageerror", lambda e: errors.append(str(e)))
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold && !!window.__socket && window.__socket.readyState === 1")
+    tab.evaluate(SEND_SPY)
+    tab.evaluate("() => { Tenfold.speak('One line.'); Tenfold.speak('And another.'); }")
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 4", timeout=10000)
+    assert tts_pairs(tab) == [True, False, True, False], "the pairs overlapped"
+    assert errors == []
+
+
+def test_only_tallys_bubble_is_spoken(page):
+    """Titles, labels, the XP count and the level names are shown and stay silent.
+    The line in Tally's bubble is the one thing that is ever spoken."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_lesson(tab, url)
+    node = running_lesson(tab)
+    quiet(tab)
+    tab.evaluate("() => { window.__spoken = []; }")
+
+    # Tally's bubble: spoken, and the words on screen are the words being said
+    feed(tab, node, state="wrong_pose", tally="Move your left thumb down.")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
+    assert said(tab) == ["Move your left thumb down."]
+    assert tab.text_content("#lesson .tally-say").strip() == "Move your left thumb down."
+
+    # the finish card: Tally keeps one closing line there, and one more if a level was
+    # crossed. The title, the stars, the XP count and the level name label stay silent.
+    tab.evaluate("() => { window.__spoken = []; }")
+    tab.evaluate("(m) => window.__feed(m)",
+                 {"type": "node_end", "node_id": node, "correct": 5, "total": 5, "tally": "Lovely work."})
+    tab.wait_for_selector("#finish", state="visible", timeout=10000)
+    tab.wait_for_timeout(3600)      # past the XP count up and the level up card behind it
+    title = tab.inner_text("#fn-1 h1").strip()
+    assert title != ""
+    assert tab.inner_text("#fn-n1").strip() != ""
+    spoken = said(tab)
+    assert "Lovely work." in spoken, "Tally's closing line was not spoken"
+    assert title not in spoken, "the finish title was spoken"
+    assert not any("XP" in line for line in spoken), "the XP count was spoken"
+    # nothing else: the closing line, and the two sentences of the level up line
+    extra = [line for line in spoken if line != "Lovely work."]
+    assert extra in ([], ["Level up.", tab.inner_text("#fn-2 h1").strip() + "."]), spoken
+
+    # the profile: the level ladder, every name on screen and not one of them spoken
+    tab.evaluate("() => { window.__spoken = []; location.hash = 'profile'; }")
+    tab.wait_for_function("document.body.dataset.view === 'profile'", timeout=5000)
+    tab.wait_for_timeout(800)
+    assert tab.inner_text("#pf-name").strip() != ""
+    assert said(tab) == [], "a level name was spoken"
 
 
 # A microphone that says no the first time and yes the second: Chrome asks again
@@ -817,6 +1114,7 @@ def tutor_page(context, url, extra: str = ""):
     tab.on("pageerror", lambda e: errors.append(str(e)))
     open_lesson(tab, url)
     node = running_lesson(tab)
+    quiet(tab)
     tab.evaluate("() => { window.__sent.length = 0; window.__spoken.length = 0; }")
     return tab, node, errors
 
@@ -827,20 +1125,20 @@ def test_the_tts_pair_brackets_the_whole_spoken_line(page):
     context, url = page
     tab, node, errors = tutor_page(context, url)
     feed(tab, node, state="wrong_pose", tutor_line="Almost. Your right hand needs 7, not 9.")
-    tab.wait_for_timeout(200)
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=10000)
     assert [u["text"] for u in tab.evaluate("window.__spoken")] == [
         "Almost.", "Your right hand needs 7, not 9."]
     assert [m["speaking"] for m in sent(tab, "tts")] == [True, False], "one pair, two sentences"
-    # the next line is its own pair
+    # the next line is its own pair, one beat later
     feed(tab, node, state="wrong_pose", tutor_line="Try your 7.")
-    tab.wait_for_timeout(200)
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 4", timeout=10000)
     assert [m["speaking"] for m in sent(tab, "tts")] == [True, False, True, False]
 
     # a line cut off by the way out of the lesson still closes its pair: without it
     # the next line would open without one and the tutor's clock would never start
     tab.evaluate("() => { window.__endUpTo = 0; window.__sent.length = 0; }")
     feed(tab, node, state="wrong_pose", tutor_line="Hold them up for me.")
-    tab.wait_for_timeout(200)
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 1", timeout=10000)
     assert [m["speaking"] for m in sent(tab, "tts")] == [True], "the engine never ended it"
     tab.click('#lesson [data-action="quit"]', force=True)
     tab.wait_for_timeout(300)
@@ -857,7 +1155,7 @@ def test_the_tts_pair_is_sent_when_tally_is_muted(page):
     assert tab.evaluate("Tenfold.muted") is True
     tab.evaluate("() => { window.__sent.length = 0; }")
     feed(tab, node, state="wrong_pose", tutor_line="Your right hand needs 7.")
-    tab.wait_for_timeout(200)
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=10000)
     assert tab.evaluate("window.__spoken") == [], "muted says nothing"
     assert tab.text_content("#lesson .tally-say") == "Your right hand needs 7."
     assert [m["speaking"] for m in sent(tab, "tts")] == [True, False]
@@ -874,9 +1172,12 @@ def test_the_tts_pair_is_sent_with_no_speech_synthesis_at_all(page):
     open_lesson(tab, url)
     node = running_lesson(tab)
     assert tab.evaluate("'speechSynthesis' in window") is False
+    # with no engine a line still stands for as long as it takes to read: the lines
+    # already in the queue have to be over before this one is asked for
+    quiet_tts(tab)
     tab.evaluate("() => { window.__sent.length = 0; }")
     feed(tab, node, state="wrong_pose", tutor_line="Your right hand needs 7.")
-    tab.wait_for_timeout(200)
+    tab.wait_for_function("window.__sent.filter((m) => m.type === 'tts').length === 2", timeout=10000)
     assert tab.text_content("#lesson .tally-say") == "Your right hand needs 7."
     assert [m["speaking"] for m in sent(tab, "tts")] == [True, False]
     assert errors == []
@@ -894,9 +1195,9 @@ def test_the_child_speaking_is_sent_with_or_without_a_number(page):
     assert [m["text"] for m in sent(tab, "speech")] == ["is it fifty six"]
     assert [m["value"] for m in sent(tab, "check")] == [56], "the answer is still submitted"
     # a sentence with no number in it is sent all the same
-    tab.evaluate("() => window.__say('I do not know this one', true)")
+    tab.evaluate("() => window.__say('I really do not know this', true)")
     tab.wait_for_timeout(150)
-    assert [m["text"] for m in sent(tab, "speech")] == ["is it fifty six", "I do not know this one"]
+    assert [m["text"] for m in sent(tab, "speech")] == ["is it fifty six", "I really do not know this"]
     assert [m["value"] for m in sent(tab, "check")] == [56], "speech never submits an answer"
     # an interim result is not the child speaking yet
     tab.evaluate("() => window.__say('maybe', false)")
@@ -935,12 +1236,13 @@ def test_the_tutor_line_is_spoken_once_and_shown_in_the_bubble(page):
     for _ in range(3):
         feed(tab, node, state="wrong_pose", tally="ignored while the tutor talks",
              tutor_line="Your right hand needs 7, not 9.")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
     tab.wait_for_timeout(200)
     assert tab.text_content("#lesson .tally-say") == "Your right hand needs 7, not 9."
     assert [u["text"] for u in tab.evaluate("window.__spoken")] == ["Your right hand needs 7, not 9."]
-    # no tutor_line: the engine's phrase is the line, and it is spoken too
+    # no tutor_line: the engine's phrase is the line, and it is spoken too, one beat later
     feed(tab, node, state="wrong_pose", tally="Move your right finger from 9 to 7.")
-    tab.wait_for_timeout(200)
+    tab.wait_for_function("window.__spoken.length === 2", timeout=10000)
     assert tab.text_content("#lesson .tally-say") == "Move your right finger from 9 to 7."
     assert [u["text"] for u in tab.evaluate("window.__spoken")] == [
         "Your right hand needs 7, not 9.", "Move your right finger from 9 to 7."]
@@ -1016,10 +1318,9 @@ def test_a_tap_on_tally_asks_for_help(page):
 
 # Every bubble that carries a line of Tally's, screen by screen. A bubble on
 # screen with text in it and no voice behind it is the bug this list catches.
-BUBBLES = [
-    "#check-say", "#u-say", "#lesson .tally-say",
-    "#fn-1 h1", "#fn-1 .sub", "#fn-2 .newlevel", "#fn-2 h1", "#fn-2 .earned", "#fn-2 .sub",
-]
+# Tally's three bubbles, plus the one closing line he keeps on the finish card. The
+# titles, the XP count and the level names are read on screen and never spoken.
+BUBBLES = ["#check-say", "#u-say", "#lesson .tally-say", "#fn-1 .sub"]
 
 SILENT_BUBBLES = """
 (selectors) => {
@@ -1050,8 +1351,9 @@ def silent(tab):
 
 
 def test_every_bubble_shown_is_spoken(page):
-    """The rule, walked screen by screen: a bubble that appears without Tally saying
-    it is a bug. Every visible line has to have gone through speech synthesis."""
+    """The rule, walked screen by screen: one of Tally's bubbles that appears without
+    him saying it is a bug. Every visible line has gone through speech synthesis, one
+    line at a time, so the waits here are as long as the rhythm needs."""
     context, url = page
     tab = context.new_page()
     tab.add_init_script(FAKE_RECOGNITION + voices([("Samantha", "en-US")]) + FAKE_SYNTH + CAPTURE_SOCKET)
@@ -1079,7 +1381,7 @@ def test_every_bubble_shown_is_spoken(page):
     tab.wait_for_timeout(300)
     assert silent(tab) == []
     feed(tab, node, state="wrong_pose", tutor_line="Your right hand needs 7, not 9.")
-    tab.wait_for_timeout(300)
+    tab.wait_for_function("window.__spoken.some((u) => u.text.includes('not 9'))", timeout=10000)
     assert silent(tab) == []
 
     # the finish card, and the level up card behind it: 150 XP crosses level two
@@ -1089,10 +1391,10 @@ def test_every_bubble_shown_is_spoken(page):
         feed(tab, node, state="exercise_shown")
     tab.evaluate("(id) => window.__feed({ type: 'node_end', node_id: id, correct: 5, total: 5, tally: 'Lovely work.' })", node)
     tab.wait_for_selector("#finish", state="visible", timeout=10000)
-    tab.wait_for_timeout(400)
+    tab.wait_for_function("window.__spoken.some((u) => u.text.includes('Lovely work'))", timeout=10000)
     assert silent(tab) == []
     tab.wait_for_selector("#fn-2.show", timeout=10000)
-    tab.wait_for_timeout(500)
+    tab.wait_for_timeout(1600)
     assert silent(tab) == []
     assert errors == []
 

@@ -59,7 +59,7 @@
   function setMuted(on) {
     muted = Boolean(on);
     write(KEY_MUTED, muted);
-    if (muted) { speech.serial += 1; speech.queue = []; speech.pending = null; try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } hush(); ttsSay(false); }
+    cutSpeech();    // a switch flicked mid sentence is a break in the dialogue, both ways
     markMute();
   }
   function markMute() {
@@ -106,9 +106,9 @@
     // keeps running on the server and Tally talks over the next screen
     if (lesson) leaveLesson();
     view = name;
-    // a screen the child opens says its lines again: the memory that keeps a line
-    // from being repeated on every state message is per bubble, and starts fresh here
-    $$("[data-said]").forEach(sayAgain);
+    // a screen the child opens says its lines again: the memory that keeps the map's
+    // line from being repeated on every render starts fresh here
+    speech.lastLine = null;
     VIEWS.forEach((v) => { const el = document.getElementById(v); if (el) el.hidden = v !== name; });
     document.body.dataset.view = name;
     $("#lesson").hidden = true;
@@ -249,7 +249,8 @@
     const line = here
       ? (cur.kind === "chest" ? "A chest! Open it." : cur.kind === "boss" ? "The boss. Eight questions, three hearts." : `Next up: ${cur.title}.`)
       : done === scored.length ? "All done here. Replay for three stars." : "Finish the unit before this one first.";
-    say($("#u-say"), line, $("#u-tally"));
+    $("#u-say").textContent = line;
+    if (line !== speech.lastLine) { speech.lastLine = line; say(line, $("#u-say"), $("#u-tally")); }
     setTally($("#u-tally"), here ? "ready" : "happy");
     $("#unit-switch").innerHTML = L.UNITS.map((u, i) => `<button type="button" class="${i === ui ? "on" : ""}" data-action="unit" data-u="${i}" aria-label="Unit ${i + 1}"><img src="art/tile-${i + 1}-${i === ui ? "on" : "off"}.png" alt=""></button>`).join("");
     const pts = spotsFor(nodes.length);
@@ -283,7 +284,7 @@
   function startCheck() {
     if (checkRun) return;
     const root = $("#check");
-    checkRun = { step: 1, lit: 0, timers: [], done: false, typed: "" };
+    checkRun = { step: 1, lit: 0, timers: [], done: false, typed: "", said: null };
     root.className = "checkview view";
     root.dataset.step = "1";
     $("#check-mic").hidden = true;
@@ -294,11 +295,24 @@
     connect(() => sendLesson({ type: "start_node", tab: TAB, state: learner(), node: { id: "check", kind: "check", pairs: [[6, 6]], count: 1 } }));
     decorate(root);
   }
-  function checkSay(text) { say($("#check-say"), text, $("#check-tally")); }
+  function checkSay(text, opts) { return say(text, $("#check-say"), $("#check-tally"), opts); }
+  // a correction is worth saying only while it is still the child's situation, and the
+  // same sentence pushed again by the camera stream is not a new line
+  function checkReact(text, mood) {
+    const run = checkRun;
+    if (!run || !text || text === run.said) return;
+    const step = run.step;
+    run.said = text;
+    checkSay(text, {
+      still: () => checkRun === run && run.said === text && run.step === step && !run.done,
+      onStart: () => setTally($("#check-tally"), mood),
+    });
+  }
   function stopCheck() {
     if (!checkRun) return;
     checkRun.timers.forEach(clearTimeout);
     checkRun = null;
+    cutSpeech();
     gateVoice(false);
     videoOff($("#check-cam .practice-video"));
     link.start = null; link.waiting = [];
@@ -321,17 +335,22 @@
     if (run.step === 1) {
       if (hands === 2 && !root.classList.contains("detected")) {
         root.classList.add("detected");
-        checkSay("There they are.");
+        // the child is past this step the moment both hands are there, whatever Tally
+        // is still saying: the acknowledgement rides the event, the next instruction
+        // waits its turn in the queue instead of a clock that can run ahead
+        run.step = 2; run.said = null;
         // the numbers light up one by one, ten down to six
         [10, 9, 8, 7, 6].forEach((n, i) => later(400 + i * 300, () => {
           $$("#check .practice-overlay [data-number]").forEach((el) => { if (Number(el.dataset.number) <= 10 && Number(el.dataset.number) >= n) el.classList.add("lit"); });
           run.lit = n;
         }));
-        later(2300, () => { root.classList.add("check"); setTally($("#check-tally"), "happy"); });
-        later(3300, () => {
-          run.step = 2; root.dataset.step = "2"; root.classList.remove("check"); setStepDots(2);
-          checkSay("Touch your 6 with your 6.");
-          setTally($("#check-tally"), "thinking");
+        checkSay("Perfect.", { onStart: () => { root.classList.add("check"); setTally($("#check-tally"), "happy"); } });
+        checkSay("Touch your 6 with your 6.", {
+          still: () => checkRun === run && run.step === 2,
+          onStart: () => {
+            root.dataset.step = "2"; root.classList.remove("check"); setStepDots(2);
+            setTally($("#check-tally"), "thinking");
+          },
         });
       }
       if (hands === 2) $$("#check .practice-overlay [data-number]").forEach((el) => { if (run.lit && Number(el.dataset.number) >= run.lit) el.classList.add("lit"); });
@@ -339,23 +358,26 @@
     }
     if (run.step === 2) {
       if (m.state === "correct_pose" || m.state === "waiting_answer") {
-        run.step = 3; root.dataset.step = "3"; root.classList.add("matched", "banner", "check");
+        run.step = 3; run.said = null;
+        root.classList.add("matched", "banner", "check");
         $("#check-banner").textContent = "That is a 6 and a 6.";
-        checkSay("Six and six, touching.");
         setTally($("#check-tally"), "happy");
-        later(1600, () => {
-          root.classList.remove("check", "banner"); setStepDots(3);
-          // no microphone in this browser, or one that was refused: say so and
-          // show the digits in the pill, which is the only answer field here
-          checkSay(canHear() ? "Say the answer." : "Type the answer.");
-          $("#check-mic").hidden = false;
-          $("#check-miclabel").textContent = micLabel();
-          setTally($("#check-tally"), "ready");
-          listenWhile("correct_pose");
+        checkSay("Yes, that's it.");
+        // no microphone in this browser, or one that was refused: say so and
+        // show the digits in the pill, which is the only answer field here. The mic
+        // opens with the question, never before it.
+        checkSay(canHear() ? "Say the answer." : "Type the answer.", {
+          still: () => checkRun === run && !run.done,
+          onStart: () => {
+            root.dataset.step = "3"; root.classList.remove("check", "banner"); setStepDots(3);
+            $("#check-mic").hidden = false;
+            $("#check-miclabel").textContent = micLabel();
+            setTally($("#check-tally"), "ready");
+            listenWhile("correct_pose");
+          },
         });
       } else if (m.state === "wrong_pose" && m.tally) {
-        checkSay(m.tally);
-        setTally($("#check-tally"), "almost");
+        checkReact(m.tally, "almost");
       }
       return;
     }
@@ -363,25 +385,25 @@
       root.classList.add("heard", "result", "check");
       $("#check-result").textContent = m.answer;
       $("#check-miclabel").textContent = "Thirty six";
-      checkSay("Thirty six. Exactly.");
-      setTally($("#check-tally"), "happy");
       run.done = true;
       gateVoice(false);
+      checkSay("Thirty six. Exactly.", { onStart: () => setTally($("#check-tally"), "happy") });
     } else if (run.step === 3 && m.state === "answer_wrong" && m.tally) {
-      checkSay(m.tally);
-      setTally($("#check-tally"), "almost");
+      checkReact(m.tally, "almost");
     }
   }
   function checkEnd() {
     const run = checkRun;
     if (!run) return;
-    checkSay("Your path is open.");
-    later(1400, () => {
-      checkRun.timers.forEach(clearTimeout);
-      checkRun = null;
-      try { sessionStorage.setItem("tenfold.checked", "1"); } catch (e) { /* fine */ }
-      go("practice");
-    });
+    // the path opens when Tally has finished saying so, not on a clock
+    checkSay("Your path is open.", { after: closeCheck });
+  }
+  function closeCheck() {
+    if (!checkRun) return;
+    checkRun.timers.forEach(clearTimeout);
+    checkRun = null;
+    try { sessionStorage.setItem("tenfold.checked", "1"); } catch (e) { /* fine */ }
+    go("practice");
   }
 
   // ---------- Tally speaks ----------
@@ -392,7 +414,7 @@
   const FEMALE_HINT = /ava|zoe|samantha|karen|allison|susan|nicky|zira|aria|jenny|michelle|emma|ana|joanna|kendra|salli|ivy|female|woman/i;
   const tallyVoice = { picked: null, done: false };
   function pickVoice() {
-    if (!("speechSynthesis" in window)) return null;
+    if (!window.speechSynthesis) return null;
     const voices = window.speechSynthesis.getVoices() || [];
     if (!voices.length) return null;
     const byName = (name) => voices.find((v) => v.name === name) || voices.find((v) => v.name.startsWith(name));
@@ -410,113 +432,144 @@
     tallyVoice.logged = true;
     console.log(`Tally voice: ${name}`);
   }
-  if ("speechSynthesis" in window && window.speechSynthesis.addEventListener) {
+  if (window.speechSynthesis && window.speechSynthesis.addEventListener) {
     window.speechSynthesis.addEventListener("voiceschanged", () => { tallyVoice.done = false; });
   }
-  // short sentences, one utterance at a time; a new call drops whatever was still queued
+  // short sentences, one utterance at a time, all of them inside the same line
   function sentencesOf(text) {
     return String(text || "").replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
   }
-  const speech = { queue: [], host: null, serial: 0, pending: null, waiting: false };
-  // Chrome hands the voice list over asynchronously: the first sentence waits for
+  // The dialogue is paced: one line at a time, then silence while the child works.
+  // A line asked for while Tally is still talking waits for the end of that line plus
+  // PAUSE_MS. Nothing is ever cancelled and nothing overlaps.
+  const PAUSE_MS = 1000;          // the beat between two lines, the rhythm of the whole dialogue
+  const READ_MS_PER_WORD = 320;   // how long a line stands when this browser cannot speak it
+  const SPEAK_GRACE_MS = 4000;    // an engine that never reports the end must not hold the queue
+  const speech = { queue: [], line: null, serial: 0, timer: null, guard: null, waiting: false, lastLine: null };
+  function hasVoice() { return Boolean(window.speechSynthesis); }
+  // Chrome hands the voice list over asynchronously: the first line waits for
   // voiceschanged (or a short timeout for browsers that never fire it) rather than
   // going out in the wrong voice.
   function voicesReady() {
-    return tallyVoice.timedOut || (window.speechSynthesis.getVoices() || []).length > 0;
+    return !hasVoice() || tallyVoice.timedOut || (window.speechSynthesis.getVoices() || []).length > 0;
   }
   function waitForVoices() {
     if (speech.waiting) return;
     speech.waiting = true;
-    const go = () => {
+    const ready = () => {
+      if (!speech.waiting) return;
+      speech.waiting = false;
       if (!(window.speechSynthesis.getVoices() || []).length) tallyVoice.timedOut = true;
-      const p = speech.pending; speech.pending = null;
-      if (p) speak(p.text, p.host);
+      pump();
     };
-    if (window.speechSynthesis.addEventListener) window.speechSynthesis.addEventListener("voiceschanged", go, { once: true });
-    setTimeout(go, 1500);
+    if (window.speechSynthesis.addEventListener) window.speechSynthesis.addEventListener("voiceschanged", ready, { once: true });
+    setTimeout(ready, 1500);
   }
   function hush() {
     $$(".is-talking").forEach((el) => el.classList.remove("is-talking"));
     voice.spokeUntil = 0;
   }
-  // ---------- one door for every visible Tally line ----------
-  // Anything Tally shows, Tally says. Writing a bubble is the only way into speak(),
-  // so a line cannot reach the screen without a voice: a new sentence anywhere in
-  // this file goes through say() and is spoken by construction. Lines written in the
-  // same breath are spoken as one queue, in the order they were written, and a bubble
-  // never says again the line it is already showing.
-  const saying = { lines: [], host: null, timer: null };
-  function say(el, text, host) {
-    if (!el) return "";
-    if (text !== undefined) {
-      const line = String(text === null ? "" : text);
-      if (el.textContent !== line) el.textContent = line;
-    }
-    const shown = (el.textContent || "").replace(/\s+/g, " ").trim();
-    if (!shown) { sayAgain(el); return ""; }
-    if (el.dataset.said === shown) return shown;
-    el.dataset.said = shown;
-    // one utterance per bubble: a line with no full stop of its own gets one
-    saying.lines.push(/[.!?]$/.test(shown) ? shown : `${shown}.`);
-    if (host) saying.host = host;
-    if (!saying.timer) saying.timer = setTimeout(flushSay, 0);
-    return shown;
+  function readMs(text) { return Math.min(6000, 700 + String(text).split(/\s+/).length * READ_MS_PER_WORD); }
+  // The one door. Only Tally's bubble goes through it: a title, a label, an XP number
+  // or a level name is shown and stays silent. The bubble is written when the line is
+  // spoken, not when it is asked for, so what is on screen is what Tally is saying.
+  // "still" is the condition that made the line true; the queue tests it again at the
+  // last moment and drops the line rather than speak it late. "onStart" moves the
+  // screen with the line, "after" runs once the line is over or dropped.
+  function say(text, bubble, tally, opts) {
+    const line = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+    if (!line) return null;
+    const item = { text: line, bubble: bubble || null, tally: tally || null, done: false,
+      still: (opts && opts.still) || null, onStart: (opts && opts.onStart) || null, after: (opts && opts.after) || null };
+    speech.queue.push(item);
+    pump();
+    return item;
   }
-  function flushSay() {
-    saying.timer = null;
-    const lines = saying.lines.splice(0), host = saying.host;
-    saying.host = null;
-    if (lines.length) speak(lines.join(" "), host);
+  function speak(text, host, opts) { return say(text, null, host || null, opts); }
+  // a line is stale when its screen is gone or the child has moved past the moment it
+  // belonged to: nothing behind the child's back, nothing spoken out of turn
+  function stale(item) {
+    if (item.bubble && (!item.bubble.isConnected || item.bubble.closest("[hidden]"))) return true;
+    return Boolean(item.still) && !item.still();
   }
-  // a bubble forgets what it said: the same line on a screen opened again is new
-  function sayAgain(el) { if (el) delete el.dataset.said; }
-  // The server's pedagogical clocks run on these: true before Tally's line starts,
-  // false when it ends, errors, or is cancelled. The pair brackets the whole line,
-  // not each sentence of it. A muted page, and a browser with no speech synthesis at
-  // all, send the pair back to back, so the clock that starts at the end of the line
-  // starts there too. Two false in a row are the same as one, so nothing is repeated.
-  const tts = { speaking: false };
-  function ttsSay(on) {
-    const speaking = Boolean(on);
-    if (speaking === tts.speaking) return;
-    tts.speaking = speaking;
-    sendLesson({ type: "tts", speaking });
+  function closeItem(item) {
+    if (!item || item.done) return;
+    item.done = true;
+    if (item.after) { try { item.after(); } catch (e) { /* the dialogue goes on */ } }
   }
-  function speak(text, host) {
-    if (!text) return;
-    if (!("speechSynthesis" in window)) { ttsSay(true); ttsSay(false); return; }
-    try {
-      window.speechSynthesis.cancel();
-      speech.serial += 1;
-      speech.queue = [];
-      hush();
-      ttsSay(false);
-      if (muted) { ttsSay(true); ttsSay(false); return; }
-      voice.said = numbersIn(text);
-      voice.saidText = plainSpeech(text);
-      if (!voicesReady()) { speech.pending = { text, host: host || null }; waitForVoices(); return; }
-      speech.queue = sentencesOf(text);
-      speech.host = host || null;
-      speakNext(speech.serial);
-    } catch (e) { /* the sentence is on screen anyway */ }
+  function pump() {
+    if (speech.line || speech.timer) return;          // Tally is talking, or the beat is running
+    if (!speech.queue.length) return;
+    if (!muted && !voicesReady()) { waitForVoices(); return; }
+    const dropped = [];
+    let item = speech.queue.shift();
+    while (item && stale(item)) { dropped.push(item); item = speech.queue.shift(); }
+    if (item) startLine(item);
+    dropped.forEach(closeItem);
   }
-  function speakNext(serial) {
-    if (serial !== speech.serial) return;
-    const talk = (on) => {
-      if (speech.host) speech.host.classList.toggle("is-talking", on);
-      voice.spokeUntil = on ? Infinity : Date.now() + 800;
-    };
-    const sentence = speech.queue.shift();
-    if (!sentence) { talk(false); ttsSay(false); return; }
+  function talking(item, on) {
+    if (item && item.tally) item.tally.classList.toggle("is-talking", on);
+    voice.spokeUntil = on ? Infinity : Date.now() + 800;
+  }
+  function startLine(item) {
+    speech.line = item;
+    const serial = ++speech.serial;
+    if (item.bubble) item.bubble.textContent = item.text;
+    if (item.onStart) { try { item.onStart(); } catch (e) { /* the line still goes out */ } }
+    voice.said = numbersIn(item.text);
+    voice.saidText = plainSpeech(item.text);
+    ttsPair(true);
+    talking(item, true);
+    // muted, or a browser with no speech at all: the line still takes the time it takes
+    // to read, so the rhythm and the server's clock are the same either way
+    if (muted || !hasVoice()) { speech.guard = setTimeout(() => endLine(serial), readMs(item.text)); return; }
+    item.rest = sentencesOf(item.text);
+    nextSentence(serial);
+  }
+  function nextSentence(serial) {
+    if (serial !== speech.serial || !speech.line) return;
+    clearTimeout(speech.guard); speech.guard = null;
+    const sentence = speech.line.rest.shift();
+    if (!sentence) { endLine(serial); return; }
     const u = new SpeechSynthesisUtterance(sentence);
     u.lang = "en-US"; u.rate = 0.92; u.pitch = 1.05;
     const chosen = tallyVoice.done ? tallyVoice.picked : pickVoice();
     if (chosen) u.voice = chosen; else if (tallyVoice.timedOut) logVoice("browser default");
-    u.onstart = () => { if (serial === speech.serial) talk(true); };
-    u.onend = () => speakNext(serial);
-    u.onerror = () => speakNext(serial);
-    ttsSay(true);
-    window.speechSynthesis.speak(u);
+    u.onend = () => nextSentence(serial);
+    u.onerror = () => nextSentence(serial);
+    speech.guard = setTimeout(() => endLine(serial), readMs(sentence) + SPEAK_GRACE_MS);
+    try { window.speechSynthesis.speak(u); } catch (e) { endLine(serial); }
+  }
+  function endLine(serial) {
+    if (serial !== speech.serial) return;
+    clearTimeout(speech.guard); speech.guard = null;
+    const item = speech.line;
+    speech.line = null;
+    talking(item, false);
+    ttsPair(false);
+    // the beat starts before anything this line was waiting on, so a line asked for
+    // from inside "after" still waits its turn
+    speech.timer = setTimeout(() => { speech.timer = null; pump(); }, PAUSE_MS);
+    closeItem(item);
+  }
+  // The pedagogical clock on the server stops while Tally talks, so every line is
+  // bracketed by this pair, muted or not, engine or no engine: the clock must never
+  // wait on a voice that is not coming.
+  function ttsPair(on) { sendLesson({ type: "tts", speaking: Boolean(on) }); }
+  // the dialogue is over: mute, or a screen the child has left. Whatever is left to say
+  // is dropped, and the pair around the line being spoken is closed.
+  function cutSpeech() {
+    clearTimeout(speech.timer); speech.timer = null;
+    clearTimeout(speech.guard); speech.guard = null;
+    speech.serial += 1;
+    const dropped = speech.queue.splice(0);
+    const line = speech.line;
+    speech.line = null;
+    if (line) { talking(line, false); ttsPair(false); }
+    if (hasVoice()) { try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } }
+    hush();
+    closeItem(line);
+    dropped.forEach(closeItem);
   }
 
   // ---------- voice answers ----------
@@ -711,7 +764,7 @@
     if (lesson) {
       const sub = $("#lesson .speech-sub");
       if (sub) sub.textContent = "Trying again";
-      say($("#lesson .tally-say"), LINK_SAY, $("#lesson .tally"));
+      say(LINK_SAY, $("#lesson .tally-say"), $("#lesson .tally"));
     } else if (checkRun) {
       checkSay(LINK_SAY);
     }
@@ -758,6 +811,15 @@
     lesson.last = m.state;
     renderPractice(m);
     listenWhile(m.state);
+    // the tutor line from the server: tutor_line when the live tutor has one, the
+    // engine's phrase otherwise. A line the child has already answered past is
+    // superseded by the next one: the older one is dropped, never spoken late.
+    const tutorLine = m.tutor_line || m.tally;
+    if (tutorLine && tutorLine !== lesson.said) {
+      lesson.said = tutorLine;
+      const turn = ++lesson.turn;
+      say(tutorLine, $("#lesson .tally-say"), $("#lesson .tally"), { still: () => Boolean(lesson) && lesson.turn === turn });
+    }
   }
   // --demo: the map opens as a showcase, first unit done, second current
   function seedShowcase() {
@@ -777,7 +839,7 @@
   function startLesson(id) {
     const node = L.findNode(id);
     const total = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
-    lesson = { node, total, correct: 0, firstTry: 0, serverCorrect: null, done: 0, fact: null, last: null,
+    lesson = { node, total, correct: 0, firstTry: 0, serverCorrect: null, done: 0, fact: null, last: null, said: null, turn: 0,
       hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", paid: false, t0: Date.now() };
     stopCheck();
     VIEWS.forEach((v) => { $("#" + v).hidden = true; });
@@ -798,10 +860,8 @@
     if (!s) return;
     payLesson();
     s.paid = false;
-    s.done = 0; s.serverCorrect = null; s.fact = null; s.last = null;
+    s.done = 0; s.serverCorrect = null; s.fact = null; s.last = null; s.said = null; s.turn = 0;
     s.hearts = s.node.kind === "boss" ? 3 : null; s.hit = false; s.typed = "";
-    // the node starts again on the same shell: its first line is a new line
-    sayAgain($("#lesson .tally-say"));
   }
   // XP is never lost: every answer already right is paid, whatever happens next
   function payLesson() {
@@ -849,8 +909,8 @@
         </div>
       </div>`;
     decorate($("#lesson"));
-    // the first line of the lesson is shown and said like every other line
-    say($("#lesson .tally-say"), "Show me both hands.", $("#lesson .tally"));
+    // the first line of the lesson goes through the same door as every other line
+    say("Show me both hands.", $("#lesson .tally-say"), $("#lesson .tally"));
     videoOn($(".practice-video", $("#lesson")));
     markMic();
   }
@@ -919,9 +979,8 @@
     }
     $(".practice-exercise", root).textContent = (m.exercise || "").replace(" x ", " × ") || "Getting ready";
     $(".practice-why", root).textContent = s.done ? `${Math.min(s.done, s.total)} of ${s.total}` : "";
-    // tutor_line is the line Tally says and shows; tally is the fallback when the
-    // tutor has nothing new. Shown and spoken in one move, once per line.
-    say($(".tally-say", root), m.tutor_line || m.tally || "", $(".tally", root));
+    // the bubble belongs to the voice: say() writes it when the line is spoken, so the
+    // words on screen are the words the child is hearing
     $(".speech-sub", root).textContent = m.reaction === "cannot_see" ? "Palms toward the camera" : m.reason ? ({ retry: "One more try", review: "You have met this one", confidence: "An easy one", next_new: "Brand new", level_up: "Jumping ahead" }[m.reason] || "") : "I am watching your fingers";
     setTally($(".tally", root), m.reaction === "cannot_see" ? "squint" : (MOOD[m.state] || "ready"));
     root.dataset.state = m.state;
@@ -1105,9 +1164,10 @@
     $("#finish").hidden = false;
     document.body.dataset.view = "finish";
     decorate($("#finish"));
-    // the card is written by the template above: Tally says exactly what it shows
-    say($("#fn-1 h1"), undefined, $("#fn-1 .tally"));
-    say($("#fn-1 .sub"), undefined, $("#fn-1 .tally"));
+    // the title, the stars, the XP count and the level name are read and stay silent.
+    // Tally's one closing line is the sub, the sentence the server ended the node with,
+    // and it goes through the same door and the same beat as every other line.
+    say(sub, $("#fn-1 .sub"), $("#fn-1 .tally"));
     countUp(gain, before, after);
   }
   // the XP counts up over a second, the bar and the level name follow; then the level up card
@@ -1131,11 +1191,10 @@
     if (!a || !b || $("#finish").hidden) return;
     a.classList.add("out"); b.classList.add("show");
     setTimeout(() => { const f = $("#fn-f2"); if (f) f.style.width = `${L.levelInfo(xp()).percent}%`; }, 500);
-    // the level up card, line by line as it is shown: the level, the name, the reward
-    const host = $("#fn-2 .tally");
-    say($("#fn-2 .newlevel"), undefined, host);
-    say($("#fn-2 h1"), undefined, host);
-    say($("#fn-2 .earned") || $("#fn-2 .sub"), undefined, host);
+    // crossing a level is a Tally moment, not a label: one short line, the card's own
+    // name read back. It waits its turn behind the closing line like anything else.
+    const named = $("#fn-2 h1");
+    say(`Level up. ${named ? named.textContent : ""}.`, null, $("#fn-2 .tally"));
   }
   // glasses are the one plural: "Tally got glasses", "Tally got a wizard hat"
   function accessoryText(key) {
@@ -1167,10 +1226,7 @@
     link.start = null; link.waiting = [];
     videoOff($(".practice-video", $("#lesson")));
     gateVoice(false);
-    if ("speechSynthesis" in window) window.speechSynthesis.cancel();
-    // a line cut off on the way out still closes its pair, or the next one would
-    // open without one and the tutor's clock would never start
-    ttsSay(false);
+    cutSpeech();
     lesson = null;
   }
   function backToMap() {
@@ -1284,7 +1340,7 @@
     probe.alt = ""; probe.src = "/video";
   }
   if (params.get("dev") === "1") $$(".dev-reset").forEach((el) => { el.hidden = false; });
-  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, setMuted, voice, fitOverlay, get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); } };
+  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); } };
   route();
   markMute();
   watchCamera();
