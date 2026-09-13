@@ -379,6 +379,12 @@ F7. Atome's student-model loop (per-child error diagnosis and teaching-strategy 
 
 F7 bis. Reversed on 2026-09-13: the student model is built this weekend after all, as `lesson/scheduler.py`, and drives the course nodes of `web/course/` through `app/server.py`. Mastery per pose and per fact, spaced repetition, session shaping and the reproducible demo scenario are in scope; the second Weave loop over teaching strategy is not.
 
+F8. Added on 2026-09-13. The correct pose is confirmed in `pose_confirm_frames` frames or `pose_confirm_ms`, whichever comes first, not the 300 ms of section 8. Every other event keeps that debounce. Validation has to feel instant: the child is already right while the old clock was still counting. Both values live in `lesson/tutor_params.json` with bounds, like every other policy timing.
+
+F9. Added on 2026-09-13. A live tutor is built after all, as `app/tutor.py`: a clock driven state machine with an intervention ladder, anti nag limits, scoring separated from coaching, modes and per learner adaptation. Its policy is `lesson/tutor_params.json`, every value bounded; its lines are `lesson/tally_lines.json`; every decision is written to `data/tutor_log.jsonl`, and `eval/tutor_score.py` scores that log. This is not the second Weave loop that F7 deferred and F7 bis kept out of scope: nothing here learns by itself. It is the instrumented policy a future loop would tune, and `docs/tutor_contract.md` section "Loop 2" says how.
+
+F10. Added on 2026-09-13. A course node no longer fences the facts a session may draw. The node's pairs are the theme and are served first, then the session fills from the whole range 6 to 10 without repeating, never the same table twice in a row, orientation alternating, and a fact only comes back when it was answered wrong. `MAX_OUTSIDE_REVIEWS` as a hard cap of one review per node is replaced by that rule. The reason is plain: a node of two pairs cannot fill five questions without repeating itself, and the repetition was visible to the child. The scripted demo scenario is unaffected and still plays fixed under `--demo`.
+
 ---
 
 <!-- /autoplan PHASE 1: CEO REVIEW (SELECTIVE EXPANSION, subagent-only: Codex not installed) -->
