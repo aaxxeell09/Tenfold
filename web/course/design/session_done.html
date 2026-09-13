@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1194, height=834, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tenfold session done</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-state="yes">
+<div class="fit">
+<main class="screen">
+
+  <header class="topbar">
+    <span class="brand">Tenfold</span>
+    <div class="chips">
+      <div class="chip">
+        <svg class="flame" viewBox="0 0 24 28" aria-hidden="true"><path d="M12 0 C18 8 22 13 12 28 C2 13 6 8 12 0 Z" fill="#c06214"></path></svg>
+        <span>6 days</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="done-grid">
+
+    <div class="saysrow" style="flex-direction:column;align-items:flex-start;gap:18px">
+      <div class="tally lg anim-bob" data-tally="happy" data-accessories="headband"></div>
+      <p class="say"><span class="who">Tally</span>Eleven stars. Your 9 times are getting quick.</p>
+    </div>
+
+    <div>
+      <h1 class="page">Session done</h1>
+
+      <p class="lead" style="margin:18px 0 22px">11 stars of 15.</p>
+      <div class="starbank" id="starbank"></div>
+
+      <div class="summary">
+        <div class="stat"><span class="k">4</span><span class="v">rooms reviewed</span></div>
+        <div class="stat"><span class="k">5</span><span class="v">exercises</span></div>
+        <div class="stat"><span class="k">2</span><span class="v">hints used</span></div>
+      </div>
+
+      <div class="newbadge">
+        <div class="medal" style="background:#fdf3d8;border-color:var(--gold)"><i class="star" style="background:var(--gold)"></i></div>
+        <div>
+          <p class="h2" style="margin:0">New badge: Streak 5</p>
+          <p class="note">Five days in a row. Tally is impressed.</p>
+        </div>
+      </div>
+
+      <div style="margin-top:30px">
+        <p class="eyebrow" style="margin:0 0 8px">Level</p>
+        <div class="levelbar"><i style="width:58%"></i></div>
+        <div class="levels">
+          <span>Apprentice</span><b>Finger Wizard</b><span>Ten Master</span><span>Tally's Friend</span>
+        </div>
+      </div>
+
+      <div class="btnrow" style="margin-top:34px">
+        <a class="btn btn-primary btn-lg" href="tenfold.html">One more session</a>
+        <a class="btn btn-ghost btn-lg" href="castle.html">See my castle</a>
+      </div>
+    </div>
+
+  </div>
+
+</main>
+</div>
+
+<script src="tally.js"></script>
+<script>
+(function () {
+  // stars per exercise, 3 possible each
+  var earned = [3, 2, 3, 1, 2];
+  var bank = document.getElementById('starbank');
+  earned.forEach(function (n) {
+    var set = document.createElement('div');
+    set.className = 'set';
+    for (var i = 0; i < 3; i++) {
+      var s = document.createElement('i');
+      s.className = 'star' + (i < n ? '' : ' off');
+      set.appendChild(s);
+    }
+    bank.appendChild(set);
+  });
+})();
+</script>
+</body>
+</html>

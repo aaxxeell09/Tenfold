@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1194, height=834, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tenfold</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-state="waiting">
+<div class="fit">
+<main class="screen">
+
+  <header class="topbar">
+    <span class="brand">Tenfold</span>
+    <div class="chips">
+      <div class="chip" title="Streak">
+        <svg class="flame" viewBox="0 0 24 28" aria-hidden="true"><path d="M12 0 C18 8 22 13 12 28 C2 13 6 8 12 0 Z" fill="#c06214"></path></svg>
+        <span id="streak">5 days</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="home-grid">
+    <div class="tally-stage">
+      <div class="tally lg anim-wave" data-tally="happy" data-accessories=""></div>
+    </div>
+
+    <div>
+      <h1 class="hero">Your fingers can multiply.</h1>
+      <p class="lead" id="welcome" hidden></p>
+
+      <form id="namefield" autocomplete="off">
+        <p class="eyebrow" style="margin:0 0 10px">First name, if you like</p>
+        <div class="btnrow" style="margin-bottom:8px">
+          <input class="field" id="firstname" type="text" maxlength="14" placeholder="Leo" aria-label="First name">
+          <button class="btn btn-ghost" type="submit">Save</button>
+        </div>
+        <p class="note">You can skip this and start right away.</p>
+      </form>
+
+      <div class="btnrow" style="margin-top:30px">
+        <a class="btn btn-primary btn-lg" href="lesson.html">Start the lesson</a>
+        <a class="btn btn-ghost btn-lg" href="tenfold.html">Practice</a>
+        <a class="btn btn-ghost btn-lg" href="castle.html">My castle</a>
+      </div>
+
+      <div class="streak-row">
+        <div class="chip quiet">
+          <svg class="flame" viewBox="0 0 24 28" aria-hidden="true"><path d="M12 0 C18 8 22 13 12 28 C2 13 6 8 12 0 Z" fill="#c06214"></path></svg>
+          <span id="streak2">5 day streak</span>
+        </div>
+        <p class="note">Tally keeps your streak safe once a week,<br>so one quiet day is fine.</p>
+      </div>
+
+      <p class="note" style="margin-top:22px">
+        <button class="linkish" type="button" id="toggle">Show the returning player view</button>
+      </p>
+    </div>
+  </div>
+
+</main>
+</div>
+
+<script src="tally.js"></script>
+<script>
+(function () {
+  var KEY = 'tenfold.profile';
+  var welcome = document.getElementById('welcome');
+  var form = document.getElementById('namefield');
+  var input = document.getElementById('firstname');
+  var toggle = document.getElementById('toggle');
+
+  function read() {
+    try { return JSON.parse(localStorage.getItem(KEY) || 'null'); } catch (e) { return null; }
+  }
+  function draw() {
+    var p = read();
+    if (p && p.name) {
+      welcome.hidden = false;
+      welcome.textContent = 'Welcome back, ' + p.name + '. ' + p.stars + ' stars on ' +
+        p.last + ' last time, shall we make it ' + (p.stars + 1) + '?';
+      form.hidden = true;
+      toggle.textContent = 'Show the first run view';
+    } else {
+      welcome.hidden = true;
+      form.hidden = false;
+      toggle.textContent = 'Show the returning player view';
+    }
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var name = (input.value || '').trim();
+    if (!name) return;
+    localStorage.setItem(KEY, JSON.stringify({ name: name, stars: 2, last: '7 × 8' }));
+    draw();
+  });
+  toggle.addEventListener('click', function () {
+    if (read()) { localStorage.removeItem(KEY); input.value = ''; }
+    else { localStorage.setItem(KEY, JSON.stringify({ name: 'Leo', stars: 2, last: '7 × 8' })); }
+    draw();
+  });
+
+  draw();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1194, height=834, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tenfold practice</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body data-state="waiting" data-review="0">
+<div class="fit">
+<main class="screen practice">
+
+  <header class="topbar">
+    <span class="brand">Tenfold</span>
+    <div class="chips">
+      <div class="chip quiet" id="counter">1 of 5</div>
+      <div class="chip">
+        <svg class="flame" viewBox="0 0 24 28" aria-hidden="true"><path d="M12 0 C18 8 22 13 12 28 C2 13 6 8 12 0 Z" fill="#c06214"></path></svg>
+        <span>5 days</span>
+      </div>
+    </div>
+  </header>
+
+  <section class="banner">
+    <span class="reviewtag">Review</span>
+    <p class="exercise" id="exercise">8 × 7</p>
+  </section>
+
+  <section class="stage">
+    <div class="cam" id="cam">
+      <span class="cam-label">camera</span>
+      <button class="dot" type="button" data-hand="left"  data-finger="10" style="left:11%;top:54%">10</button>
+      <button class="dot" type="button" data-hand="left"  data-finger="9"  style="left:19%;top:40%">9</button>
+      <button class="dot" type="button" data-hand="left"  data-finger="8"  style="left:27.5%;top:34%">8</button>
+      <button class="dot" type="button" data-hand="left"  data-finger="7"  style="left:36%;top:40%">7</button>
+      <button class="dot" type="button" data-hand="left"  data-finger="6"  style="left:43%;top:63%">6</button>
+      <button class="dot" type="button" data-hand="right" data-finger="6"  style="left:57%;top:63%">6</button>
+      <button class="dot" type="button" data-hand="right" data-finger="7"  style="left:64%;top:40%">7</button>
+      <button class="dot" type="button" data-hand="right" data-finger="8"  style="left:72.5%;top:34%">8</button>
+      <button class="dot" type="button" data-hand="right" data-finger="9"  style="left:81%;top:40%">9</button>
+      <button class="dot" type="button" data-hand="right" data-finger="10" style="left:89%;top:54%">10</button>
+      <div class="burst" aria-hidden="true"><i class="star"></i><i class="star"></i><i class="star"></i></div>
+    </div>
+  </section>
+
+  <section class="controls">
+    <div class="saysrow">
+      <div class="tally sm" id="tally" data-tally="ready"></div>
+      <p class="say"><span class="who">Tally</span><span id="say">Show me 8 × 7.</span></p>
+    </div>
+    <div class="answer">
+      <input class="field" id="answer" type="text" inputmode="numeric" autocomplete="off" aria-label="Your answer" placeholder="?">
+      <button class="btn btn-primary" id="check" type="button">Check</button>
+      <button class="btn btn-ghost" id="next" type="button" style="margin-left:22px">Next</button>
+    </div>
+  </section>
+
+</main>
+</div>
+
+<script src="tally.js"></script>
+<script>
+(function () {
+  var body = document.body;
+  var elExercise = document.getElementById('exercise');
+  var elSay = document.getElementById('say');
+  var elAnswer = document.getElementById('answer');
+  var elCounter = document.getElementById('counter');
+  var tally = document.getElementById('tally');
+  var dots = Array.prototype.slice.call(document.querySelectorAll('.dot'));
+
+  // five exercises; the third one is a spaced review of an old mistake
+  var session = [
+    { a: 8, b: 7, review: false },
+    { a: 6, b: 9, review: false },
+    { a: 7, b: 8, review: true },
+    { a: 9, b: 9, review: false },
+    { a: 10, b: 6, review: false }
+  ];
+  var at = 0;
+  var picked = { left: null, right: null };
+
+  function task() { return session[at]; }
+  function product() { return task().a * task().b; }
+
+  function render(v) {
+    body.dataset.state = v.state;
+    body.dataset.review = task().review ? '1' : '0';
+    elExercise.textContent = v.exercise;
+    if (v.say != null) elSay.textContent = v.say;
+    if (v.answer != null) elAnswer.value = v.answer;
+    elCounter.textContent = (at + 1) + ' of ' + session.length;
+    if (window.Tally) window.Tally.set(tally, v.face || 'ready');
+    dots.forEach(function (d) {
+      var key = d.dataset.hand + d.dataset.finger;
+      d.classList.toggle('is-picked', (v.picked || []).indexOf(key) > -1);
+      d.classList.toggle('is-wrong', (v.wrong || []).indexOf(key) > -1);
+      d.classList.toggle('is-match', (v.match || []).indexOf(key) > -1);
+    });
+  }
+
+  function view() {
+    var t = task();
+    var sum = t.a + ' × ' + t.b;
+    var keys = [];
+    if (picked.left) keys.push('left' + picked.left);
+    if (picked.right) keys.push('right' + picked.right);
+
+    if (picked.left === t.a && picked.right === t.b) {
+      return { state: 'yes', face: 'happy', exercise: sum,
+               say: 'Yes! ' + sum + ' = ' + product() + '.', match: keys, answer: String(product()) };
+    }
+    if (picked.left && picked.right) {
+      var hand = picked.left !== t.a ? 'left' : 'right';
+      var from = hand === 'left' ? picked.left : picked.right;
+      var to = hand === 'left' ? t.a : t.b;
+      var wrong = [];
+      if (picked.left !== t.a) wrong.push('left' + picked.left);
+      if (picked.right !== t.b) wrong.push('right' + picked.right);
+      return { state: 'almost', face: 'almost', exercise: sum,
+               say: 'Almost. Move your ' + hand + ' finger from ' + from + ' to ' + to + '.',
+               wrong: wrong, picked: keys.filter(function (k) { return wrong.indexOf(k) < 0; }) };
+    }
+    if (picked.left || picked.right) {
+      return { state: 'waiting', face: 'thinking', exercise: sum,
+               say: 'Good. Now your ' + (picked.left ? 'right' : 'left') + ' hand.', picked: keys };
+    }
+    return { state: 'waiting', face: 'ready', exercise: sum,
+             say: (t.review ? 'This one caught you last week. ' : '') + 'Show me ' + sum + '.', picked: [] };
+  }
+  function draw() { render(view()); }
+
+  dots.forEach(function (d) {
+    d.addEventListener('click', function () {
+      var hand = d.dataset.hand, finger = Number(d.dataset.finger);
+      picked[hand] = picked[hand] === finger ? null : finger;
+      send({ type: 'touch', hand: hand, finger: finger });
+      draw();
+    });
+  });
+
+  document.getElementById('check').addEventListener('click', function () {
+    var typed = (elAnswer.value || '').trim();
+    send({ type: 'check', answer: typed });
+    if (window.Tenfold.socket) return;
+    var t = task();
+    if (typed === String(product())) { picked.left = t.a; picked.right = t.b; draw(); return; }
+    var v = view();
+    v.state = 'almost';
+    v.face = 'almost';
+    v.say = typed
+      ? 'Almost. ' + typed + ' is not it. Touch your ' + t.a + ' with your ' + t.b + ' and count again.'
+      : 'Touch your ' + t.a + ' with your ' + t.b + ', then write the answer.';
+    render(v);
+  });
+
+  document.getElementById('next').addEventListener('click', function () {
+    send({ type: 'next' });
+    if (window.Tenfold.socket) return;
+    if (at === session.length - 1) { window.location.href = 'session_done.html'; return; }
+    at += 1;
+    picked = { left: null, right: null };
+    elAnswer.value = '';
+    draw();
+  });
+
+  elAnswer.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') document.getElementById('check').click();
+  });
+
+  // backend hook: Tenfold.connect('ws://host/ws'); the server pushes
+  // {state, exercise, say, wrong:["right9"], match:["left8","right7"], picked:[], answer:"56", face:"happy"}
+  function send(msg) {
+    var ws = window.Tenfold.socket;
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify(msg));
+  }
+  window.Tenfold = {
+    apply: function (p) {
+      render({
+        state: p.state || body.dataset.state,
+        face: p.face,
+        exercise: p.exercise != null ? p.exercise : elExercise.textContent,
+        say: p.say, answer: p.answer, wrong: p.wrong, match: p.match, picked: p.picked
+      });
+    },
+    connect: function (url) {
+      var ws = new WebSocket(url);
+      ws.onmessage = function (e) { try { window.Tenfold.apply(JSON.parse(e.data)); } catch (err) {} };
+      window.Tenfold.socket = ws;
+      return ws;
+    },
+    socket: null
+  };
+
+  draw();
+})();
+</script>
+</body>
+</html>

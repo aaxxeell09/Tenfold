@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=1194, height=834, initial-scale=1, viewport-fit=cover">
+<title>Tenfold · Camera lesson</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="lesson.css">
+</head>
+<body class="tablet">
+<div class="frame">
+
+  <section class="lesson camera-lesson" id="lesson" data-state="waiting" aria-live="polite">
+
+    <div class="lesson-top">
+      <a class="icon-btn" href="learn.html" aria-label="Quit lesson"><svg><use href="#icon-close"></use></svg></a>
+      <div class="bar lesson-bar"><i class="bar-fill" id="bar" style="width:40%"></i></div>
+      <div class="lesson-count" id="count">4 of 10</div>
+    </div>
+
+    <div class="cl-body">
+      <p class="cl-exercise" id="exercise">8 × 7</p>
+
+      <div class="cam cl-cam">
+        <svg class="ghosts" id="ghosts" viewBox="0 0 720 405" aria-hidden="true"></svg>
+        <span class="cam-tag"><svg><use href="#icon-camera"></use></svg>camera</span>
+        <div class="cam-veil">
+          I cannot see your hands
+          <small>Hold them up, palms toward me</small>
+        </div>
+        <div class="reasons">
+          <span><b>5</b> fingers at and below the touch, so 50</span>
+          <span><b>2</b> tops on the left and <b>3</b> on the right, two threes make 6</span>
+          <span>50 and 6 make <b>56</b></span>
+        </div>
+      </div>
+
+      <div class="cl-foot">
+        <div class="speaker">
+          <div class="tally" id="tally" data-tally="ready"></div>
+          <div class="speech" id="speech">Touch your 8 with your 7.<small id="speech-sub">I am watching your fingers</small></div>
+        </div>
+        <div class="mic" id="mic">
+          <svg><use href="#icon-mic"></use></svg>
+          <span class="bars"><i></i><i></i><i></i></span>
+          <span id="mic-label">Listening</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="statebar" id="statebar">
+      <button type="button" data-go="waiting" class="is-on">Waiting</button>
+      <button type="button" data-go="almost">Almost</button>
+      <button type="button" data-go="yes">Yes</button>
+      <button type="button" data-go="cannotsee">Cannot see</button>
+    </div>
+
+  </section>
+
+</div>
+
+<script src="tally.js"></script>
+<script>
+(function () {
+  var lesson = document.getElementById('lesson');
+  var ghosts = document.getElementById('ghosts');
+  var speech = document.getElementById('speech');
+  var sub = document.getElementById('speech-sub');
+  var mic = document.getElementById('mic');
+  var micLabel = document.getElementById('mic-label');
+  var tally = document.getElementById('tally');
+
+  // ghost hands: two fans of fingers with the fingertip numbers 6 to 10
+  var fingers = [[10, 62, 110], [9, 36, 138], [8, 10, 149], [7, -16, 138], [6, -46, 110]];
+  function hand(side, cx, cy) {
+    var dir = side === 'left' ? -1 : 1;
+    var out = '<rect class="palm" x="' + (cx - 52) + '" y="' + (cy - 38) + '" width="104" height="90" rx="30"></rect>';
+    fingers.forEach(function (f) {
+      var n = f[0], a = dir * f[1], L = f[2];
+      out += '<g class="fin" data-key="' + side + n + '" transform="translate(' + cx + ',' + cy + ') rotate(' + a + ')">' +
+               '<rect class="bar" x="-11" y="' + (-L + 14) + '" width="22" height="' + (L - 46) + '" rx="11"></rect>' +
+               '<g transform="translate(0,' + (-L + 2) + ') rotate(' + (-a) + ')">' +
+                 '<circle class="tip" r="19"></circle><text class="num" y="7">' + n + '</text>' +
+               '</g>' +
+             '</g>';
+    });
+    return out;
+  }
+  ghosts.innerHTML = hand('left', 200, 330) + hand('right', 520, 330);
+  var fins = Array.prototype.slice.call(ghosts.querySelectorAll('.fin'));
+
+  var states = {
+    waiting: {
+      face: 'ready', say: 'Touch your 8 with your 7.', sub: 'I am watching your fingers',
+      expect: ['left8', 'right7'], wrong: [], mic: true
+    },
+    almost: {
+      face: 'almost', say: 'Almost. Move your right finger from 9 to 7.', sub: 'Keep the left hand still',
+      expect: ['left8'], wrong: ['right9'], mic: true
+    },
+    yes: {
+      face: 'happy', say: 'Yes! 8 × 7 = 56.', sub: 'Say it out loud once more',
+      expect: ['left8', 'right7'], wrong: [], mic: true
+    },
+    cannotsee: {
+      face: 'squint', say: 'I cannot see your hands. Hold them up in the light.', sub: 'Palms toward the camera',
+      expect: [], wrong: [], mic: false
+    }
+  };
+
+  function go(name) {
+    var s = states[name] || states.waiting;
+    lesson.dataset.state = name;
+    speech.firstChild.nodeValue = s.say;
+    sub.textContent = s.sub;
+    mic.classList.toggle('is-off', !s.mic);
+    micLabel.textContent = s.mic ? 'Listening' : 'Paused';
+    if (window.Tally) window.Tally.set(tally, s.face);
+    fins.forEach(function (f) {
+      var k = f.dataset.key;
+      f.classList.toggle('is-expect', s.expect.indexOf(k) > -1);
+      f.classList.toggle('is-wrong', s.wrong.indexOf(k) > -1);
+    });
+    Array.prototype.forEach.call(document.querySelectorAll('.statebar button'), function (b) {
+      b.classList.toggle('is-on', b.dataset.go === name);
+    });
+  }
+
+  document.getElementById('statebar').addEventListener('click', function (e) {
+    var b = e.target.closest('button');
+    if (b) go(b.dataset.go);
+  });
+  document.addEventListener('keydown', function (e) {
+    var map = { '1': 'waiting', '2': 'almost', '3': 'yes', '4': 'cannotsee' };
+    if (map[e.key]) go(map[e.key]);
+  });
+
+  // tapping the video is the quickest way to step forward while trying the screen out
+  document.querySelector('.cl-cam').addEventListener('click', function () {
+    var order = ['waiting', 'almost', 'yes', 'cannotsee'];
+    go(order[(order.indexOf(lesson.dataset.state) + 1) % order.length]);
+  });
+
+  go('waiting');
+})();
+</script>
+</body>
+</html>
