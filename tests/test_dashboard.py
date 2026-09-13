@@ -37,7 +37,34 @@ def full_snapshot() -> dict:
     snap["detection_ceiling"] = {"both_hands_contact_frames": 0.93}
     snap["rejected"] = [{"arm": "informed", "iteration": 1, "ts": "2026-09-13T00:45:59+00:00",
                          "reason": "class 7x8 fell 0.78 -> 0.67", "patch": "frame vote"}]
+    snap["retrospective_validation"] = {
+        "label": "validation rétrospective, participants non identifiés", "holds": 55, "windows": 125,
+        "a": {"commit": "a" * 40, "rules_sha256": "0" * 64, "exact_match": 0.436, "ci95": [0.31, 0.55]},
+        "b": {"commit": v1.get("sha") or "b" * 40, "rules_sha256": "1" * 64, "exact_match": 0.467, "ci95": [0.34, 0.58]},
+        "paired": {"holds": 55, "mean_difference": 0.03, "ci95": [0.0, 0.08], "better": 2, "worse": 0, "unchanged": 53}}
     return snap
+
+
+def test_snapshot_carries_the_retrospective_validation_under_its_own_name(tmp_path):
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_guard_and_loop import make_repo
+    repo = make_repo(tmp_path)
+    reports = tmp_path / "tenfold-validation" / "retro-seed42"
+    reports.mkdir(parents=True)
+    side = {"commit": "c" * 40, "sha256": "d" * 64}
+    metrics = {"exact_match": 0.5, "exact_match_ci95": [0.4, 0.6]}
+    (reports / "report-cccccccc-cccccccc.json").write_text(json.dumps({
+        "label": "validation rétrospective, participants non identifiés", "caveat": "not a test on other people",
+        "validation": {"manifest": "retro-seed42", "holds": 55, "windows": 125, "sha256": "e" * 64, "source_sha256": "f" * 64},
+        "a": side, "b": side, "metrics": {"a_strict": metrics, "b_strict": metrics},
+        "paired_exact_match_per_hold": {"strict": {"holds": 55, "mean_difference": 0.0}}}))
+    p = subprocess.run([sys.executable, "loop/snapshot.py", "--repo", str(repo)], cwd=repo, capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": str(repo)})
+    assert p.returncode == 0, p.stderr
+    snap = json.loads((repo / "data" / "snapshot.json").read_text())
+    retro = snap["retrospective_validation"]
+    assert retro["label"].startswith("validation rétrospective") and retro["holds"] == 55
+    assert all(v["heldout"] is None for v in snap["informed"])  # never folded into the held-out fields
 
 
 @pytest.mark.parametrize("case", ["committed", "full", "empty"])

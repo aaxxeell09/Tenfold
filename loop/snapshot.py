@@ -48,24 +48,49 @@ def version_rows(metrics: dict | None, repo: Path, with_diff: bool) -> list[dict
     return rows
 
 
+def retrospective(repo: Path, best: str | None) -> dict | None:
+    """The latest validation rétrospective report from eval/retro_validate.py for the running version, strict scores.
+    Kept apart from the held-out fields on purpose: the critic saw these holds and participants are not identified."""
+    base = repo.parent / "tenfold-validation"
+    reports = sorted(base.glob("*/report-*.json"), key=lambda p: p.stat().st_mtime) if base.is_dir() else []
+    for path in reversed(reports):
+        r = read_json(path)
+        if not r or (best and (r.get("b") or {}).get("commit") != best):
+            continue
+        try:
+            side = {k: {"commit": r[k]["commit"], "rules_sha256": r[k]["sha256"],
+                        "exact_match": r["metrics"][f"{k}_strict"]["exact_match"],
+                        "ci95": r["metrics"][f"{k}_strict"]["exact_match_ci95"]} for k in ("a", "b")}
+            return {"label": r["label"], "caveat": r.get("caveat"), "name": r["validation"].get("manifest"),
+                    "holds": r["validation"]["holds"], "windows": r["validation"]["windows"],
+                    "validation_sha256": r["validation"]["sha256"], "source_sha256": r["validation"].get("source_sha256"),
+                    "scoring": "strict: a missing prediction fails", **side,
+                    "paired": r["paired_exact_match_per_hold"]["strict"]}
+        except (KeyError, TypeError):
+            continue
+    return None
+
+
 def build(repo: Path) -> dict:
     informed = read_json(repo / "data" / "metrics.json")
     blind = read_json(repo / "data" / "metrics-blind.json")
     knn = read_json(repo / "eval" / "results" / "knn-heldout.json")
     best_file = repo / "data" / "BEST_VERSION"
+    best = best_file.read_text().strip() if best_file.exists() else None
     rejected = [{"arm": arm, **{k: r.get(k) for k in ("iteration", "ts", "reason", "patch")}}
                 for arm, m in (("informed", informed), ("blind", blind)) for r in (m or {}).get("rejected", [])]
     commits = [dict(zip(("sha", "date", "subject"), line.split("\t", 2)))
                for line in git(repo, "log", "--author=critic-agent", "--format=%H%x09%aI%x09%s").splitlines() if line]
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "best_version": best_file.read_text().strip() if best_file.exists() else None,
+        "best_version": best,
         "informed": version_rows(informed, repo, with_diff=True),
         "blind": version_rows(blind, repo, with_diff=False),
         "rejected": rejected,
         "critic_commits": commits,
         "knn_heldout": slim((knn or {}).get("metrics")),
         "detection_ceiling": read_json(repo / "data" / "detection_ceiling.json"),
+        "retrospective_validation": retrospective(repo, best),
     }
 
 
