@@ -1383,17 +1383,41 @@
     lesson.last = m.state;
     renderPractice(m);
     listenWhile(m.state);
-    // the tutor line from the server: tutor_line when the live tutor has one, the
-    // engine's phrase otherwise. A line the child has already answered past is
-    // superseded by the next one: the older one is dropped, never spoken late.
-    const tutorLine = m.tutor_line || m.tally;
-    if (tutorLine && tutorLine !== lesson.said) {
-      lesson.said = tutorLine;
-      const turn = ++lesson.turn;
-      say(tutorLine, $("#lesson .say"), lessonTally(), {
-        kind: lineKind(m), key: m.reaction || m.state, interrupt: interrupts(m),
-        still: () => Boolean(lesson) && lesson.turn === turn,
-      });
+    speakFor(m);
+  }
+  // What Tally says for one state message. tutor_line is a new intervention, sent once;
+  // null means nothing new, never "cancel what is waiting". Without one, the engine's
+  // phrase is the line, and only when that phrase itself has changed: an unchanged
+  // tally on the next refresh used to replace the tutor's line and drop it from the
+  // queue. A line belongs to its moment, the exercise and the engine state it was sent
+  // in, or to the exercise alone when it opens one; still waiting once that is gone,
+  // it is obsolete and dropped, never spoken late. A newer tutor line supersedes a
+  // waiting one, and supersedes a waiting phrase; a phrase never supersedes a tutor line.
+  function speakFor(m) {
+    const s = lesson;
+    const exercise = `${s.done}|${m.exercise || ""}`;
+    const moment = `${exercise}|${m.state}`;
+    if (exercise !== s.exerciseKey) s.exerciseKey = exercise;
+    if (moment !== s.momentKey) { s.momentKey = moment; s.said = null; }
+    const inScope = m.state === "exercise_shown"
+      ? () => Boolean(lesson) && lesson === s && s.exerciseKey === exercise
+      : () => Boolean(lesson) && lesson === s && s.momentKey === moment;
+    const tallyChanged = (m.tally || null) !== s.tally;
+    s.tally = m.tally || null;
+    const bubble = $("#lesson .say"), host = lessonTally();
+    // how the queue treats the line is the server's word, whichever of the two it is:
+    // an acknowledgement still goes ahead, may cut, and is never dropped
+    const delivery = { kind: lineKind(m), key: m.reaction || m.state, interrupt: interrupts(m) };
+    if (m.tutor_line) {
+      if (m.tutor_line === s.said) return;
+      s.said = m.tutor_line;
+      const turn = ++s.turn;
+      s.tallyTurn += 1;
+      say(m.tutor_line, bubble, host, { ...delivery, still: () => inScope() && s.turn === turn });
+    } else if (m.tally && tallyChanged && m.tally !== s.said) {
+      s.said = m.tally;
+      const tallyTurn = ++s.tallyTurn;
+      say(m.tally, bubble, host, { ...delivery, still: () => inScope() && s.tallyTurn === tallyTurn });
     }
   }
   // --demo: the map opens as a showcase, first unit done, second current
@@ -1415,6 +1439,7 @@
     const node = L.findNode(id);
     const total = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
     lesson = { node, total, correct: 0, firstTry: 0, serverCorrect: null, done: 0, fact: null, last: null, said: null, turn: 0,
+      tally: null, tallyTurn: 0, exerciseKey: null, momentKey: null,
       beat: null, hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", paid: false, t0: Date.now() };
     stopCheck();
     VIEWS.forEach((v) => { $("#" + v).hidden = true; });
@@ -1439,6 +1464,7 @@
     payLesson();
     s.paid = false;
     s.done = 0; s.serverCorrect = null; s.fact = null; s.last = null; s.said = null; s.turn = 0;
+    s.tally = null; s.tallyTurn = 0; s.exerciseKey = null; s.momentKey = null;
     s.hearts = s.node.kind === "boss" ? 3 : null; s.hit = false; s.typed = "";
     clearHeard();
   }

@@ -508,6 +508,16 @@ class TutorLink:
         self.fields: dict[str, Any] = dict(TUTOR_FIELDS)
         self.factors: dict[str, Any] = dict(DEFAULT_FACTORS)
         self.early_stop = False
+        # The intervention decided and not sent yet. The tutor returns a line on
+        # the one tick it says it and null on every call after, the ticks it drops
+        # above its fps included, while the page is published to at 15 Hz: read
+        # straight off fields, a line was overwritten before it was ever sent. It
+        # is kept here until a message takes it, and dropped once it is obsolete.
+        self.line: str | None = None
+        self._line_moment: Any = None
+        # What a line belongs to: the lesson hands in the exercise and the engine
+        # state. A line still waiting when that has changed is not said late.
+        self.moment: Callable[[], Any] = lambda: None
 
     @property
     def live(self) -> bool:
@@ -521,6 +531,7 @@ class TutorLink:
         self.factors = learner_factors(carried)
         self.fields = dict(TUTOR_FIELDS)
         self.early_stop = False
+        self.drop_line()
         if self._module is None:
             self._module = tutor_module()
         # The still hands measurement of the gate fixes the tutor's motion
@@ -543,10 +554,12 @@ class TutorLink:
         factors and the last decision are still there to be sent.
         """
         self.ended(reason, now)
+        self.drop_line()                # nothing is left to say it to
 
     def exercise(self, title: str, pick: Pick, node: str | None, now: float) -> None:
         """A new exercise is on screen. The tutor chooses its mode here."""
         self.fields = dict(TUTOR_FIELDS)
+        self.drop_line()                # whatever was for the last exercise
         self._absorb(self._send("exercise", a=pick.left, b=pick.right, title=title,
                                 node=node, now=now))
 
@@ -602,6 +615,17 @@ class TutorLink:
 
     # -- what the tutor decides --
 
+    def take_line(self) -> str | None:
+        """The waiting intervention, handed out once. None if none, or obsolete."""
+        line, self.line = self.line, None
+        if line is not None and self._line_moment != self.moment():
+            return None
+        return line
+
+    def drop_line(self) -> None:
+        self.line = None
+        self._line_moment = None
+
     def read_factors(self) -> dict[str, Any]:
         """The factors as they stand, for the learner record the page stores."""
         if self.tutor is not None:
@@ -625,7 +649,14 @@ class TutorLink:
             payload = _decided(_value(getattr(self.tutor,
                                               TUTOR_NAMES["decision"], None)))
         if payload:
+            # Null means nothing new, never "forget the line still waiting". A
+            # newer line replaces a waiting one: it is the tutor's latest word.
+            line = payload.pop("tutor_line", None)
             self.fields.update(payload)
+            if line:
+                self.line, self._line_moment = str(line), self.moment()
+        if self.line is not None and self._line_moment != self.moment():
+            self.drop_line()            # the moment it was said for is gone
 
 
 # --- the live sample writer, app/live_samples.py -----------------------------
@@ -727,8 +758,11 @@ class Hub:
         for queue in list(self._subscribers):
             # A stalled browser never blocks the camera, but only a state refresh
             # may be dropped: node_end and session_end are the page's only finish
-            # screen, and losing one leaves the child on the last question.
-            if message.get("type") == "state" and queue.qsize() > 8:
+            # screen, and losing one leaves the child on the last question. A
+            # state message that carries a tutor line is not a refresh either: it
+            # is sent once, and dropping it loses what Tally was about to say.
+            if (message.get("type") == "state" and not message.get("tutor_line")
+                    and queue.qsize() > 8):
                 continue
             queue.put_nowait(message)
 
@@ -859,6 +893,26 @@ class Lesson:
         self._level_moved = False
 
     @property
+    def tutor(self) -> TutorLink:
+        return self._tutor
+
+    @tutor.setter
+    def tutor(self, link: TutorLink) -> None:
+        # Whichever link is plugged in, the tests' included, learns what a line
+        # belongs to from this lesson.
+        link.moment = self._moment
+        self._tutor = link
+
+    def _moment(self) -> tuple[str, str]:
+        """The exercise on screen and the engine state: what a tutor line is for."""
+        return (self.engine.exercise.title, self.engine.snapshot().state)
+
+    def _send_line(self) -> None:
+        """Publish now an intervention the tutor decided outside a camera frame."""
+        if self.running and self.tutor.line is not None:
+            self.push(self.engine.snapshot())
+
+    @property
     def live_learner(self) -> str:
         """Whose live sample rows these are. The hash, never the child's name."""
         return live_learner_id(self.learner.learner_id)
@@ -878,6 +932,8 @@ class Lesson:
         own arithmetic on them.
         """
         fields = dict(self.tutor.fields)
+        # The line rides exactly one message; every refresh after it says null.
+        fields["tutor_line"] = self.tutor.take_line()
         fields["scored_gesture_error"] = self.scored_gesture_error
         fields["scored_math_error"] = self.scored_math_error
         fields["first_try"] = self.first_try()
@@ -1112,7 +1168,10 @@ class Lesson:
                 self.push(update, reaction=reaction)
             elif reaction is not None:
                 self.push(self.engine.snapshot(), reaction=reaction)
-            elif scored or self._level_moved or now - self._last_push >= FINGER_REFRESH_S:
+            elif (scored or self._level_moved or self.tutor.line is not None
+                  or now - self._last_push >= FINGER_REFRESH_S):
+                # A new tutor line goes out on the frame it is decided, whatever
+                # the camera rate, rather than wait for the next 15 Hz refresh.
                 self.push(self.engine.snapshot())
 
     def _follow_tutor(self) -> None:
@@ -1267,6 +1326,7 @@ class Lesson:
         with no gap, so the tutor's clocks behave the same muted or not.
         """
         self.tutor.said(speaking, time.monotonic())
+        self._send_line()
 
     def _speech(self, raw: Any) -> None:
         """Anything the child said, whether or not it was a number.
@@ -1278,6 +1338,7 @@ class Lesson:
         if not text:
             return
         self.tutor.heard(text, time.monotonic())
+        self._send_line()
 
     def _line_dropped(self, message: dict[str, Any]) -> None:
         """The page could not speak a line. Nothing here may raise or filter:

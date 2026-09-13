@@ -241,9 +241,18 @@ value as of that message, and the value the page must trust is the one riding th
 
 ### 1.6 Speaking, once
 
-The page says exactly one line per message: `tutor_line` when it is not null, otherwise `tally`, and only when
-that text differs from the last line spoken. `.tally-say` renders `tutor_line || tally`. The start check
-(`checkMessage`) keeps its own scripted lines and ignores `tutor_line` entirely.
+The page says at most one line per message. `tutor_line` is a new intervention: the server keeps it from the
+moment the tutor decides it until one state message carries it, publishes that message on the frame it is
+decided whatever the camera rate, never drops it for a stalled browser, and sends null on every message after.
+Null means nothing new: it never cancels a line already queued. Without a `tutor_line`, `tally` is the line,
+and only when `tally` itself has changed since the previous message. Neither is spoken twice in a row.
+`.tally-say` shows the line being spoken.
+
+A line belongs to the moment it was sent in, the exercise and the engine `state`, or to the exercise alone when
+it arrives with `state` `exercise_shown`. A line still waiting when its moment has gone is obsolete and dropped,
+on the server before it is sent and on the page before it is spoken. A newer `tutor_line` supersedes a waiting
+one and a waiting `tally`; a `tally` never supersedes a `tutor_line`. The start check (`checkMessage`) keeps its
+own scripted lines and ignores `tutor_line` entirely.
 
 ---
 

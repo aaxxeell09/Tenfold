@@ -444,8 +444,10 @@ def test_a_stalled_browser_loses_refreshes_but_never_the_finish_screen():
         hub._publish({"type": "state", "n": index})
     assert queue.qsize() == 9, "state refreshes stop piling up"
 
+    hub._publish({"type": "state", "n": 12, "tutor_line": "Find 7 on your right hand."})
     hub._publish({"type": "node_end", "node_id": "u1-l1"})
     drained = [queue.get_nowait() for _ in range(queue.qsize())]
+    assert drained[-2]["tutor_line"] == "Find 7 on your right hand.", "a tutor line is sent once, never dropped"
     assert drained[-1]["type"] == "node_end", "the finish screen is never dropped"
 
 
@@ -1332,6 +1334,154 @@ def test_the_tutor_is_fed_at_the_camera_rate_and_drops_what_is_too_fast():
     gaps = [after[2] - before[2] for before, after in zip(stub.observations,
                                                          stub.observations[1:])]
     assert min(gaps) >= 1 / stub.fps - 1e-6
+
+
+class ScriptedLineTutor(StubTutor):
+    """Says a line on chosen observations, the way app/tutor.py does: on the one tick
+    it says it, and null on every call after, the calls it drops above its fps too."""
+
+    script: dict[int, str] = {}
+
+    def observe(self, obs, now=None):
+        self.handed.append(now)
+        silent = {**self.decision, "tutor_line": None}
+        if self._taken_at is not None and now - self._taken_at < 1 / self.fps - 1e-6:
+            return silent
+        self._taken_at = now
+        self.observations.append((obs.gesture.method, obs.motion, now))
+        line = self.script.get(len(self.observations))
+        return {**silent, "tutor_line": line} if line else silent
+
+
+def _camera_clock(monkeypatch, start: float = 1000.0) -> dict:
+    """The server's refresh clock and the frames on the same simulated time."""
+    clock = {"t": start}
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock["t"])
+    return clock
+
+
+@pytest.mark.parametrize("fps", [31, 40, 60])
+def test_every_tutor_line_reaches_the_page_once_whatever_the_camera_rate(monkeypatch, fps):
+    """The QA loss: the camera feeds the tutor faster than the 15 Hz refresh, and a
+    line read off the fields was overwritten by the next frame's null before it was
+    published. Two lines on consecutive tutor ticks are the tightest case."""
+    clock = _camera_clock(monkeypatch)
+    script = {2: "Take your time.", 3: "Find 7 on your right hand.",
+              9: "Move this finger here.", 30: "5 tens make 50. 2 times 3 makes 6."}
+    lesson = _lesson()
+    lesson.tutor = server.TutorLink(
+        _stub_module(type("Scripted", (ScriptedLineTutor,), {"script": script})),
+        keep_log=False)
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((8, 7),), count=2)})
+    published = _recorded(lesson)
+    wrong, _ = _poses(lesson)
+    for frame in range(3 * fps):
+        clock["t"] = 1000.0 + frame / fps
+        lesson.observe(wrong, [], 2, clock["t"])
+
+    said = [m["tutor_line"] for m in published if m.get("tutor_line")]
+    assert said == list(script.values()), f"at {fps} fps the page was sent {said}"
+    assert len(published) < 3 * fps, "still a refresh rate, not one message per frame"
+
+
+@pytest.mark.parametrize("fps", [31, 40, 60])
+def test_the_real_tutor_is_heard_in_full_at_the_camera_rate(monkeypatch, tmp_path, fps):
+    """app/tutor.py itself, on a wrong pose held long enough to climb its ladder:
+    every line its observe returns is in exactly one published message, in order."""
+    import functools
+
+    clock = _camera_clock(monkeypatch)
+    lesson = _lesson()
+    lesson.tutor = server.TutorLink(keep_log=False)          # the real app/tutor.py
+    _live(lesson, tmp_path)
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((8, 7),), count=2)})
+    assert lesson.tutor.live, "app/tutor.py did not load"
+
+    returned: list[str] = []
+    tutor = lesson.tutor.tutor
+    observe = tutor.observe
+
+    @functools.wraps(observe)
+    def spy(*args, **kwargs):
+        decision = observe(*args, **kwargs)
+        if decision.tutor_line:
+            returned.append(decision.tutor_line)
+        return decision
+
+    tutor.observe = spy
+    published = _recorded(lesson)
+    pick = lesson.pick
+    wrong = GestureState(method="6-10", left=pick.left, right=9, contact=False,
+                         confidence=0.9)
+    for frame in range(25 * fps):
+        clock["t"] = 1000.0 + frame / fps
+        lesson.observe(wrong, _hands(), 2, clock["t"], palm=0.1)
+
+    assert len(returned) >= 2, f"the tutor said too little to test anything: {returned}"
+    said = [m["tutor_line"] for m in published if m.get("tutor_line")]
+    assert said == returned, f"at {fps} fps the tutor said {returned}, the page got {said}"
+
+
+def test_a_line_decided_on_a_page_message_is_sent_at_once_and_only_once(monkeypatch):
+    """tts and speech reach the tutor outside any camera frame. What it says there
+    goes out on that message, and every refresh after it carries null."""
+    clock = _camera_clock(monkeypatch)
+
+    class SaysOnTtsEnd(StubTutor):
+        def tts_end(self, now=None):
+            super().tts_end(now)
+            return {"tutor_line": "Show me 8 times 7 with your hands."}
+
+    lesson = _lesson()
+    lesson.tutor = server.TutorLink(_stub_module(SaysOnTtsEnd), keep_log=False)
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((8, 7),), count=2)})
+    published = _recorded(lesson)
+    lesson.command({"type": "tts", "speaking": False})
+    assert published and published[-1]["tutor_line"] == "Show me 8 times 7 with your hands."
+
+    blind = GestureState(method="unknown", confidence=0.2)
+    for frame in range(60):
+        clock["t"] = 1000.0 + frame / 60
+        lesson.observe(blind, [], 0, clock["t"])
+    said = [m["tutor_line"] for m in published if m.get("tutor_line")]
+    assert said == ["Show me 8 times 7 with your hands."]
+    assert len(published) > 1, "the refreshes kept going, with null"
+
+
+def test_a_waiting_line_is_kept_through_null_and_dropped_once_obsolete():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((8, 7), (6, 6)), count=3)})
+    link, stub = lesson.tutor, lesson.tutor.tutor
+
+    def decide(line, at):
+        stub.decision = {"tutor_line": line}
+        link.heard("seven", at)           # straight to the seam: nothing publishes
+
+    # null means nothing new, and a newer line replaces the one still waiting
+    decide("One.", 1.0)
+    decide(None, 1.1)
+    assert link.line == "One.", "a null decision erased the waiting line"
+    decide("Two.", 1.2)
+    assert link.take_line() == "Two." and link.take_line() is None, "handed out once"
+
+    # the engine moves to another state before the line was sent
+    decide("Find 7 on your right hand.", 2.0)
+    _, right = _poses(lesson)
+    for now in (2.0, 2.4):
+        lesson.engine.observe(right, now)
+    assert lesson.engine.snapshot().state == "correct_pose"
+    stub.decision = {}
+    assert link.take_line() is None, "a correction for a pose that is gone"
+
+    # a new exercise invalidates whatever was waiting for the previous one
+    decide("Take your time.", 3.0)
+    stub.decision = {}
+    link.exercise("6 x 6", lesson.pick, "u1-l1", 3.1)
+    assert link.line is None and link.take_line() is None
 
 
 def _hands(shift: float = 0.0) -> list[dict]:
