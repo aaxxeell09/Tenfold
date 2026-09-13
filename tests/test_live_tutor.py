@@ -59,7 +59,15 @@ def pose(left: int, right: int, contact: bool = True) -> GestureState:
                         confidence=0.9)
 
 
-def fingers(dx: float = 0.0, hands: int = 2) -> list[dict[str, object]]:
+def fingers(dx: float = 0.0, hands: int = 2,
+            touch: tuple[int, int] | None = None) -> list[dict[str, object]]:
+    """The fingertips of a frame, as app/server.py sends them.
+
+    touch is the pair the classifier says is touching, left number then right.
+    The tutor reads the gap between those two tips and refuses a pose held
+    apart, so a fixture that claims contact has to put them in the same place,
+    the way two hands meeting in the middle of the frame do.
+    """
     names = {0: (), 1: ("left",), 2: ("left", "right")}[hands]
     out: list[dict[str, object]] = []
     for hand in names:
@@ -67,7 +75,23 @@ def fingers(dx: float = 0.0, hands: int = 2) -> list[dict[str, object]]:
         for number in range(6, 11):
             out.append({"hand": hand, "number": number, "x": base + dx,
                         "y": 0.5 + 0.02 * (number - 6)})
+    if touch is not None and len(names) == 2:
+        meeting = 0.5 + dx
+        for tip in out:
+            if ((tip["hand"] == "left" and tip["number"] == touch[0])
+                    or (tip["hand"] == "right" and tip["number"] == touch[1])):
+                tip["x"] = meeting
+                tip["y"] = 0.5
     return out
+
+
+def _touching(gesture: GestureState | None) -> tuple[int, int] | None:
+    """The pair to draw as meeting: the one the classifier calls a touch."""
+    if gesture is None or not gesture.contact:
+        return None
+    if gesture.left is None or gesture.right is None:
+        return None
+    return int(gesture.left), int(gesture.right)
 
 
 class Clock:
@@ -125,7 +149,9 @@ class Harness:
         said: list[str] = []
         for index in range(int(round(seconds * FPS))):
             self.clock.tick()
-            obs = Observation(gesture=gesture, fingers=fingers(drift * (index + 1), hands),
+            obs = Observation(gesture=gesture,
+                              fingers=fingers(drift * (index + 1), hands,
+                                              _touching(gesture)),
                               hands_seen=hands, hint=hint)
             self.last = self.tutor.observe(obs, self.clock.t)
             if self.last.tutor_line:
@@ -139,7 +165,8 @@ class Harness:
         marked: list[tuple[str, bool]] = []
         for _ in range(int(round(seconds * FPS))):
             self.clock.tick()
-            obs = Observation(gesture=gesture, fingers=fingers(0.0, hands),
+            obs = Observation(gesture=gesture,
+                              fingers=fingers(0.0, hands, _touching(gesture)),
                               hands_seen=hands, hint=hint)
             self.last = self.tutor.observe(obs, self.clock.t)
             if self.last.tutor_line:

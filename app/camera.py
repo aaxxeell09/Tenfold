@@ -10,10 +10,17 @@ left alone, so the capture scripts still run on Linux.
 The index: index 0 is not always the real camera. A virtual camera, Continuity
 Camera or a screen sharing device can sit in front of it and hand out black
 frames forever. So when no index is given, the indexes are probed in order and
-the first one that actually produces a lit image wins. Each candidate gets a
-warmup: the first frames out of a real camera are frequently black because the
-sensor has not finished exposing, and judging on a single read would reject the
-good camera.
+the first one that actually produces a lit image wins.
+
+The warmup: a real sensor needs a moment to expose, so its first frames are
+black. A probe that reads them throws away a camera that is about to work
+perfectly well, which is exactly what happened to a FaceTime HD camera on the
+owner's Mac. So every candidate is warmed up first, its opening frames are
+discarded, and only then is brightness measured, on the median of several
+frames so that neither one late black frame nor one bright flash decides alone.
+And the built in camera is never rejected for being dark: if it is there, it is
+the camera the child is looking at, so it is used and the darkness is logged as
+a warning instead of a refusal.
 
 The phone: with an iPhone nearby, Continuity Camera offers it as an ordinary
 camera, and its rear sensor is brighter than any laptop webcam, so brightness
@@ -26,16 +33,28 @@ built in first, never the phone, brightness only between whatever is left.
 from __future__ import annotations
 
 import json
+import statistics
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import cv2
 
 PROBE_INDEXES: tuple[int, ...] = (0, 1, 2, 3)
-WARMUP_FRAMES = 15
 MIN_BRIGHTNESS = 5.0
+
+# Constants of the camera path, not tutor policy, so they are named here and not
+# in lesson/tutor_params.json. The opening frames of a device are discarded:
+# WARMUP_FRAMES of them, or WARMUP_MS milliseconds of trying, whichever ends
+# first. The deadline is not a nicety, it is what stops a device that opens and
+# never delivers a frame from holding the probe for ever. Brightness is then the
+# median of BRIGHTNESS_SAMPLES frames, so one outlier in either direction cannot
+# carry the decision on its own.
+WARMUP_FRAMES = 10
+WARMUP_MS = 600.0
+BRIGHTNESS_SAMPLES = 5
 
 # Matched case insensitively as substrings of the device name.
 BUILT_IN_HINTS: tuple[str, ...] = ("facetime", "built-in")
@@ -153,14 +172,58 @@ def rank_devices(
     return built_in + unknown, skipped
 
 
-def peak_brightness(capture: Any, warmup: int = WARMUP_FRAMES) -> float:
-    """Brightest mean over the first frames, so a slow sensor is not called black."""
-    best = 0.0
-    for _ in range(warmup):
+def warm_up(
+    capture: Any,
+    frames: int = WARMUP_FRAMES,
+    budget_ms: float = WARMUP_MS,
+    clock: Callable[[], float] = time.monotonic,
+) -> int:
+    """Read and throw away the opening frames. Returns how many really arrived.
+
+    Stops at `frames` frames or once `budget_ms` milliseconds have passed,
+    whichever comes first, so a camera that never returns anything costs the
+    probe a fixed fraction of a second and not the whole lesson.
+    """
+    deadline = clock() + budget_ms / 1000.0
+    seen = 0
+    while seen < frames and clock() < deadline:
         ok, frame = capture.read()
         if ok and frame is not None:
-            best = max(best, float(frame.mean()))
-    return best
+            seen += 1
+    return seen
+
+
+def median_brightness(capture: Any, samples: int = BRIGHTNESS_SAMPLES) -> float:
+    """Median mean brightness over the next frames, 0.0 if none arrive at all.
+
+    The median, not the maximum: a single bright flash on an otherwise black
+    device must not pass for a working camera, and a single black frame from a
+    working one must not fail it.
+    """
+    values: list[float] = []
+    for _ in range(samples):
+        ok, frame = capture.read()
+        if ok and frame is not None:
+            values.append(float(frame.mean()))
+    return float(statistics.median(values)) if values else 0.0
+
+
+def probe_brightness(
+    capture: Any,
+    frames: int = WARMUP_FRAMES,
+    budget_ms: float = WARMUP_MS,
+    samples: int = BRIGHTNESS_SAMPLES,
+    clock: Callable[[], float] = time.monotonic,
+) -> float:
+    """Warm the device up, then measure it. The whole probe, in one call."""
+    warm_up(capture, frames, budget_ms, clock)
+    return median_brightness(capture, samples)
+
+
+def _is_built_in(name: str | None) -> bool:
+    """Is this the machine's own camera, by name? An unnamed device is not."""
+    folded = (name or "").casefold()
+    return any(hint in folded for hint in BUILT_IN_HINTS)
 
 
 def _label(names: Mapping[int, str], index: int) -> str:
@@ -192,6 +255,9 @@ def open_camera(
     warmup: int = WARMUP_FRAMES,
     min_brightness: float = MIN_BRIGHTNESS,
     names: Mapping[int, str] | None = None,
+    warmup_ms: float = WARMUP_MS,
+    samples: int = BRIGHTNESS_SAMPLES,
+    clock: Callable[[], float] = time.monotonic,
 ) -> tuple[Any, int]:
     """Return an open capture and the index it came from.
 
@@ -200,9 +266,14 @@ def open_camera(
     room is not a reason to silently use another one.
 
     With no index, the devices are probed in the order of rank_devices, and the
-    first one that opens and produces a mean brightness above min_brightness
-    wins. So a built in camera is preferred, a phone is never picked, and
-    brightness only separates the rest.
+    first one that opens and, once warmed up, gives a median brightness above
+    min_brightness wins. So a built in camera is preferred, a phone is never
+    picked, and brightness only separates the rest.
+
+    The built in camera is never rejected for being dark. The name preference
+    put it first, and a dark reading cannot undo that: it is kept, with a
+    warning, because a lens the child has covered with a thumb is still the
+    right camera and it is fixed by moving the thumb, not by using another one.
 
     Raises CameraError when nothing usable is left.
     """
@@ -229,10 +300,15 @@ def open_camera(
             capture.release()
             tried.append(f"{candidate} absent")
             continue
-        brightness = peak_brightness(capture, warmup)
+        brightness = probe_brightness(capture, warmup, warmup_ms, samples, clock)
         if brightness > min_brightness:
             print(f"camera: picked index {candidate}{label} "
                   f"(brightness {brightness:.1f})")
+            return capture, candidate
+        if _is_built_in(known.get(candidate)):
+            print(f"camera: WARNING index {candidate}{label} still reads dark "
+                  f"(brightness {brightness:.1f}) after warm up, using the "
+                  f"built in camera anyway")
             return capture, candidate
         capture.release()
         tried.append(f"{candidate}{label} black ({brightness:.1f})")

@@ -1,5 +1,11 @@
 """Tally, the character. SPEC.md section 8.
 
+This module holds no sentence. Every word Tally says lives in
+lesson/tally_lines.json, the twenty canonical lines the owner wrote plus the
+few the older lesson path still needs, and this file only decides which key
+fits the moment and fills its numbers in. One voice, one home: a phrase that is
+not in that file is a phrase the child must never hear.
+
 These are the phrases that show instantly, before any model has answered, and
 that stay if the model is slow or unreachable. They are the floor of the
 experience, so they have to be good on their own.
@@ -28,66 +34,96 @@ from typing import Any
 
 NAME = "Tally"
 
-# The neutral launch line lives in lesson/tally_lines.json, where the tutor
-# reads it too. It is read from there rather than copied here, so the sentence
-# the child hears has one home and one wording.
 LINES_PATH = Path(__file__).with_name("tally_lines.json")
 
 
-def _launch_line() -> str | None:
+def _load_lines() -> dict[str, str]:
+    """The line file, or nothing at all.
+
+    An unreadable file leaves Tally silent rather than speaking words that were
+    written here instead of there. Silence is recoverable; invented text is not.
+    """
     try:
         raw = json.loads(LINES_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
-    line = raw.get("launch") if isinstance(raw, dict) else None
-    return line if isinstance(line, str) and line.strip() else None
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {key: value for key, value in raw.items()
+            if isinstance(value, str) and value.strip()}
 
 
-LAUNCH = _launch_line()
+LINES: dict[str, str] = _load_lines()
 
-# Keyed by event, or by the screen state when no event carries the moment. None
-# of these carry a placeholder: a line here has to render with no context at all,
-# because a phrase reading "move your finger to None" must never reach a child.
-PHRASES: dict[str, str] = {
-    "intro": "Hi, I am Tally. Show me your hands and let us multiply together.",
-    "exercise_shown": "Here we go. Put up the two fingers and touch them.",
-    "waiting_pose": "Show me both hands, palms towards me.",
-    "one_hand": "Show me your other hand too.",
-    "unknown_gesture": "Touch the two fingers tip to tip, gently.",
-    "no_contact": "So close. Let those two fingertips touch.",
-    "hands_swapped": "Almost. Swap your hands and try again.",
-    "wrong_left_finger": "Almost. Move your left finger a little.",
-    "wrong_right_finger": "Almost. Move your right finger a little.",
-    "correct_pose": "That is it. Now count the tens, then the ones.",
-    "answer_correct": "Yes. That is exactly right.",
-    "answer_wrong": "Almost. Count the tens again, slowly.",
+# The moment, as the engine and the page name it, to the line that answers it.
+# Where a canonical line already says the thing, the moment points straight at
+# it: the pose being right is "pose_ready" and nothing else, which is how the
+# second wording of that moment stopped existing.
+KEYS: dict[str, str] = {
+    "intro": "intro",
+    "exercise_shown": "exercise_shown",
+    "waiting_pose": "visibility_none",
+    "one_hand": "visibility_one",
+    "unknown_gesture": "unknown_gesture",
+    "no_contact": "not_touching",
+    "hands_swapped": "hands_swapped",
+    "wrong_left_finger": "wrong_left_finger",
+    "wrong_right_finger": "wrong_right_finger",
+    "correct_pose": "pose_ready",
+    "answer_correct": "answer_correct",
+    "answer_wrong": "wrong_answer_1",
 
     # Onboarding, first session only.
-    "count_fingers": "Thumb is six, then seven, eight, nine, ten. Say them with me.",
-    "guided": "Let us do one together. I will show you every step.",
+    "count_fingers": "count_fingers",
+    "guided": "guided",
 
     # Why Tally picked this exercise, from lesson/scheduler.py.
-    "retry": "Let us have another go at that one.",
-    "review": "Here is one you have met before.",
-    "confidence": "An easy one now, just because.",
-    "next_new": "Something brand new. Ready?",
-    "level_up": "You are quick today. Let us jump ahead.",
+    "retry": "retry",
+    "review": "review",
+    "confidence": "confidence",
+    "next_new": "next_new",
+    "level_up": "level_up",
 
     # Help, in three steps.
-    "hint_1": "Look at your hands. One finger needs to move.",
-    "hint_2": "See the faint circle? Put that finger there.",
-    "hint_3": "Watch me do it, then copy me.",
-    "same_hand_twice": "Both hands show the same finger. They need different ones.",
-    "recount_tens": "Almost. Count the tens again: the touched ones and below.",
-    "recount_units": "Almost. The tens are good. Count the ones above.",
-    "cannot_see": "I cannot see your hands. Bring them into the light.",
+    "hint_1": "hint_1",
+    "hint_2": "show",
+    "hint_3": "hint_3",
+    "same_hand_twice": "same_hand_twice",
+    "recount_tens": "count_tens",
+    "recount_units": "wrong_answer_3",
+    "cannot_see": "visibility_none",
 
     # The end of a session.
-    "end_success": "Lovely work today. Come back soon and we keep going.",
-    "end_tired": "That is plenty for today. You did really well.",
+    "end_success": "end_success",
+    "end_tired": "end_tired",
 }
 
-FALLBACK = "Take your time, I am watching."
+# The line said when the moment is not one Tally knows.
+FALLBACK_KEY = "hesitation_1"
+
+# Richer wording, used only when the context carries what it needs and the
+# result still fits under the 20 word limit. Otherwise the plain line wins.
+DETAILED_KEYS: dict[str, str] = {
+    "wrong_left_finger": "wrong_left_finger_detailed",
+    "wrong_right_finger": "wrong_right_finger_detailed",
+    "answer_correct": "success",
+    "hint_1": "hint_1_detailed",
+    "same_hand_twice": "same_hand_twice_detailed",
+    "retry": "retry_detailed",
+    "next_new": "next_new_detailed",
+    "confidence": "confidence_detailed",
+    "review": "review_detailed",
+    "end_success": "end_success_detailed",
+}
+
+# The tables as text, for callers that want to read a moment without rendering
+# it. They are views on the file, built at import, never a second copy of it.
+PHRASES: dict[str, str] = {event: LINES[key] for event, key in KEYS.items()
+                           if key in LINES}
+DETAILED: dict[str, str] = {event: LINES[key] for event, key in DETAILED_KEYS.items()
+                            if key in LINES}
+FALLBACK: str = LINES.get(FALLBACK_KEY, "")
+LAUNCH: str | None = LINES.get("launch")
 
 # Why Tally picked this exercise. The page shows these under her sentence, as
 # the subtitle, so this tuple is also the list of moments that can have one.
@@ -101,47 +137,53 @@ PICK_EVENTS = ("retry", "review", "confidence", "next_new", "level_up")
 # announced as new already.
 MET_BEFORE_EVENTS = ("retry", "review")
 
-# Richer wording, used only when the context carries what it needs and the
-# result still fits under the 20 word limit. Otherwise the plain line above wins.
-DETAILED = {
-    "wrong_left_finger": "Almost. Your right hand is good. Move your left finger from {move_from} to {move_to}.",
-    "wrong_right_finger": "Almost. Your left hand is good. Move your right finger from {move_from} to {move_to}.",
-    "answer_correct": "Yes. {answer} is exactly right.",
-    "hint_1": "Look at your {hand} hand. That finger should be {move_to}.",
-    "same_hand_twice": "Both hands show {move_from}. Your {hand} hand needs {move_to}.",
-    "retry": "Let us try {exercise} again. You were close.",
-    "next_new": "A brand new one: {exercise}. Ready?",
-    "confidence": "An easy one: {exercise}, just because.",
-    "review": "Here is {exercise} again.",
-    "end_success": "Lovely work. Tomorrow we try {tomorrow}.",
-}
+# The neutral announcement when a never met fact has no numbers to announce.
+NEUTRAL_KEY = "exercise_shown"
 
 
 def phrase(event: str, context: dict[str, Any] | None = None) -> str:
-    """One short sentence for this moment. Never raises, never returns empty."""
+    """One short sentence for this moment, always from the line file."""
+    ctx = _context(context)
+
+    if event in MET_BEFORE_EVENTS and not met_before(ctx):
+        return _launch(ctx)
+
+    detailed = _rendered(DETAILED_KEYS.get(event), ctx)
+    if detailed is not None:
+        return detailed
+    plain = _rendered(KEYS.get(event), ctx)
+    return plain if plain is not None else FALLBACK
+
+
+def _context(context: dict[str, Any] | None) -> dict[str, Any]:
+    """The caller's context, plus the numbers a canonical line asks for by name.
+
+    The hint carries the finger to move, the exercise carries the two factors,
+    and the canonical lines name them {a}, {b} and {total}. Filling them here is
+    the only arithmetic in this module, and it is arithmetic, not wording.
+    """
     ctx: dict[str, Any] = dict(context or {})
     hint = ctx.get("hint") or {}
     if isinstance(hint, dict):
         for name in ("move_from", "move_to", "hand"):
             if ctx.get(name) is None and hint.get(name) is not None:
                 ctx[name] = hint[name]
-
-    if event in MET_BEFORE_EVENTS and not met_before(ctx):
-        return _launch(ctx)
-
-    detailed = _rendered(DETAILED.get(event), ctx)
-    if detailed is not None:
-        return detailed
-    plain = _rendered(PHRASES.get(event), ctx)
-    return plain if plain is not None else FALLBACK
+    operands = _operands(ctx)
+    if operands is not None:
+        a, b = operands
+        ctx.setdefault("a", a)
+        ctx.setdefault("b", b)
+        ctx.setdefault("total", a * b)
+    return ctx
 
 
-def _rendered(template: str | None, ctx: dict[str, Any]) -> str | None:
-    """Fill a template, or None when the context lacks a field or it runs long.
+def _rendered(key: str | None, ctx: dict[str, Any]) -> str | None:
+    """Fill a line, or None when the context lacks a field or it runs long.
 
     A phrase with an unfilled placeholder must never reach a child, and neither
     must one over the 20 word limit, so both failures fall back rather than show.
     """
+    template = LINES.get(key) if key else None
     if not template:
         return None
     try:
@@ -179,13 +221,11 @@ def met_before(context: dict[str, Any] | None = None) -> bool:
 
 def _launch(ctx: dict[str, Any]) -> str:
     """The neutral announcement: the question, and no claim about the past."""
-    operands = _operands(ctx)
-    if LAUNCH is not None and operands is not None:
-        a, b = operands
-        neutral = _rendered(LAUNCH, {**ctx, "a": a, "b": b})
-        if neutral is not None:
-            return neutral
-    return PHRASES["exercise_shown"]
+    neutral = _rendered("launch", ctx)
+    if neutral is not None:
+        return neutral
+    plain = _rendered(NEUTRAL_KEY, ctx)
+    return plain if plain is not None else FALLBACK
 
 
 def _operands(ctx: dict[str, Any]) -> tuple[int, int] | None:
@@ -213,4 +253,4 @@ def _operands(ctx: dict[str, Any]) -> tuple[int, int] | None:
 
 
 def all_events() -> tuple[str, ...]:
-    return tuple(PHRASES)
+    return tuple(KEYS)

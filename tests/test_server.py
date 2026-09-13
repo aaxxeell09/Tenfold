@@ -7,6 +7,7 @@ tests exercise the same path the webcam takes, minus MediaPipe.
 from __future__ import annotations
 
 import asyncio
+import random
 import json
 import logging
 import threading
@@ -20,7 +21,7 @@ from app import server
 from classifier.schema import GestureState, HandFrame, Window
 from lesson import tally
 from lesson.engine import Engine, Exercise
-from lesson.scheduler import ScriptedScheduler, now_utc
+from lesson.scheduler import Scheduler, ScriptedScheduler, now_utc
 
 
 def run(coroutine):
@@ -300,7 +301,7 @@ def test_the_course_assets_are_served_next_to_the_page():
     run(scenario())
 
 
-def test_a_node_scopes_the_session_to_its_pairs_and_length():
+def test_a_node_fixes_the_length_and_the_draw_is_six_to_ten():
     async def scenario():
         app = server.create_app(mock=True)
         srv, client = await _client(app)
@@ -323,7 +324,14 @@ def test_a_node_scopes_the_session_to_its_pairs_and_length():
             assert end is not None, "the node never ended"
             assert end["node_id"] == "u1-l1"
             assert end["total"] == 5, "a lesson is five exercises"
-            assert set(facts) <= {"6x6", "7x7"}, facts
+            # The node label no longer steers the draw, amendment F10: every
+            # question comes uniformly from six to ten. What the node still
+            # fixes is the length. This scenario skips every exercise, so the
+            # retry queue legitimately brings facts back, which is why nothing
+            # here asserts they are distinct.
+            for fact in facts:
+                left, right = (int(part) for part in fact.split("x"))
+                assert 6 <= left <= 10 and 6 <= right <= 10, facts
             await ws.close()
         finally:
             await client.close()
@@ -560,7 +568,13 @@ def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node()
             assert lesson.hint_level == 0, "hint reached the running node"
             assert lesson.scheduler.outcomes == [], "check or next reached the running node"
 
-            await first.send_json({"type": "check", "value": 36})
+            # The node label no longer fixes the fact, amendment F10, so the
+            # answer is whatever was actually drawn, and the mock keeps cycling,
+            # so wait for the pose to be latched again before answering.
+            await _await(first, lambda m: m.get("node") == "check"
+                         and m.get("state") in ("correct_pose", "waiting_answer"))
+            pick = lesson.pick
+            await first.send_json({"type": "check", "value": pick.left * pick.right})
             ended = await _await(first, lambda m: m.get("type") == "node_end")
             assert ended["node_id"] == "check" and ended["correct"] == 1
             await first.close()
@@ -703,11 +717,20 @@ async def _until(ready, timeout: float = 5.0) -> None:
 # --- the lesson, without a socket -------------------------------------------
 
 
+def _seeded(demo: bool = False) -> Scheduler:
+    """The real scheduler on a fixed seed. The draw is uniform over six to ten
+    now, so a test that poses a fact has to pose the one that was drawn, and a
+    test that runs a session has to get the same session every time."""
+    if demo:
+        return server.make_scheduler(demo=True)
+    return Scheduler(now=server.now_utc(), rng=random.Random(20260913))
+
+
 def _lesson(demo: bool = False) -> server.Lesson:
     """The lesson with no tutor behind it, which is the server on its own."""
     import types
 
-    lesson = server.Lesson(Engine(), server.Hub(), server.make_scheduler)
+    lesson = server.Lesson(Engine(), server.Hub(), _seeded)
     lesson.demo_available = demo
     lesson.tutor = server.TutorLink(types.SimpleNamespace(), keep_log=False)
     lesson.start()
@@ -1118,10 +1141,15 @@ def test_with_a_tutor_the_old_grace_clock_no_longer_scores():
 
 def test_no_contact_and_a_swap_never_score_however_long_they_are_held():
     """Both numbers are right in each: the pose is still being assembled."""
-    for left, right in ((6, 7), (7, 6)):
+    for swap in (False, True):
         lesson = _lesson()
         lesson.command({"type": "start_node", "state": None,
                         "node": _node(pairs=((6, 7),), count=1)})
+        # The node label no longer decides the fact, amendment F10, so the two
+        # numbers come from what was actually drawn: the point of the test is
+        # that both are right and only the contact or the hands are not.
+        pick = lesson.pick
+        left, right = (pick.right, pick.left) if swap else (pick.left, pick.right)
         pose = GestureState(method="6-10", left=left, right=right,
                             contact=False, confidence=0.9)
         for now in (0.0, 0.4, 10.0, 20.0):
@@ -1137,7 +1165,7 @@ def test_a_commutative_pose_is_correct_and_counts_for_the_star_score():
     lesson.command({"type": "start_node", "state": None,
                     "node": _node(pairs=((6, 7),), count=1)})
     pick = lesson.pick
-    assert (pick.left, pick.right) == (6, 7)
+    assert pick is not None, "a node serves an exercise"
     inverted = GestureState(method="6-10", left=pick.right, right=pick.left,
                             contact=True, confidence=0.95)
     lesson.observe(inverted, [], 2, 0.0)
@@ -1808,7 +1836,7 @@ def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node()
             assert lesson.hint_level == 0, "hint reached the running node"
             assert lesson.scheduler.outcomes == [], "check or next reached the running node"
 
-            await first.send_json({"type": "check", "value": 36})
+            await first.send_json({"type": "check", "value": lesson.pick.result})
             ended = await _await(first, lambda m: m.get("type") == "node_end")
             assert ended["node_id"] == "check" and ended["correct"] == 1
             await first.close()

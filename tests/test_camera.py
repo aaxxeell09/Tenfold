@@ -1,14 +1,18 @@
 """app/camera.py: AVFoundation backend, device names, index probing, warmup.
 
-Two cases that matter on this Mac. Index 0 is a virtual camera that opens fine
-and hands out black frames forever, index 1 is the real one. And with an iPhone
-in the room, Continuity Camera offers the phone as a camera whose rear sensor
-outshines the laptop, so the brightest camera is the wrong camera.
+Three cases that matter on this Mac. Index 0 is a virtual camera that opens fine
+and hands out black frames forever, index 1 is the real one. With an iPhone in
+the room, Continuity Camera offers the phone as a camera whose rear sensor
+outshines the laptop, so the brightest camera is the wrong camera. And the built
+in FaceTime camera is black for its first frames while the sensor exposes, so a
+probe that reads those frames throws away the one camera the child is in front
+of.
 
 There is no camera and no macOS here, so the selection is driven through
 injected device lists: names= for open_camera, and a fake system_profiler or a
-fake sysfs for device_names itself. What no test here can prove is that the
-order system_profiler prints is the order AVFoundation numbers.
+fake sysfs for device_names itself. Time is injected too, through FakeClock: no
+test may wait on the real clock. What no test here can prove is that the order
+system_profiler prints is the order AVFoundation numbers.
 """
 
 from __future__ import annotations
@@ -46,7 +50,47 @@ class FakeCapture:
         self.released = True
 
 
-def opener_for(devices: dict[int, FakeCapture]):
+class ScriptedCapture:
+    """A capture that replays a list of frame brightnesses, then holds the last."""
+
+    def __init__(self, values: list[float], opened: bool = True) -> None:
+        self._values = list(values)
+        self._opened = opened
+        self.reads = 0
+        self.released = False
+
+    def isOpened(self) -> bool:
+        return self._opened
+
+    def read(self):
+        value = self._values[min(self.reads, len(self._values) - 1)]
+        self.reads += 1
+        return True, np.full((4, 4, 3), value, dtype=np.uint8)
+
+    def release(self) -> None:
+        self.released = True
+
+
+class FakeClock:
+    """A clock the test drives: every reading of it moves on by step_ms."""
+
+    def __init__(self, step_ms: float = 10.0) -> None:
+        self._step_s = step_ms / 1000.0
+        self.readings = 0
+
+    def __call__(self) -> float:
+        now = self.readings * self._step_s
+        self.readings += 1
+        return now
+
+
+def open_camera(index: int | None = None, **kwargs):
+    """cam.open_camera on a driven clock, so no test ever waits on a real one."""
+    kwargs.setdefault("clock", FakeClock())
+    return cam.open_camera(index, **kwargs)
+
+
+def opener_for(devices: dict[int, object]):
     """An opener that hands out the scripted devices and records the backend."""
     seen: list[tuple[int, int]] = []
 
@@ -72,7 +116,7 @@ def test_an_explicit_index_is_taken_at_face_value():
     """A dark room is not a reason to quietly use another camera."""
     devices = {2: FakeCapture(brightness=0.0)}
     opener = opener_for(devices)
-    capture, index = cam.open_camera(2, opener=opener, names={})
+    capture, index = open_camera(2, opener=opener, names={})
     assert index == 2
     assert capture is devices[2]
     assert [i for i, _ in opener.seen] == [2], "no other index should be touched"
@@ -80,14 +124,14 @@ def test_an_explicit_index_is_taken_at_face_value():
 
 def test_an_explicit_index_that_does_not_open_is_an_error():
     with pytest.raises(cam.CameraError, match="index 3"):
-        cam.open_camera(3, opener=opener_for({}), names={})
+        open_camera(3, opener=opener_for({}), names={})
 
 
 def test_auto_pick_skips_the_black_virtual_camera():
     """Index 0 opens and stays black, index 1 is the real camera."""
     devices = {0: FakeCapture(brightness=0.0), 1: FakeCapture(brightness=120.0)}
     opener = opener_for(devices)
-    capture, index = cam.open_camera(None, opener=opener, names={})
+    capture, index = open_camera(None, opener=opener, names={})
     assert index == 1
     assert capture is devices[1]
     assert devices[0].released, "the rejected camera must be released"
@@ -97,22 +141,22 @@ def test_auto_pick_skips_the_black_virtual_camera():
 def test_a_camera_that_is_black_at_first_is_not_rejected():
     """Real sensors need a few frames to expose. One read would reject this one."""
     devices = {0: FakeCapture(brightness=90.0, lit_after=10)}
-    capture, index = cam.open_camera(None, opener=opener_for(devices), names={})
+    capture, index = open_camera(None, opener=opener_for(devices), names={})
     assert index == 0
-    assert devices[0].reads == cam.WARMUP_FRAMES
+    assert devices[0].reads == cam.WARMUP_FRAMES + cam.BRIGHTNESS_SAMPLES
 
 
 def test_one_read_would_not_have_been_enough():
     """Guards the warmup itself: with a single frame the same camera looks black."""
     devices = {0: FakeCapture(brightness=90.0, lit_after=10)}
     with pytest.raises(cam.CameraError):
-        cam.open_camera(None, opener=opener_for(devices), warmup=1, names={})
+        open_camera(None, opener=opener_for(devices), warmup=1, names={})
 
 
 def test_no_usable_camera_says_what_was_tried():
     devices = {0: FakeCapture(brightness=0.0), 2: FakeCapture(breaks=True)}
     with pytest.raises(cam.CameraError) as excinfo:
-        cam.open_camera(None, opener=opener_for(devices), names={})
+        open_camera(None, opener=opener_for(devices), names={})
     message = str(excinfo.value)
     assert "0 black" in message
     assert "1 absent" in message
@@ -122,7 +166,7 @@ def test_no_usable_camera_says_what_was_tried():
 def test_probing_uses_the_platform_backend(monkeypatch):
     monkeypatch.setattr(cam.sys, "platform", "darwin")
     opener = opener_for({0: FakeCapture(brightness=200.0)})
-    cam.open_camera(None, opener=opener, names={})
+    open_camera(None, opener=opener, names={})
     assert opener.seen == [(0, cv2.CAP_AVFOUNDATION)]
 
 
@@ -209,7 +253,7 @@ def test_the_iphone_loses_even_though_it_is_first_and_brighter(capsys):
     """The bug: index 0 is the phone, it is the brightest, and it must not win."""
     devices = {0: FakeCapture(brightness=250.0), 1: FakeCapture(brightness=60.0)}
     opener = opener_for(devices)
-    capture, index = cam.open_camera(
+    capture, index = open_camera(
         None, opener=opener, indexes=(0, 1),
         names={0: "Ilan's iPhone", 1: "FaceTime HD Camera"})
     assert index == 1
@@ -223,7 +267,7 @@ def test_an_iphone_on_its_own_opens_nothing_and_says_why():
     the operator is told what happened and how to override it."""
     devices = {0: FakeCapture(brightness=250.0)}
     with pytest.raises(cam.CameraError) as excinfo:
-        cam.open_camera(None, opener=opener_for(devices), indexes=(0,),
+        open_camera(None, opener=opener_for(devices), indexes=(0,),
                         names={0: "Ilan's iPhone"})
     message = str(excinfo.value)
     assert "iPhone" in message
@@ -234,7 +278,7 @@ def test_an_iphone_on_its_own_opens_nothing_and_says_why():
 def test_brightness_still_decides_between_two_ordinary_cameras():
     """Neither name is built in and neither is a phone, so the probe rules."""
     devices = {0: FakeCapture(brightness=0.0), 1: FakeCapture(brightness=120.0)}
-    capture, index = cam.open_camera(
+    capture, index = open_camera(
         None, opener=opener_for(devices), indexes=(0, 1),
         names={0: "OBS Virtual Camera", 1: "Logitech StreamCam"})
     assert index == 1
@@ -243,7 +287,7 @@ def test_brightness_still_decides_between_two_ordinary_cameras():
 
 def test_with_no_names_at_all_the_old_behaviour_is_untouched():
     devices = {0: FakeCapture(brightness=0.0), 1: FakeCapture(brightness=120.0)}
-    _, index = cam.open_camera(None, opener=opener_for(devices), names={})
+    _, index = open_camera(None, opener=opener_for(devices), names={})
     assert index == 1
 
 
@@ -253,7 +297,7 @@ def test_with_no_names_at_all_the_old_behaviour_is_untouched():
 def test_camera_name_matches_a_substring_case_insensitively():
     devices = {0: FakeCapture(brightness=200.0), 1: FakeCapture(brightness=200.0)}
     opener = opener_for(devices)
-    _, index = cam.open_camera(
+    _, index = open_camera(
         None, name="streamcam", opener=opener, indexes=(0, 1),
         names={0: "FaceTime HD Camera", 1: "Logitech StreamCam"})
     assert index == 1, "the name overrides the built in preference"
@@ -263,14 +307,14 @@ def test_camera_name_matches_a_substring_case_insensitively():
 def test_camera_name_can_even_ask_for_the_phone():
     """An override that cannot reach the phone would not be an override."""
     devices = {0: FakeCapture(brightness=200.0)}
-    _, index = cam.open_camera(None, name="iphone", opener=opener_for(devices),
+    _, index = open_camera(None, name="iphone", opener=opener_for(devices),
                                indexes=(0,), names={0: "Ilan's iPhone"})
     assert index == 0
 
 
 def test_camera_name_that_matches_nothing_is_an_error_that_lists_what_was_seen():
     with pytest.raises(cam.CameraError) as excinfo:
-        cam.open_camera(None, name="Dell", opener=opener_for({0: FakeCapture()}),
+        open_camera(None, name="Dell", opener=opener_for({0: FakeCapture()}),
                         indexes=(0,), names={0: "FaceTime HD Camera"})
     message = str(excinfo.value)
     assert "Dell" in message
@@ -279,7 +323,7 @@ def test_camera_name_that_matches_nothing_is_an_error_that_lists_what_was_seen()
 
 def test_camera_name_with_no_names_available_says_so_instead_of_guessing():
     with pytest.raises(cam.CameraError, match="no device names"):
-        cam.open_camera(None, name="FaceTime", opener=opener_for({0: FakeCapture()}),
+        open_camera(None, name="FaceTime", opener=opener_for({0: FakeCapture()}),
                         names={})
 
 
@@ -287,12 +331,105 @@ def test_an_explicit_index_wins_over_a_name(capsys):
     """--camera is the blunter instrument and takes precedence over --camera-name."""
     devices = {0: FakeCapture(brightness=200.0), 1: FakeCapture(brightness=200.0)}
     opener = opener_for(devices)
-    _, index = cam.open_camera(0, name="StreamCam", opener=opener,
+    _, index = open_camera(0, name="StreamCam", opener=opener,
                                names={0: "FaceTime HD Camera",
                                       1: "Logitech StreamCam"})
     assert index == 0
     assert [i for i, _ in opener.seen] == [0]
     assert "FaceTime HD Camera" in capsys.readouterr().out
+
+
+# --- the warm up, the bug the owner hit on his own Mac ------------------------
+
+
+def test_a_camera_black_for_its_first_reads_is_warmed_up_and_then_measured(capsys):
+    """The bug: the FaceTime camera is dark for a tenth of a second and was
+    thrown away for it. The opening frames are discarded, the measurement lands
+    on the frames that come after them."""
+    devices = {0: FakeCapture(brightness=90.0, lit_after=8)}
+    capture, index = open_camera(None, opener=opener_for(devices), names={})
+    assert index == 0
+    assert capture is devices[0]
+    assert devices[0].reads == cam.WARMUP_FRAMES + cam.BRIGHTNESS_SAMPLES
+    assert "brightness 90.0" in capsys.readouterr().out
+
+
+def test_the_measurement_is_the_median_so_one_bright_frame_decides_nothing():
+    """Four black frames and one flash is a black camera, not a working one."""
+    dark = [0.0] * cam.WARMUP_FRAMES + [0.0, 0.0, 250.0, 0.0, 0.0]
+    devices = {0: ScriptedCapture(dark)}
+    with pytest.raises(cam.CameraError):
+        open_camera(None, opener=opener_for(devices), indexes=(0,),
+                    names={0: "OBS Virtual Camera"})
+    assert devices[0].reads == cam.WARMUP_FRAMES + cam.BRIGHTNESS_SAMPLES
+
+
+def test_the_measurement_is_the_median_so_one_black_frame_fails_nothing():
+    """The same five frames the other way round: three lit out of five is lit."""
+    lit = [0.0] * cam.WARMUP_FRAMES + [0.0, 250.0, 250.0, 250.0, 0.0]
+    devices = {0: ScriptedCapture(lit)}
+    _, index = open_camera(None, opener=opener_for(devices), indexes=(0,),
+                           names={0: "OBS Virtual Camera"})
+    assert index == 0
+
+
+def test_median_brightness_reads_exactly_the_samples_it_is_asked_for():
+    capture = ScriptedCapture([10.0, 20.0, 30.0, 200.0, 200.0])
+    assert cam.median_brightness(capture) == 30.0
+    assert capture.reads == cam.BRIGHTNESS_SAMPLES
+
+
+def test_a_built_in_camera_that_stays_dark_is_still_the_one(capsys):
+    """Point 3: the name preference cannot be undone by a black reading. A lens
+    under a thumb is fixed by moving the thumb, not by using the other camera."""
+    devices = {0: FakeCapture(brightness=0.0), 1: FakeCapture(brightness=200.0)}
+    capture, index = open_camera(
+        None, opener=opener_for(devices), indexes=(0, 1),
+        names={0: "FaceTime HD Camera", 1: "Logitech StreamCam"})
+    assert index == 0
+    assert capture is devices[0]
+    assert not devices[0].released, "the camera we are using stays open"
+    assert devices[1].reads == 0, "no other camera is even considered"
+    out = capsys.readouterr().out
+    assert "WARNING" in out
+    assert "still reads dark" in out
+    assert "FaceTime HD Camera" in out
+
+
+def test_a_camera_that_is_not_built_in_and_stays_dark_is_still_rejected():
+    """The exception is the built in camera and nothing else."""
+    devices = {0: FakeCapture(brightness=0.0)}
+    with pytest.raises(cam.CameraError) as excinfo:
+        open_camera(None, opener=opener_for(devices), indexes=(0,),
+                    names={0: "OBS Virtual Camera"})
+    assert "OBS Virtual Camera" in str(excinfo.value)
+    assert devices[0].released
+
+
+def test_the_warm_up_gives_up_on_the_clock_not_on_the_frame_count():
+    """A device that opens and never delivers must cost 600 ms, not the lesson."""
+    capture = FakeCapture(breaks=True)
+    clock = FakeClock(step_ms=100.0)
+    assert cam.warm_up(capture, clock=clock) == 0
+    assert capture.reads == 5, "600 ms of 100 ms steps, then it gives up"
+    assert capture.reads < cam.WARMUP_FRAMES, "the frame count was never reached"
+
+
+def test_the_warm_up_stops_at_the_frame_count_when_frames_do_arrive():
+    """The other half of whichever comes first: a live camera is not delayed."""
+    capture = FakeCapture(brightness=90.0)
+    clock = FakeClock(step_ms=1.0)
+    assert cam.warm_up(capture, clock=clock) == cam.WARMUP_FRAMES
+    assert capture.reads == cam.WARMUP_FRAMES
+
+
+def test_a_camera_that_never_delivers_a_frame_is_an_error_and_not_a_hang():
+    """Straight through open_camera, on a clock that is driven and not waited on."""
+    devices = {0: FakeCapture(breaks=True)}
+    with pytest.raises(cam.CameraError):
+        open_camera(None, opener=opener_for(devices), indexes=(0,),
+                    names={0: "Logitech StreamCam"}, clock=FakeClock(step_ms=100.0))
+    assert devices[0].reads == 5 + cam.BRIGHTNESS_SAMPLES
 
 
 # --- the server wiring -------------------------------------------------------

@@ -31,6 +31,12 @@ Hypothesis log (one line per accepted patch, newest last):
   when the last frame's own top two pairs are within AMBIGUITY_MARGIN=0.025 of each other (a coin flip);
   otherwise keep trusting the last frame as before. exact_match 0.500 -> 0.505, false_unknown_rate
   unchanged at 0.047, no class regressed beyond the gate's limit.
+- v5: measured (not the diagnosis's wrist-motion guess) that wrist_motion already sits under MOTION_THRESHOLD
+  for failing transition samples (e.g. s000004, s000005): the wrist is still while fingers keep reconfiguring,
+  which wrist-only motion cannot see. Added tip_motion (mean per-frame fingertip displacement) gated to fire
+  only above TIP_MOTION_CONF_GATE=0.75, since low-confidence tracking jitter (e.g. class 8x9, conf ~0.56-0.74)
+  looks like motion but is noise, not travel. TIP_MOTION_THRESHOLD=0.2 (best passing value from --sweep):
+  exact_match 0.510 -> 0.516, false_unknown_rate unchanged at 0.047, no class regressed.
 """
 from __future__ import annotations
 
@@ -42,6 +48,65 @@ from classifier.schema import FINGER_NUMBERS, GestureState, Window
 CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale
 UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer
 AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the last frame's own top pair is a coin flip
+MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units, above which hands are still moving
+TIP_MOTION_THRESHOLD = 0.2  # mean per-frame fingertip displacement, in mean-scale units, above which fingers are still moving into shape
+TIP_MOTION_CONF_GATE = 0.75  # only trust tip_motion above this confidence: low-confidence tracking jitter looks like motion but isn't
+
+
+def wrist_motion(window: Window) -> float:
+    """Mean per-step wrist displacement of both hands, in mean-scale units, over both-present frames.
+
+    A held gesture keeps the wrist still while the fingertips make contact; a transition is the wrist
+    still travelling between two holds. Averaged over the whole window (not just the last step) so one
+    noisy frame pair cannot hide steady travel.
+    """
+    frames = features.both_present_frames(window)
+    if len(frames) < 2:
+        return 0.0
+    total = 0.0
+    steps = 0
+    for (l0, r0), (l1, r1) in zip(frames, frames[1:]):
+        s = features.mean_scale(l0, r0)
+        if not s > 0:
+            continue
+        lw0, lw1 = np.asarray(l0.wrist_xy, dtype=float), np.asarray(l1.wrist_xy, dtype=float)
+        rw0, rw1 = np.asarray(r0.wrist_xy, dtype=float), np.asarray(r1.wrist_xy, dtype=float)
+        step = (float(np.linalg.norm(lw1 - lw0)) + float(np.linalg.norm(rw1 - rw0))) / (2.0 * s)
+        if np.isfinite(step):
+            total += step
+            steps += 1
+    return total / steps if steps else 0.0
+
+
+def tip_motion(window: Window) -> float:
+    """Mean per-step fingertip displacement of both hands, in mean-scale units, over both-present frames.
+
+    A held gesture keeps the fingers still once contact is made; a hand still curling or reaching into
+    shape moves its tips even while the wrist itself is nearly stationary (e.g. rotating at the elbow),
+    which wrist_motion alone cannot see.
+    """
+    frames = features.both_present_frames(window)
+    if len(frames) < 2:
+        return 0.0
+    total = 0.0
+    steps = 0
+    for (l0, r0), (l1, r1) in zip(frames, frames[1:]):
+        s = features.mean_scale(l0, r0)
+        if not s > 0:
+            continue
+        try:
+            lp0, rp0 = features.image_points(l0), features.image_points(r0)
+            lp1, rp1 = features.image_points(l1), features.image_points(r1)
+        except (ValueError, TypeError):
+            continue
+        tips = [features.TIP_INDEX[f] for f in FINGER_NUMBERS]
+        l_step = float(np.mean(np.linalg.norm(lp1[tips] - lp0[tips], axis=1)))
+        r_step = float(np.mean(np.linalg.norm(rp1[tips] - rp0[tips], axis=1)))
+        step = (l_step + r_step) / (2.0 * s)
+        if np.isfinite(step):
+            total += step
+            steps += 1
+    return total / steps if steps else 0.0
 
 
 def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:
@@ -74,6 +139,10 @@ def classify(window: Window) -> GestureState:
     left, right = frame
     confidence = min(float(left.detection_conf), float(right.detection_conf))
     if confidence < UNKNOWN_THRESHOLD:
+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
+    if wrist_motion(window) > MOTION_THRESHOLD:
+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
+    if confidence > TIP_MOTION_CONF_GATE and tip_motion(window) > TIP_MOTION_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     lf, rf, dist = averaged_pair(window, frame)
     return GestureState(

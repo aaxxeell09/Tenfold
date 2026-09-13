@@ -1859,7 +1859,7 @@
     // crossing a level is a Tally moment, not a label: one short line, the card's own
     // name read back. It waits its turn behind the closing line like anything else.
     const named = $("#n2", root);
-    say(line("level_up", { level: named ? named.textContent : "" }), null, $("#t-up", root));
+    say(line("level_up_card", { level: named ? named.textContent : "" }), null, $("#t-up", root));
   }
   function confetti(host) {
     if (!host) return;

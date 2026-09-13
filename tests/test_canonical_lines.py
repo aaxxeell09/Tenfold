@@ -37,8 +37,9 @@ REPO = Path(__file__).resolve().parents[1]
 LINES_FILE = REPO / "lesson" / "tally_lines.json"
 
 PYTHON_FILES = ("lesson/tally.py", "app/tutor.py", "app/server.py")
-# The page reads its lines from the file like everything else, so it is audited
-# like everything else.
+# The page reads its lines from the file like every other layer, so it is audited
+# like every other layer: the phrases the export and the older screens wrote into
+# it have moved into lesson/tally_lines.json, under the page's own keys.
 JS_FILES = ("web/course/app.js",)
 
 MIN_WORDS = 3
