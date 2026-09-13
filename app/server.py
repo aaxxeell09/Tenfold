@@ -91,7 +91,7 @@ WEB_DIR = REPO_ROOT / "web"
 COURSE_DIR = WEB_DIR / "course"
 INDEX = COURSE_DIR / "index.html"
 # Five exercises for a lesson, eight for a boss, matching web/course/levels.js.
-NODE_LENGTH = {"lesson": 5, "boss": 8}
+NODE_LENGTH = {"lesson": 5, "boss": 8, "check": 1}
 
 DEFAULT_PORT = 8000
 VIDEO_FPS = 20.0
@@ -150,7 +150,8 @@ def moment_of(update: Update, hands_seen: int) -> str:
 def build_message(update: Update, fingers: list[dict[str, Any]],
                   hands_seen: int, reaction: str | None = None,
                   pick: Pick | None = None, hint_level: int = 0,
-                  session: int = 0, node: str | None = None) -> dict[str, Any]:
+                  session: int = 0, node: str | None = None,
+                  demo: bool = False) -> dict[str, Any]:
     context = {"hint": update.hint, "answer": update.answer,
                "exercise": update.exercise.title}
     # A reaction from the scheduler outranks the screen state: it is the thing
@@ -176,6 +177,9 @@ def build_message(update: Update, fingers: list[dict[str, Any]],
         # the node it started, so a message left over from before can never be
         # rendered in the middle of a lesson.
         "node": node,
+        # Set when the server runs --demo, so the page can seed the showcase
+        # progress once and the stage demo is reproducible from one command.
+        "demo": demo,
     }
 
 
@@ -279,7 +283,7 @@ class Lesson:
             update, self._fingers, self._hands_seen, reaction=reaction,
             pick=self.pick, hint_level=self.hint_level,
             session=self.scheduler.session,
-            node=(self.node or {}).get("id")))
+            node=(self.node or {}).get("id"), demo=self.demo_available))
         self._last_push = time.monotonic()
 
     def start(self) -> None:
@@ -294,7 +298,7 @@ class Lesson:
         with self._lock:
             self.engine.start()
             self.hub.publish(build_message(
-                self.engine.snapshot(), [], 0, session=0))
+                self.engine.snapshot(), [], 0, session=0, demo=self.demo_available))
 
     def _advance(self) -> None:
         """Load the next exercise, or end the session. Call with the lock held."""
@@ -422,7 +426,8 @@ class Lesson:
         if raw is not None:
             self.learner = LearnerState.from_dict(raw, now=now_utc())
 
-        self.scheduler = self._new_scheduler()
+        # The start check is one exercise on 6x6; it never plays the demo script.
+        self.scheduler = self._new_scheduler(scripted_ok=node.get("kind") != "check")
 
         self.node = dict(node)
         self.correct = 0
@@ -433,10 +438,10 @@ class Lesson:
         self.trace("node_start", started)
         self._advance()
 
-    def _new_scheduler(self) -> Scheduler:
+    def _new_scheduler(self, scripted_ok: bool = True) -> Scheduler:
         """A fresh session on the same learner. The demo plays its fixed
-        sequence once, on the first session of the run."""
-        scripted = self.demo_available and not self.demo_played
+        sequence once, on the first session of the run that may take it."""
+        scripted = scripted_ok and self.demo_available and not self.demo_played
         self.demo_played = self.demo_played or scripted
         scheduler = self.make_scheduler(scripted)
         scheduler.state = self.learner
@@ -611,7 +616,10 @@ def mock_loop(lesson: Lesson, stop: threading.Event) -> None:
         phase = slot % MOCK_PHASES
         if slot != step:
             # The correct pose latches the lesson, so move on before replaying it.
-            if phase == 0 and step >= 0:
+            # Never inside the start check: it is one exercise that waits for the
+            # child's answer, and skipping it would end the check on its own.
+            in_check = (lesson.node or {}).get("kind") == "check"
+            if phase == 0 and step >= 0 and not in_check:
                 lesson.command({"type": "next"})
             step = slot
         gesture = mock_gestures(lesson.engine.exercise)[phase]

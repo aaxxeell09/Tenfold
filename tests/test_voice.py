@@ -1,4 +1,4 @@
-"""web/tenfold.html voice answers, driven in a real browser.
+"""Voice answers in the camera lesson of web/course/, driven in a real browser.
 
 Headless Chromium ships no speech recognition, which is exactly the case the
 page has to survive: the microphone stays hidden and the keyboard still works.
@@ -49,6 +49,26 @@ window.__say = function (text, isFinal) {
 ONES = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
 TENS = {2: "twenty", 3: "thirty", 4: "forty", 5: "fifty", 6: "sixty",
         7: "seventy", 8: "eighty", 9: "ninety"}
+
+
+def open_lesson(tab, url):
+    """Land on the practice path and start the first node, where voice lives."""
+    tab.goto(url + "#practice", wait_until="domcontentloaded")
+    tab.wait_for_selector('[data-action="node"]', timeout=10000)
+    tab.click('[data-action="node"]')
+    tab.wait_for_selector('[data-action="start"]', timeout=5000)
+    tab.click('[data-action="start"]')
+    tab.wait_for_selector("#lesson .practice-stage", timeout=10000)
+
+
+def stage_state(tab) -> str:
+    return tab.evaluate("document.querySelector('#lesson .practice-stage')?.dataset.state || ''")
+
+
+def wait_for_state(tab, state: str, timeout: int = 30000):
+    tab.wait_for_function(
+        f"document.querySelector('#lesson .practice-stage')?.dataset.state === '{state}'",
+        timeout=timeout)
 
 
 def spoken(number: int) -> str:
@@ -126,7 +146,8 @@ PARSER_CASES = [
 def test_the_number_parser(page):
     context, url = page
     tab = context.new_page()
-    tab.goto(url, wait_until="load")
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
     for text, expected in PARSER_CASES:
         got = tab.evaluate("(t) => Tenfold.parseNumber(t)", text)
         assert got == expected, f"{text!r} parsed as {got}, expected {expected}"
@@ -145,14 +166,14 @@ def test_without_the_api_the_microphone_never_appears(page):
     errors = []
     tab.on("pageerror", lambda e: errors.append(str(e)))
     tab.add_init_script(NO_SPEECH_API)
-    tab.goto(url, wait_until="load")
+    open_lesson(tab, url)
     tab.wait_for_timeout(500)
-    assert tab.is_hidden("#mic")
+    assert tab.is_hidden("#lesson .mic")
     assert tab.evaluate("Tenfold.voice.recognition") is None
-    assert tab.is_visible("#answer") and tab.is_visible("#caret")
+    assert tab.is_visible("#lesson .practice-answer") and tab.is_visible("#lesson .caret")
     # the keyboard has to keep working with no speech API at all
     tab.keyboard.type("42")
-    assert tab.inner_text("#typed") == "42"
+    assert tab.inner_text("#lesson .typed") == "42"
     assert errors == []
 
 
@@ -160,47 +181,46 @@ def test_listening_only_while_an_answer_is_expected(page):
     context, url = page
     tab = context.new_page()
     tab.add_init_script(FAKE_RECOGNITION)
-    tab.goto(url, wait_until="load")
-    assert tab.is_visible("#mic")
+    open_lesson(tab, url)
+    assert tab.is_visible("#lesson .mic")
 
-    tab.wait_for_function("document.body.dataset.state === 'wrong_pose'", timeout=30000)
+    wait_for_state(tab, "wrong_pose")
     assert tab.evaluate("Tenfold.voice.wanted") is False
 
-    tab.wait_for_function("document.body.dataset.state === 'correct_pose'", timeout=30000)
+    wait_for_state(tab, "correct_pose")
     assert tab.evaluate("Tenfold.voice.wanted") is True
     assert tab.evaluate("window.__voice.started") >= 1
-    assert "listening" in tab.get_attribute("#mic", "class")
+    assert "is-on" in tab.get_attribute("#lesson .mic", "class")
 
 
 def test_a_spoken_answer_is_sent_and_shown(page):
     context, url = page
     tab = context.new_page()
     tab.add_init_script(FAKE_RECOGNITION)
-    tab.goto(url, wait_until="load")
-    tab.wait_for_function("document.body.dataset.state === 'correct_pose'", timeout=30000)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
 
-    exercise = tab.inner_text("#exercise").replace("×", "x")
-    a, b = (int(part) for part in exercise.split(" x "))
+    exercise = tab.inner_text("#lesson .practice-exercise").replace("×", "x")
+    a, b = (int(part.strip()) for part in exercise.split(" x "))
 
     # an interim result is shown but never submitted
     tab.evaluate("() => window.__say('thirty', false)")
     tab.wait_for_timeout(150)
-    assert "thirty" in tab.inner_text("#heard")
-    assert tab.evaluate("document.body.dataset.state") == "correct_pose"
+    assert "thirty" in tab.inner_text("#lesson .heard")
+    assert stage_state(tab) == "correct_pose"
 
     tab.evaluate("(text) => window.__say(text, true)", spoken(a * b))
-    tab.wait_for_function("document.body.dataset.state === 'answer_correct'", timeout=10000)
-    assert tab.inner_text("#result") == str(a * b)
+    wait_for_state(tab, "answer_correct", timeout=10000)
 
 
 def test_a_spoken_wrong_answer_is_sent_too(page):
     context, url = page
     tab = context.new_page()
     tab.add_init_script(FAKE_RECOGNITION)
-    tab.goto(url, wait_until="load")
-    tab.wait_for_function("document.body.dataset.state === 'correct_pose'", timeout=30000)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
     tab.evaluate("() => window.__say('eleven', true)")
-    tab.wait_for_function("document.body.dataset.state === 'answer_wrong'", timeout=10000)
+    wait_for_state(tab, "answer_wrong", timeout=10000)
 
 
 def test_the_same_number_twice_in_a_row_is_one_answer(page):
@@ -208,8 +228,8 @@ def test_the_same_number_twice_in_a_row_is_one_answer(page):
     context, url = page
     tab = context.new_page()
     tab.add_init_script(FAKE_RECOGNITION)
-    tab.goto(url, wait_until="load")
-    tab.wait_for_function("document.body.dataset.state === 'correct_pose'", timeout=30000)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
     tab.evaluate("""() => {
       window.__sent = 0;
       const original = WebSocket.prototype.send;

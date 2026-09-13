@@ -42,7 +42,7 @@ def test_build_message_carries_everything_the_page_renders():
 
     assert set(message) == {"type", "state", "exercise", "tally", "wrong", "match",
                             "answer", "reasoning", "fingers", "reason", "reaction",
-                            "hint", "hint_level", "fact", "session", "node"}
+                            "hint", "hint_level", "fact", "session", "node", "demo"}
     assert message["state"] == "wrong_pose"
     assert message["exercise"] == "8 x 7"
     assert message["wrong"] == [{"hand": "right", "number": 9}]

@@ -2,55 +2,201 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Tenfold · Learn</title>
+<meta name="viewport" content="width=1194, height=834, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Tenfold</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Nunito:wght@600;700;800;900&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=3">
+<link rel="stylesheet" href="styles.css?v=4">
 </head>
-<body>
-<div class="app">
-  <aside class="side" aria-label="Main">
-    <div class="wordmark">tenfold</div>
-    <nav class="side-nav">
-      <a class="nav-item is-active" href="#learn"><span class="nav-icon" data-icon="home"></span><span>Learn</span></a>
-      <a class="nav-item" href="#board"><span class="nav-icon" data-icon="grid"></span><span>Board</span></a>
-      <a class="nav-item" href="#profile"><span class="nav-icon" data-icon="user"></span><span>Profile</span></a>
+<body class="tablet" data-view="welcome">
+<div class="frame" id="frame">
+
+  <!-- welcome: first name, once -->
+  <section class="centered welcome view" id="welcome" hidden>
+    <div class="stack">
+      <div class="tally" data-tally="happy" aria-hidden="true"></div>
+      <h1>Hi! I am Tally. What is your name?</h1>
+      <p class="sub">I will remember it, and your stars too.</p>
+      <form id="welcome-form" autocomplete="off">
+        <input class="field" id="welcome-name" type="text" maxlength="14" placeholder="Your first name" aria-label="Your first name" style="text-align:center">
+        <button class="btn btn-primary btn-wide btn-xl" type="submit">Let's go</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- home: two doors. Learn is a showcase, Practice is the real path -->
+  <section class="hub view" id="home" hidden>
+    <nav class="minibar" aria-label="More">
+      <a class="nav-item" href="#profile"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-unicorn"></use></svg></span><span>Profile</span></a>
     </nav>
-    <button class="dev-reset" data-action="reset" hidden>Reset progress</button>
-  </aside>
+    <h1 id="greeting">Which door today?</h1>
+    <div class="doors">
+      <a class="door" href="#learn">
+        <div class="door-top"><div class="kicker">Four units</div><h2>Learn</h2></div>
+        <div class="door-body">
+          <svg class="minipath" viewBox="0 0 330 250" aria-hidden="true" id="minipath"></svg>
+          <p>Four units of finger tricks, one step at a time.</p>
+        </div>
+      </a>
+      <a class="door door-blue" href="#check">
+        <div class="door-top"><div class="kicker">Camera and voice</div><h2>Practice</h2></div>
+        <div class="door-body">
+          <div class="tally" data-tally="hands" aria-hidden="true"></div>
+          <p>Practice with your hands</p>
+        </div>
+      </a>
+    </div>
+  </section>
 
-  <main class="center" id="learn">
-    <div class="topstats" id="topstats"></div>
-    <div id="course"></div>
-  </main>
+  <!-- learn: the four unit showcase, not wired to progress -->
+  <div class="app view" id="learn" hidden>
+    <aside class="side" aria-label="Main">
+      <a class="wordmark" href="#home">tenfold</a>
+      <nav class="side-nav">
+        <a class="nav-item" href="#home"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-home"></use></svg></span><span>Home</span></a>
+        <a class="nav-item is-active" href="#learn"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-lesson"></use></svg></span><span>Learn</span></a>
+        <a class="nav-item" href="#practice"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-camera"></use></svg></span><span>Practice</span></a>
+        <a class="nav-item" href="#profile"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-unicorn"></use></svg></span><span>Profile</span></a>
+      </nav>
+    </aside>
+    <main class="center">
+      <p class="path-hint">Learn path</p>
+      <div id="showcase"></div>
+    </main>
+    <aside class="right">
+      <div class="stats" id="showcase-stats"></div>
+      <section class="panel" id="showcase-quest"></section>
+      <section class="panel panel-hands">
+        <div class="panel-hands-art"><svg viewBox="0 0 48 48" style="width:64px;height:64px;color:var(--green)"><use href="#icon-lesson"></use></svg></div>
+        <div><h3>Four units</h3><p>Finger tricks from 6 to 20, one step at a time.</p></div>
+      </section>
+    </aside>
+  </div>
 
-  <aside class="right">
-    <div class="stats" id="stats"></div>
-    <section class="panel" id="quest"></section>
-    <section class="panel panel-camera">
-      <div class="panel-camera-art" data-icon="camera"></div>
-      <div>
-        <h3>Use your real hands</h3>
-        <p>Soon the camera checks your fingers while you count.</p>
+  <!-- practice: the real path, from levels.js -->
+  <div class="app view" id="practice" hidden>
+    <aside class="side" aria-label="Main">
+      <a class="wordmark" href="#home">tenfold</a>
+      <nav class="side-nav">
+        <a class="nav-item" href="#home"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-home"></use></svg></span><span>Home</span></a>
+        <a class="nav-item" href="#learn"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-lesson"></use></svg></span><span>Learn</span></a>
+        <a class="nav-item is-active" href="#practice"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-camera"></use></svg></span><span>Practice</span></a>
+        <a class="nav-item" href="#profile"><span class="nav-icon"><svg viewBox="0 0 48 48"><use href="#icon-unicorn"></use></svg></span><span>Profile</span></a>
+      </nav>
+      <button class="dev-reset" data-action="reset" hidden>Reset progress</button>
+    </aside>
+    <main class="center">
+      <p class="path-hint">Practice path</p>
+      <div id="course"></div>
+    </main>
+    <aside class="right">
+      <div class="stats" id="stats"></div>
+      <section class="panel" id="quest"></section>
+      <section class="panel panel-hands panel-camera">
+        <div class="panel-hands-art panel-camera-art"><svg viewBox="0 0 48 48" style="width:64px;height:64px;color:var(--green)"><use href="#icon-lesson"></use></svg></div>
+        <div>
+          <h3>Use your real hands</h3>
+          <p>The camera checks your fingers while you count.</p>
+        </div>
+      </section>
+    </aside>
+  </div>
+
+  <!-- check: three steps, driven by the camera, no buttons -->
+  <section class="checkview view" id="check" hidden data-step="1">
+    <div class="cam cam-full" id="check-cam">
+      <img class="practice-video" src="/video" alt="">
+      <svg class="practice-overlay" viewBox="0 0 1.333 1" preserveAspectRatio="none"></svg>
+      <span class="camtag">camera</span>
+      <div class="stepnum"><i class="on"></i><i></i><i></i></div>
+      <div class="zone l"></div>
+      <div class="zone r"></div>
+      <div class="banner-top" id="check-banner">That is a 6 and a 6.</div>
+      <div class="result" id="check-result">36</div>
+      <div class="bigcheck"><svg viewBox="0 0 48 48" aria-hidden="true"><path d="M 11 25 L 20 34 L 37 14" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"></path></svg></div>
+      <div class="micpill" id="check-mic" hidden>
+        <svg viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-mic"></use></svg>
+        <span class="bars"><i></i><i></i><i></i><i></i></span>
+        <span id="check-miclabel">Listening</span>
       </div>
-    </section>
-  </aside>
+      <div class="tallywrap">
+        <div class="tally" id="check-tally" data-tally="ready"></div>
+        <div class="tbubble" id="check-say">Show me both hands.</div>
+      </div>
+      <a class="quitcheck" href="#home" aria-label="Back"><svg viewBox="0 0 48 48"><use href="#icon-close"></use></svg></a>
+    </div>
+  </section>
+
+  <!-- castle: the board -->
+  <section class="castle view" id="board" hidden>
+    <header class="topbar">
+      <a class="brand" href="#home">Tenfold</a>
+      <div class="chips">
+        <a class="chip quiet" href="#home">Home</a>
+        <a class="chip quiet" href="#practice">Practice</a>
+        <div class="chip"><svg class="flame" viewBox="0 0 24 28" aria-hidden="true"><path d="M12 0 C18 8 22 13 12 28 C2 13 6 8 12 0 Z" fill="#c06214"></path></svg><span id="board-streak">0 days</span></div>
+      </div>
+    </header>
+    <div class="castle-grid">
+      <div>
+        <h1 class="page" style="font-size:40px;margin-bottom:14px">My castle</h1>
+        <div class="map" id="castle-map"></div>
+      </div>
+      <div class="side">
+        <div>
+          <p class="h2">Tally's wardrobe</p>
+          <div class="wardrobe" id="wardrobe"></div>
+        </div>
+        <div>
+          <p class="h2">Badge shelf</p>
+          <div class="shelf" id="shelf"></div>
+        </div>
+        <p class="note">A clock means a room is ready for review. Locked doors open when you meet the room in a lesson.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- profile -->
+  <section class="profile view" id="profile" hidden>
+    <header class="topbar">
+      <a class="brand" href="#home">Tenfold</a>
+      <div class="chips">
+        <a class="chip quiet" href="#home">Home</a>
+        <a class="chip quiet" href="#board">Castle</a>
+      </div>
+    </header>
+    <div class="home-grid">
+      <div class="tally-stage"><div class="tally lg anim-wave" id="profile-tally" data-tally="happy"></div></div>
+      <div>
+        <h1 class="hero" id="profile-title">Your fingers can multiply.</h1>
+        <p class="lead" id="profile-lead"></p>
+        <form id="profile-form" autocomplete="off">
+          <p class="eyebrow" style="margin:0 0 10px">First name</p>
+          <div class="btnrow" style="margin-bottom:8px">
+            <input class="field" id="profile-name" type="text" maxlength="14" placeholder="Leo" aria-label="First name">
+            <button class="btn btn-ghost" type="submit">Save</button>
+          </div>
+        </form>
+        <div class="summary" id="profile-summary"></div>
+        <div class="btnrow" style="margin-top:30px">
+          <a class="btn btn-primary btn-lg" href="#practice">Practice</a>
+          <a class="btn btn-ghost btn-lg" href="#learn">Learn</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- the camera lesson and the finish screen, over everything -->
+  <section class="lesson camera-lesson" id="lesson" hidden aria-live="polite"></section>
+  <section class="finish" id="finish" hidden></section>
+  <div class="toast" id="toast" role="status"></div>
+
 </div>
 
-<nav class="tabbar" aria-label="Main">
-  <a class="tab is-active" href="#learn" aria-label="Learn"><span class="nav-icon" data-icon="home"></span></a>
-  <a class="tab" href="#board" aria-label="Board"><span class="nav-icon" data-icon="grid"></span></a>
-  <a class="tab" href="#profile" aria-label="Profile"><span class="nav-icon" data-icon="user"></span></a>
-</nav>
-
-<section class="lesson" id="lesson" hidden aria-live="polite"></section>
-<section class="finish" id="finish" hidden></section>
-<div class="toast" id="toast" role="status"></div>
-
-<script src="levels.js?v=3"></script>
-<script src="app.js?v=3"></script>
+<script src="levels.js?v=4"></script>
+<script src="tally.js?v=4"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
