@@ -284,214 +284,42 @@
 </script>
 </section>
 
-<!-- check.html, taken from the export as it stands -->
+<!-- check.html, taken from the export, reduced to the one frame the live app runs:
+     the export sheet shows the three steps side by side as f1, f2 and f3, the app has
+     one frame whose data-step and state classes are driven by app.js -->
 <section class="view view-check" id="check" hidden>
-<div class="sheet" id="sheet">
+<div class="frame" data-step="1">
 
-  <div class="frameblock">
-    <p class="flabel">Step 1 · Show me both hands</p>
-    <div class="frame" id="f1" data-step="1">
-      <div class="cam">
-        <span class="camtag">camera</span>
-        <div class="stepnum"><img src="art/tile-1-on.png" alt="Step 1"><img src="art/tile-2-off.png" alt=""><img src="art/tile-3-off.png" alt=""></div>
-        <div class="stage"></div>
-        <div class="bigcheck"><img src="art/n-done.png" alt=""></div>
-        <div class="tallywrap">
-          <div class="tally-art" aria-hidden="true"></div>
-          <div class="tbubble" id="say1">Show me both hands.</div>
-        </div>
-      </div>
+  <div class="cam" id="check-cam">
+    <span class="camtag">camera</span>
+    <div class="stepnum"><img src="art/tile-1-on.png" alt="Step 1"><img src="art/tile-2-off.png" alt=""><img src="art/tile-3-off.png" alt=""></div>
+    <div class="stage">
+      <!-- src is set by app.js while the check is on screen, and only then -->
+      <img class="practice-video" alt="">
+      <svg class="practice-overlay" viewBox="0 0 1.333 1" preserveAspectRatio="none"></svg>
     </div>
-  </div>
-
-  <div class="frameblock">
-    <p class="flabel">Step 2 · Touch your 6 with your 6</p>
-    <div class="frame" id="f2" data-step="2">
-      <div class="cam">
-        <span class="camtag">camera</span>
-        <div class="stepnum"><img src="art/tile-1-off.png" alt=""><img src="art/tile-2-on.png" alt="Step 2"><img src="art/tile-3-off.png" alt=""></div>
-        <div class="banner-top">That is a 6 and a 6.</div>
-        <div class="stage"></div>
-        <div class="bigcheck"><img src="art/n-done.png" alt=""></div>
-        <div class="tallywrap">
-          <div class="tally-art" aria-hidden="true"></div>
-          <div class="tbubble" id="say2">Touch your 6 with your 6.</div>
-        </div>
-      </div>
+    <div class="banner-top">That is a 6 and a 6.</div>
+    <div class="result" id="result">36</div>
+    <div class="mic" id="check-mic">
+      <svg viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-mic"></use></svg>
+      <span class="bars"><i></i><i></i><i></i><i></i></span>
+      <span id="check-miclabel">Listening</span>
     </div>
-  </div>
-
-  <div class="frameblock">
-    <p class="flabel">Step 3 · Say hello</p>
-    <div class="frame" id="f3" data-step="3">
-      <div class="cam">
-        <span class="camtag">camera</span>
-        <div class="stepnum"><img src="art/tile-1-off.png" alt=""><img src="art/tile-2-off.png" alt=""><img src="art/tile-3-on.png" alt="Step 3"></div>
-        <div class="stage"></div>
-        <div class="result" id="result">Yes!</div>
-        <div class="mic">
-          <svg viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-mic"></use></svg>
-          <span class="bars"><i></i><i></i><i></i><i></i></span>
-          <span id="miclabel">Listening</span>
-        </div>
-        <div class="bigcheck"><img src="art/n-done.png" alt=""></div>
-        <div class="tallywrap">
-          <div class="tally-art" aria-hidden="true"></div>
-          <div class="tbubble" id="say3">Hello! Are you ready to start?</div>
-        </div>
-        <div class="mapslide">
-          <h3>Your practice path</h3>
-          <p>Three units, one finger trick at a time.</p>
-          <div class="minirow"><img src="art/start.png" alt=""><span>Meet your fingers</span></div>
-          <div class="minirow"><img src="art/n-lock.png" alt=""><span>Count the tens</span></div>
-          <div class="minirow"><img src="art/n-lock.png" alt=""><span>Big numbers</span></div>
-        </div>
-      </div>
+    <div class="bigcheck"><img src="art/n-done.png" alt=""></div>
+    <div class="tallywrap">
+      <div class="tally" id="check-tally" data-tally="ready"></div>
+      <div class="tbubble" id="check-say">Show me both hands.</div>
+    </div>
+    <div class="mapslide">
+      <h3>Your practice path</h3>
+      <p>Three units, one finger trick at a time.</p>
+      <div class="minirow"><img src="art/start.png" alt=""><span>Meet your fingers</span></div>
+      <div class="minirow"><img src="art/n-lock.png" alt=""><span>Count the tens</span></div>
+      <div class="minirow"><img src="art/n-lock.png" alt=""><span>Big numbers</span></div>
     </div>
   </div>
 
 </div>
-
-<script src="tally.js"></script>
-<script>
-(function () {
-  // one traced hand outline per zone, with a numbered circle at each fingertip
-  var HAND = 'M 64 430 C 58 392 48 336 38 288 C 30 250 22 216 22 192 A 22 22 0 0 1 66 192 ' +
-    'L 74 250 C 74 226 72 150 72 120 A 24 24 0 0 1 120 120 ' +
-    'L 126 232 C 126 208 125 122 125 93 A 25 25 0 0 1 175 93 ' +
-    'L 180 236 C 180 212 180 142 180 118 A 24 24 0 0 1 228 118 ' +
-    'L 238 262 C 232 282 216 296 205 308 L 269 227 A 22 22 0 0 1 303 254 ' +
-    'L 239 335 C 232 346 224 354 216 366 C 210 390 206 410 204 430 Z';
-  // numbers sit just outside the four fingertips, and on the thumb tip itself
-  var TIPS = [[10, 44, 134], [9, 96, 60], [8, 150, 32], [7, 204, 58], [6, 286, 240]];
-  var S = 0.95, TOP = 254;
-
-  function handSvg(side, originX) {
-    var flip = side === 'left' ? 1 : -1;
-    var out = '<g class="hand" data-hand="' + side + '">' +
-      '<g transform="translate(' + originX + ',' + TOP + ') scale(' + (flip * S) + ',' + S + ')">' +
-        '<path class="handline" d="' + HAND + '"></path>' +
-      '</g>';
-    TIPS.forEach(function (t) {
-      var x = originX + flip * S * t[1];
-      var y = TOP + S * t[2];
-      out += '<g class="fin" data-hand="' + side + '" data-n="' + t[0] + '" transform="translate(' + x + ',' + y + ')">' +
-               '<circle class="halo" r="34"></circle>' +
-               '<circle class="tip" r="28"></circle>' +
-               '<text class="num" y="8">' + t[0] + '</text>' +
-             '</g>';
-    });
-    return out + '</g>';
-  }
-  Array.prototype.forEach.call(document.querySelectorAll('.stage'), function (stage) {
-    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('class', 'gh');
-    svg.setAttribute('viewBox', '0 0 1194 834');
-    svg.innerHTML = handSvg('left', 185) + handSvg('right', 1009);
-    stage.appendChild(svg);
-  });
-
-  function nums(frame) { return Array.prototype.slice.call(frame.querySelectorAll('.fin')); }
-  function clear(frame) {
-    frame.className = 'frame';
-    nums(frame).forEach(function (n) { n.setAttribute('class', 'fin'); });
-    Array.prototype.forEach.call(frame.querySelectorAll('.hand'), function (h) { h.removeAttribute('transform'); });
-  }
-  function tally(frame, face) {
-    var host = frame.querySelector('.tally');
-    if (window.Tally) window.Tally.set(host, face);
-  }
-  function run(steps, frame, period) {
-    var timers = [];
-    function cycle() {
-      timers.forEach(clearTimeout);
-      timers = steps.map(function (s) {
-        return setTimeout(function () { s[1](frame); }, s[0]);
-      });
-    }
-    cycle();
-    setInterval(cycle, period);
-  }
-
-  /* Step 1: both hands detected, then the numbers light up one by one */
-  var f1 = document.getElementById('f1');
-  var step1 = [
-    [0, function (f) { clear(f); tally(f, 'ready'); document.getElementById('say1').textContent = 'Show me both hands.'; }],
-    [900, function (f) { f.classList.add('detected'); document.getElementById('say1').textContent = 'There they are.'; }]
-  ];
-  [10, 9, 8, 7, 6].forEach(function (n, i) {
-    step1.push([1300 + i * 300, function (f) {
-      nums(f).filter(function (el) { return Number(el.getAttribute('data-n')) === n; }).forEach(function (el) { el.classList.add('lit'); });
-    }]);
-  });
-  step1.push([3100, function (f) { f.classList.add('check'); tally(f, 'happy'); }]);
-  step1.push([4200, function (f) { f.classList.add('leaving'); }]);
-
-  /* Step 2: both thumbs glow, then touch */
-  var f2 = document.getElementById('f2');
-  var step2 = [
-    [0, function (f) {
-      clear(f); f.classList.add('detected'); tally(f, 'thinking');
-      document.getElementById('say2').textContent = 'Touch your 6 with your 6.';
-      nums(f).filter(function (el) { return el.getAttribute('data-n') === '6'; }).forEach(function (el) { el.classList.add('glow'); });
-    }],
-    [1400, function (f) {
-      f.classList.add('touching');
-      Array.prototype.forEach.call(f.querySelectorAll('.hand'), function (h) {
-        h.setAttribute('transform', h.getAttribute('data-hand') === 'left' ? 'translate(112,0)' : 'translate(-112,0)');
-      });
-    }],
-    [2000, function (f) {
-      f.classList.add('matched', 'banner', 'check');
-      tally(f, 'happy');
-      document.getElementById('say2').textContent = 'Six and six, touching.';
-    }],
-    [3400, function (f) { f.classList.add('leaving'); }]
-  ];
-
-  /* Step 3: the answer is heard, then the practice map slides in */
-  var f3 = document.getElementById('f3');
-  var NAME = (localStorage.getItem('tenfold.name') || '').trim();
-  var HELLO = NAME ? 'Hello ' + NAME + '! Are you ready to start?' : 'Hello! Are you ready to start?';
-
-  var step3 = [
-    [0, function (f) {
-      clear(f); f.classList.add('detected');
-      document.getElementById('say3').textContent = HELLO;
-      document.getElementById('miclabel').textContent = 'Listening';
-      document.getElementById('result').textContent = 'Yes!';
-    }],
-    [1600, function (f) {
-      f.classList.add('heard', 'result');
-      document.getElementById('miclabel').textContent = 'Yes, I am ready';
-      document.getElementById('say3').textContent = 'I heard you. Let us go.';
-    }],
-    [2700, function (f) { f.classList.add('check'); }],
-    [3700, function (f) {
-      f.classList.add('mapin');
-      document.getElementById('say3').textContent = 'Your path is open.';
-    }]
-  ];
-
-  // the last frame opens the exercise once the path has slid in
-  document.querySelector('#f3 .mapslide').addEventListener('click', function () {
-    window.location.href = 'exercise.html';
-  });
-
-  function fit() {
-    var s = Math.min(1, (window.innerWidth - 48) / 1194);
-    document.documentElement.style.setProperty('--fs', s);
-  }
-  window.addEventListener('resize', fit);
-  fit();
-
-  setTimeout(function () {
-    run(step1, f1, 5600);
-    run(step2, f2, 5000);
-    run(step3, f3, 6000);
-  }, 420);
-})();
-</script>
 </section>
 
 <!-- exercise.html, taken from the export as it stands -->

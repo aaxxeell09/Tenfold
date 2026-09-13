@@ -558,3 +558,102 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 .welcome .logo { width: 300px; height: auto; display: block; margin-bottom: 4px; }
 .welcome .mascot { width: 190px; height: auto; display: block; animation: sway 3.4s ease-in-out infinite; transform-origin: 50% 92%; }
 .welcome h1 { margin: 6px 0 10px; }
+
+/* ---------- check screen addition ---------- */
+/* The export's check.html is the one page that links style.css and keeps its own rules
+   in a page style block, so none of them came across when the sheet was rebuilt from
+   styles.css and lesson.css. They are reproduced here as the export wrote them, scoped
+   to #check so they stay off the views that share the names .frame, .cam, .mic and
+   .result, with the few rules the live screen needs and the export has no place for:
+   the MJPEG image, the landmark overlay and Tally as tally.js draws him. */
+#check .cam {
+  position: absolute; inset: 0; width: auto; height: auto; aspect-ratio: auto;
+  border-radius: 0; box-shadow: none; background: #2a3050; overflow: hidden;
+}
+#check .camtag {
+  position: absolute; top: 26px; left: 32px; font-size: 15px; font-weight: 800;
+  letter-spacing: .24em; text-transform: uppercase; color: rgba(244, 246, 253, .42);
+}
+#check .stepnum { position: absolute; top: 24px; right: 32px; display: flex; gap: 12px; align-items: center; }
+#check .stepnum img { width: 56px; height: 56px; object-fit: contain; display: block; flex: none; }
+#check .stage { position: absolute; inset: 0; }
+/* the live camera and the landmarks, in the layer the export drew its ghost hands in */
+#check .stage .practice-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .85; }
+#check .practice-overlay { position: absolute; pointer-events: none; }
+#check .practice-overlay text { font-size: 0.05px; font-weight: 900; text-anchor: middle; font-family: var(--font); }
+/* step one lights the numbers ten down to six, the way the export lights its fingertips */
+#check .frame[data-step="1"] .practice-overlay circle,
+#check .frame[data-step="1"] .practice-overlay text { opacity: 0; transition: opacity .25s ease; }
+#check .frame[data-step="1"] .practice-overlay .lit { opacity: 1; }
+#check .banner-top {
+  position: absolute; left: 0; right: 0; top: 0; padding: 26px 40px; background: #d9f4e9;
+  color: #1f7a58; font-size: 38px; font-weight: 800; text-align: center; z-index: 2;
+  transform: translateY(-100%); transition: transform .4s cubic-bezier(.3, .7, .3, 1);
+}
+#check .frame.banner .banner-top { transform: none; }
+#check .result {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  font-size: 230px; font-weight: 800; color: #f4f6fd; letter-spacing: -.02em; z-index: 2;
+  opacity: 0; transform: scale(.7); pointer-events: none;
+  transition: opacity .35s ease, transform .45s cubic-bezier(.2, 1.5, .4, 1);
+}
+#check .frame.result .result { opacity: 1; transform: none; }
+/* the pill carries the answer, typed or heard, so the step decides whether it is on
+   screen: markMic() hides the first .mic of the page when the browser has no
+   recognition, and on this screen that pill is the only answer field there is */
+#check .mic {
+  position: absolute; right: 44px; bottom: 56px; display: none; align-items: center; gap: 14px;
+  height: 74px; margin: 0; padding: 0 26px; border-radius: 24px; background: rgba(244, 246, 253, .1);
+  border: 3px solid rgba(244, 246, 253, .26); color: #f4f6fd;
+  font-size: 17px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase;
+}
+#check .frame[data-step="3"] .mic { display: flex !important; }
+#check .mic svg { width: 28px; height: 28px; color: #d9f4e9; }
+#check .mic .bars { display: flex; align-items: center; gap: 5px; height: 30px; }
+#check .mic .bars i { width: 6px; height: 10px; border-radius: 3px; background: #d9f4e9; animation: check-mic-bar 800ms ease-in-out infinite; }
+#check .mic .bars i:nth-child(2) { animation-delay: 120ms; }
+#check .mic .bars i:nth-child(3) { animation-delay: 240ms; }
+#check .mic .bars i:nth-child(4) { animation-delay: 360ms; }
+@keyframes check-mic-bar { 0%, 100% { height: 9px; } 50% { height: 28px; } }
+#check .mic.is-off svg, #check .mic.is-off .bars i { color: rgba(244, 246, 253, .5); background: rgba(244, 246, 253, .5); animation: none; }
+#check .frame.heard .mic { border-color: #2fae82; background: rgba(47, 174, 130, .22); }
+#check .frame.heard .mic .bars i { animation: none; height: 9px; background: #f4f6fd; }
+#check .bigcheck {
+  position: absolute; left: 50%; top: 50%; width: 240px; height: 240px; margin: -120px 0 0 -120px;
+  display: flex; align-items: center; justify-content: center; opacity: 0; transform: scale(.4);
+  pointer-events: none; z-index: 3;
+}
+#check .bigcheck img { width: 100%; height: 100%; object-fit: contain; display: block; }
+#check .frame.check .bigcheck { animation: check-pop 1s cubic-bezier(.2, 1.5, .4, 1) forwards; }
+@keyframes check-pop {
+  0% { opacity: 0; transform: scale(.4); }
+  22% { opacity: 1; transform: scale(1.06); }
+  36% { transform: scale(1); }
+  78% { opacity: 1; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.1); }
+}
+#check .tallywrap { position: absolute; left: 40px; bottom: 36px; display: flex; align-items: center; gap: 0; z-index: 2; }
+/* the export paints Tally as one flat image; here he is the render tally.js mounts,
+   which is the same 150px figure with his accessories layered on top */
+#check .tallywrap .tally { width: 150px; flex: none; animation: none; }
+#check .tally .tally-art { position: relative; display: block; width: 100%; }
+#check .tally .t-base { position: relative; z-index: 1; display: block; width: 100%; height: auto; }
+#check .tally .t-acc { position: absolute; z-index: 2; display: block; height: auto; pointer-events: none; }
+#check .tally .t-acc-back { z-index: 0; }
+#check .tbubble {
+  position: relative; margin: 0 0 26px -18px; max-width: 620px; min-height: 116px;
+  background: url("art/say.png") no-repeat center / 100% 100%; padding: 21px 22px 24px 46px;
+  color: #35406b; font-size: 28px; font-weight: 800; line-height: 1.2;
+  display: flex; align-items: center;
+}
+#check .mapslide {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 392px; padding: 44px 36px;
+  background: #ffffff; z-index: 3;
+  transform: translateX(100%); transition: transform .6s cubic-bezier(.3, .7, .3, 1);
+}
+#check .frame.mapin .mapslide { transform: none; }
+#check .mapslide h3 { margin: 0 0 6px; font-size: 26px; font-weight: 800; color: #35406b; }
+#check .mapslide p { margin: 0 0 30px; font-size: 17px; font-weight: 600; color: #5b6488; }
+#check .minirow { display: flex; align-items: center; gap: 16px; margin-bottom: 18px; }
+#check .minirow img { width: 72px; height: 72px; object-fit: contain; flex: none; display: block; }
+#check .minirow span { font-size: 19px; font-weight: 800; color: #35406b; }
