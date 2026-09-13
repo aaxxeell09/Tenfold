@@ -302,7 +302,7 @@ def test_one_hand_reaches_visibility_recovery_and_says_so() -> None:
     harness = wrong_pose_harness()
     said = harness.feed(3.0, gesture=None, hands=1)
     assert harness.last.tutor_state == VISIBILITY_RECOVERY
-    assert any("other hand" in line for line in said)
+    assert said == ["I can see one hand. Show me both."]
 
 
 def test_paused_after_no_engagement_and_any_speech_leaves_it() -> None:
@@ -323,10 +323,10 @@ def test_the_whole_ladder_with_its_lines_and_visuals() -> None:
     harness = wrong_pose_harness(params_with(max_unsolicited_verbal=4))
     said = harness.feed(20.0, gesture=pose(8, 9, False), hint=HINT)
     assert len(said) >= 4
-    assert said[0] == "Look at your hands. One finger needs to move."
-    assert said[1] == "Almost. Your right hand needs 7, not 9."
-    assert said[2] == "See the faint circle? Move your right finger from 9 to 7."
-    assert said[3].startswith("Together: 5 tens makes 50")
+    assert said[0] == "Take your time. I'm watching your hands."
+    assert said[1] == "Your left hand is right. Find 7 on your right hand."
+    assert said[2] == "Move this finger here."
+    assert said[3] == "5 tens make 50. 2 times 3 makes 6. That gives 56."
     assert harness.last.intervention_level == 4
     assert harness.last.tutor_visual == {"kind": "rescue_card", "tens": 5,
                                          "units": 6, "total": 56}
@@ -390,18 +390,31 @@ def test_the_level_resets_on_a_new_exercise() -> None:
 def test_no_contact_and_swapped_get_their_own_lines() -> None:
     harness = wrong_pose_harness()
     said = harness.feed(6.0, gesture=pose(8, 7, False))
-    assert said and said[0] == "So close. Let those two fingertips touch."
+    assert said and said[0] == "You found the fingers. Touch them together."
     assert harness.last.tutor_visual == {"kind": "finger_numbers"}
 
     other = wrong_pose_harness()
     said = other.feed(6.0, gesture=pose(7, 8, False))
-    assert said and said[0] == "Almost. Swap your hands and try again."
+    assert said and said[0] == ("Check both fingers. Find 8 on the left "
+                                "and 7 on the right.")
 
 
-def test_the_counting_nudge_comes_when_the_pose_is_right_and_no_answer() -> None:
+def test_the_correction_names_the_hand_or_the_two_hands_that_are_wrong() -> None:
+    left_hint = {"hand": "left", "move_from": 9, "move_to": 8}
+    left = wrong_pose_harness()
+    said = left.feed(16.0, gesture=pose(9, 7, False), hint=left_hint)
+    assert "Your right hand is right. Find 8 on your left hand." in said
+
+    both = wrong_pose_harness()
+    said = both.feed(16.0, gesture=pose(10, 10, False), hint=left_hint)
+    assert "Check both fingers. Find 8 on the left and 7 on the right." in said
+
+
+def test_the_counting_nudge_counts_the_tens_then_the_fingers_above() -> None:
     harness = wrong_pose_harness()
-    said = harness.feed(10.0, gesture=pose(8, 7, True))
-    assert "That is it. Now count the tens, then the ones." in said
+    said = harness.feed(20.0, gesture=pose(8, 7, True))
+    assert said[:2] == ["Count the touching fingers and the ones below.",
+                        "Now multiply the fingers above."]
 
 
 def test_a_requested_hint_climbs_one_step_and_never_counts_as_nagging() -> None:
@@ -409,7 +422,7 @@ def test_a_requested_hint_climbs_one_step_and_never_counts_as_nagging() -> None:
     harness.feed(1.0, gesture=pose(8, 9, False), hint=HINT)
     decision = harness.tutor.hint_requested(now=harness.clock.t)
     assert decision.intervention_level == 1
-    assert decision.tutor_line
+    assert decision.tutor_line == "Start by finding 8 on your left hand."
     harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
     line = harness.kind("exercise")[0]
     assert line["unsolicited_interventions"] == 0
@@ -421,11 +434,52 @@ def test_a_requested_hint_climbs_one_step_and_never_counts_as_nagging() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_max_unsolicited_verbal_caps_the_spoken_interventions() -> None:
+def test_max_unsolicited_verbal_caps_the_nudges_and_holds_the_fourth_back() -> None:
+    harness = wrong_pose_harness()
+    assert harness.tutor.effective("max_unsolicited_verbal") == 3
+    said = harness.feed(40.0, gesture=UNKNOWN, hands=2)
+    assert said == ["Show me 8 times 7 with your hands.",
+                    "Take your time. I'm watching your hands.",
+                    "Start by finding 8 on your left hand."]
+    assert any(line["reason"] == "budget_spent" for line in harness.kind("decision"))
+
+
+def test_the_ladder_walks_l1_l2_l3_and_still_reaches_the_rescue() -> None:
+    """The cap is the budget of L1, L2 and L3. L4 is outside it, or it would
+    never be reachable: the three steps below always spend the budget first."""
+    harness = wrong_pose_harness()
+    assert harness.tutor.effective("max_unsolicited_verbal") == 3
+    said = harness.feed(40.0, gesture=pose(8, 9, False), hint=HINT)
+    assert said == ["Take your time. I'm watching your hands.",
+                    "Your left hand is right. Find 7 on your right hand.",
+                    "Move this finger here.",
+                    "5 tens make 50. 2 times 3 makes 6. That gives 56."]
+    assert harness.last.intervention_level == 4
+    harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+    assert harness.levels() == [1, 2, 3, 4]
+    assert harness.kind("exercise")[0]["rescue_used"] is True
+
+
+def test_the_rescue_is_walked_through_once_per_exercise() -> None:
+    rescue = "5 tens make 50. 2 times 3 makes 6. That gives 56."
     harness = wrong_pose_harness()
     said = harness.feed(40.0, gesture=pose(8, 9, False), hint=HINT)
-    assert len(said) == 3
-    assert any(line["reason"] == "budget_spent" for line in harness.kind("decision"))
+    assert said.count(rescue) == 1
+
+    again: list[str] = []
+    for _ in range(6):
+        # Movement keeps the child engaged, so the clocks run on instead of
+        # stopping at no_engagement_pause, and a second rescue would have time.
+        harness.feed(0.4, gesture=pose(8, 9, False), hint=HINT, drift=0.05)
+        again += harness.feed(4.0, gesture=pose(8, 9, False), hint=HINT)
+    assert again == []
+    assert harness.tutor.hint_requested(now=harness.clock.t).tutor_line is None
+    harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+    assert harness.levels().count(4) == 1
+
+    harness.tutor.new_exercise(8, 7, node="u2-l3", now=harness.clock.t)
+    said = harness.feed(40.0, gesture=pose(8, 9, False), hint=HINT)
+    assert said.count(rescue) == 1
 
 
 def test_help_factor_raises_the_budget_and_never_a_duration() -> None:
@@ -442,6 +496,13 @@ def test_max_visibility_reminders_caps_the_visibility_help() -> None:
     visibility = [line for line in harness.kind("intervention")
                   if line["state_before"] in (WORKING, VISIBILITY_RECOVERY, PROMPTING)]
     assert len(visibility) == 2
+
+
+def test_the_second_spoken_visibility_reminder_asks_for_the_hands_to_stay() -> None:
+    harness = wrong_pose_harness()
+    said = harness.feed(12.0, gesture=None, hands=1)
+    assert said == ["I can see one hand. Show me both.",
+                    "Keep your hands where I can see them."]
 
 
 def test_min_verbal_gap_drops_a_line_rather_than_queueing_it() -> None:
@@ -575,9 +636,15 @@ def test_invariant_a_visibility_failure_is_never_a_pedagogical_error() -> None:
 def test_no_contact_and_hands_swapped_never_score() -> None:
     for gesture in (pose(8, 7, False), pose(7, 8, False)):
         harness = wrong_pose_harness()
-        harness.feed(30.0, gesture=gesture)
+        harness.feed(12.0, gesture=gesture)
         assert harness.last.scored_gesture_error is False
         assert harness.last.first_try is True
+        # The clock still reaches the rescue, which ends first try on its own.
+        # Neither pose holds a wrong finger, so nothing is ever scored.
+        harness.feed(18.0, gesture=gesture)
+        assert harness.last.scored_gesture_error is False
+        harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+        assert harness.kind("exercise")[0]["scored_gesture_errors"] == 0
 
 
 def test_a_hand_lost_within_pose_memory_never_scores() -> None:
@@ -602,10 +669,15 @@ def test_a_wrong_pose_before_any_stability_never_scores() -> None:
 def test_a_math_error_is_scored_per_wrong_answer_with_no_cap() -> None:
     harness = wrong_pose_harness()
     harness.feed(1.5, gesture=pose(8, 7, True))
-    for value in (54, 55, 57):
-        harness.tutor.answer(value, correct=False, now=harness.clock.t)
+    said = [harness.tutor.answer(value, correct=False, now=harness.clock.t).tutor_line
+            for value in (54, 55, 57, 58)]
+    # One line per wrong answer, in order, the last one repeating.
+    assert said == ["Keep the pose. Count the tens again.",
+                    "Let's do the tens first.",
+                    "Now check the fingers above.",
+                    "Now check the fingers above."]
     harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
-    assert harness.kind("exercise")[0]["scored_math_errors"] == 3
+    assert harness.kind("exercise")[0]["scored_math_errors"] == 4
 
 
 def test_invariant_speech_never_scores_and_never_submits() -> None:
@@ -624,10 +696,10 @@ def test_invariant_never_wrong_for_a_correct_answer_before_the_pose() -> None:
     decision = harness.tutor.answer(56, correct=True, now=harness.clock.t)
     assert decision.scored_math_error is False
     assert decision.first_try is True
-    assert "right" in (decision.tutor_line or "")
+    assert decision.tutor_line == "Yes. 8 times 7 is 56."
     assert "wrong" not in (decision.tutor_line or "").lower()
     said = harness.feed(2.0, gesture=pose(8, 7, True))
-    assert any("There it is" in line for line in said)
+    assert "You have the pose. Now count the tens." in said
 
 
 def test_a_commutative_inversion_is_a_correct_pose() -> None:
@@ -734,7 +806,8 @@ def test_independent_after_three_autonomous_successes_said_once() -> None:
         clean_exercise(harness)
     decision = harness.tutor.new_exercise(6, 6, node="n", now=harness.clock.t)
     assert decision.mode == INDEPENDENT
-    assert decision.tutor_line == "You are flying today. I will watch quietly."
+    assert decision.tutor_line == ("You solved that without a hint. "
+                                   "I'll give you more space on the next one.")
     harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
     again = harness.tutor.new_exercise(6, 7, node="n", now=harness.clock.t)
     assert again.tutor_line is None
@@ -746,7 +819,7 @@ def test_supportive_after_two_hard_exercises_with_the_finger_numbers() -> None:
     hard_exercise(harness)
     decision = harness.tutor.new_exercise(6, 6, node="n", now=harness.clock.t)
     assert decision.mode == SUPPORTIVE
-    assert decision.tutor_line == "Let us take this one slowly, together."
+    assert decision.tutor_line == "Take your time. I'm watching your hands."
     harness.feed(2.0, gesture=UNKNOWN)
     assert harness.last.tutor_visual == {"kind": "finger_numbers"}
     harness.feed(1.2, gesture=UNKNOWN)
@@ -855,14 +928,17 @@ def test_early_stop_asks_one_mastered_fact_then_closes() -> None:
     assert harness.tutor.early_stop_plan()["stage"] == "mastered_fact"
 
     decision = harness.tutor.new_exercise(10, 10, node="n", now=harness.clock.t)
-    assert decision.tutor_line == "One last easy one, just for fun: what is 10 x 10?"
+    assert decision.tutor_line == "Show me 10 times 10 with your hands."
     assert decision.mode == SUPPORTIVE
     harness.feed(1.5, gesture=pose(10, 10, True))
-    harness.tutor.answer(100, correct=True, now=harness.clock.t)
+    assert harness.tutor.answer(100, correct=True,
+                                now=harness.clock.t).tutor_line == \
+        "Yes. 10 times 10 is 100."
     harness.tutor.end_exercise(reason="answered", now=harness.clock.t)
     plan = harness.tutor.early_stop_plan()
     assert plan["stage"] == "closing"
-    assert plan["line"] == "Lovely work today. Come back soon and we keep going."
+    # The twenty lines hold no goodbye, so the page falls back to tally.py.
+    assert plan["line"] is None
 
 
 # --------------------------------------------------------------------------
@@ -888,10 +964,10 @@ def test_a_dropout_longer_than_pose_memory_forgets_the_pose() -> None:
 
 def test_the_motion_threshold_falls_back_to_its_floor() -> None:
     harness = Harness()
-    assert harness.tutor.motion_threshold == 0.03
+    assert harness.tutor.motion_threshold == 0.3
     harness.tutor.start_check()
     harness.feed(0.5, gesture=pose(6, 6, True))
-    assert harness.tutor.end_check() == 0.03
+    assert harness.tutor.end_check() == 0.3
 
 
 def test_the_motion_threshold_is_four_times_the_measured_jitter() -> None:
@@ -902,7 +978,7 @@ def test_the_motion_threshold_is_four_times_the_measured_jitter() -> None:
         obs = Observation(gesture=pose(6, 6, True),
                           fingers=fingers(0.02 * index), hands_seen=2)
         harness.tutor.observe(obs, harness.clock.t)
-    assert harness.tutor.end_check() == pytest.approx(0.08, abs=1e-6)
+    assert harness.tutor.end_check() == pytest.approx(0.8, abs=1e-6)
 
 
 def test_the_motion_threshold_in_force_rides_every_intervention_line() -> None:
@@ -1082,12 +1158,14 @@ def test_a_line_is_only_returned_on_the_tick_it_is_said() -> None:
 def test_two_hands_the_classifier_cannot_read_get_the_opener() -> None:
     harness = wrong_pose_harness()
     said = harness.feed(6.0, gesture=UNKNOWN, hands=2)
-    assert said == ["Your turn: make 8 x 7 with your fingers."]
+    assert said == ["Show me 8 times 7 with your hands."]
     assert harness.last.tutor_visual == {"kind": "finger_numbers"}
     assert harness.last.tutor_state == WORKING
     assert harness.last.scored_gesture_error is False
     said = harness.feed(6.0, gesture=UNKNOWN, hands=2)
-    assert said == ["Hands up and flat, please, so I can see every finger."]
+    assert said == ["Take your time. I'm watching your hands."]
+    said = harness.feed(6.0, gesture=UNKNOWN, hands=2)
+    assert said == ["Start by finding 8 on your left hand."]
     reasons = {line["reason"] for line in harness.kind("decision")}
     assert {"prompt_end", "idle"} <= reasons
 

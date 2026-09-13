@@ -55,8 +55,16 @@ SUPPORTIVE_VISUAL_S = 3.0           # finger numbers kept up at the start of a s
 JITTER_WINDOW_S = 2.0               # length of the still hands measurement
 JITTER_MIN_PAIRS = 20               # fewer than this and the measurement is discarded
 JITTER_PERCENTILE = 0.9
-MOTION_FLOOR = 0.03
+# The motion measure app/server.py hands over is a fingertip displacement divided by
+# palm size, so it is in palm widths, not in image fractions. A palm is about a tenth
+# of the frame, so the 0.03 of a frame the contract names is 0.3 of a palm. The
+# measured jitter shares the unit, so only this floor had to be converted.
+MOTION_FLOOR = 0.3                  # palm widths over the 400 ms window
 MOTION_MULTIPLIER = 4.0
+# app/server.py measures motion in palm widths. When it hands over no measure,
+# the fallback below works from fingertip coordinates, which are frame fractions,
+# so it divides by a nominal palm to land in the same unit.
+NOMINAL_PALM = 0.1
 SMOOTHING_OLD = 0.8
 SMOOTHING_NEW = 0.2
 SCHEDULE_GLOBALS_ONLY = 4           # tutor_observations 0..4: factors forced to 1.0
@@ -68,6 +76,7 @@ DECISIONS_PER_SECOND = 2
 FPS_EPSILON = 1e-6                  # a camera running at exactly fps keeps every frame
 AUTONOMOUS_FOR_INDEPENDENT = 3
 HARD_FOR_SUPPORTIVE = 2
+RESCUE_LEVEL = 4                    # the top of the ladder, outside the nag budget
 EARLY_STOP_MIN_EXERCISES = 3
 EARLY_STOP_CONSECUTIVE = 2
 EARLY_STOP_ERRORS = 2
@@ -141,12 +150,14 @@ FACTOR_PARAMS = ("supportive_mode_factor", "independent_mode_factor")
 REQUIRED_PARAMS = ("fps",) + DURATION_PARAMS + COUNT_PARAMS + FACTOR_PARAMS
 
 LINE_KEYS = (
-    "nudge_start", "nudge_hands", "nudge_wrong_pose", "nudge_count",
-    "no_contact", "hands_swapped", "correction", "show", "rescue",
-    "no_hands", "one_hand", "answer_correct", "answer_wrong",
-    "answer_before_pose", "pose_confirmed", "hint_asked",
-    "independent_mode", "supportive_mode", "early_stop_easy", "closing",
+    "launch", "hesitation_1", "hesitation_2", "visibility_none",
+    "visibility_one", "visibility_keep", "wrong_right", "wrong_left",
+    "wrong_both", "not_touching", "show", "pose_ready", "count_tens",
+    "multiply_above", "wrong_answer_1", "wrong_answer_2", "wrong_answer_3",
+    "rescue", "success", "autonomous",
 )
+# One line per wrong answer on the same exercise, the last one repeating.
+WRONG_ANSWER_KEYS = ("wrong_answer_1", "wrong_answer_2", "wrong_answer_3")
 
 
 class ParamsError(ValueError):
@@ -546,11 +557,15 @@ class Tutor:
         if not self._open:
             return self._decision()
         self._requested_hints += 1
-        target = min(4, self._level + 1)
+        target = min(RESCUE_LEVEL, self._level + 1)
         target = self._gate_level(target)
         if target > self._level:
             self._level = target
             self._max_level = max(self._max_level, target)
+        if self._level >= RESCUE_LEVEL and self._rescue_used:
+            # The rescue is walked through once per exercise, whatever asked
+            # for it. Asking again does not buy a second one.
+            return self._decision()
         line = self._ladder_line(self._level, asked=True)
         self._deliver(moment, self._level, line, solicited=True,
                       reason=REASON_CHILD_ASKED, keys=("hint_2_delay", "rescue_delay"))
@@ -558,7 +573,11 @@ class Tutor:
 
     def answer(self, value: int | None, correct: bool,
                now: float | None = None) -> Decision:
-        """A final answer, submitted through a check message."""
+        """A final answer, submitted through a check message.
+
+        value is kept for the caller's shape and is deliberately unused: the
+        canonical lines name the exercise and its result, never the digits typed.
+        """
         moment = self._tick(now)
         self._engage()
         if not self._open:
@@ -566,17 +585,17 @@ class Tutor:
         self._answered = True
         if correct:
             self._answer_correct = True
-            if self._correct_pose_seen:
-                line = self._render("answer_correct", answer=value)
-            else:
+            if not self._correct_pose_seen:
                 # Invariant 6: accepted, praised, and the pose is confirmed after.
                 self._pose_waived = True
-                line = self._render("answer_before_pose", answer=value,
-                                    exercise=self._title)
+            line = self._render("success", a=self._a, b=self._b,
+                                total=self._result)
             self._set_state(SUCCESS, moment, REASON_ANSWER_GIVEN)
         else:
             self._math_errors += 1
-            line = self._render("answer_wrong")
+            key = WRONG_ANSWER_KEYS[min(self._math_errors,
+                                        len(WRONG_ANSWER_KEYS)) - 1]
+            line = self._render(key)
             self._set_state(ANSWER_RETRY, moment, REASON_ANSWER_WRONG,
                             scored="math")
         self._say(line, moment)
@@ -604,14 +623,17 @@ class Tutor:
             self._early_stage = "closing_pending"
             # One already mastered fact, with all the help it needs.
             self._mode = SUPPORTIVE
-            line = self._render("early_stop_easy", exercise=self._title)
+            line = self._render("launch", a=a, b=b)
         elif self._mode == INDEPENDENT and not self._said_independent:
             self._said_independent = True
-            line = self._render("independent_mode")
+            line = self._render("autonomous")
         elif self._mode == SUPPORTIVE and (previous_mode != SUPPORTIVE
                                            or not self._said_supportive):
             self._said_supportive = True
-            line = self._render("supportive_mode")
+            line = self._render("hesitation_1")
+            # Supportive opens on the first hesitation line, so an idle nudge
+            # later in this exercise goes to the second one instead of repeating.
+            self._hesitations += 1
         if line is not None:
             self._say(line, moment)
         self._log_decision(REASON_WITHIN_GRACE, None)
@@ -777,9 +799,14 @@ class Tutor:
                 return None
             since = self._ped - self._last_delivery.get(SIT_CORRECT, -math.inf)
             if held >= self.effective("correct_pose_nudge") and since >= self.effective("correct_pose_nudge"):
-                line = self._render("nudge_count")
-                return self._offer(moment, max(1, self._level), line, SIT_CORRECT,
+                # The two halves of the method, in the order they are counted.
+                line = self._render("count_tens" if self._counting_nudges == 0
+                                    else "multiply_above")
+                said = self._offer(moment, max(1, self._level), line, SIT_CORRECT,
                                    REASON_POSE_READY, ("correct_pose_nudge",))
+                if said is not None:
+                    self._counting_nudges += 1
+                return said
             return None
 
         # 4. Both hands are in frame and the classifier cannot read a pose: the
@@ -791,11 +818,19 @@ class Tutor:
         quiet = self._ped - max(self._prompt_end_ped, last_line, self._last_any_delivery)
         if quiet >= self.effective("idle_nudge"):
             first = not self._said_anything
-            line = self._render("nudge_start" if first else "nudge_hands",
-                                exercise=self._title)
-            return self._offer(moment, max(1, self._level), line, "idle",
+            if first:
+                line = self._render("launch", a=self._a, b=self._b)
+            elif self._hesitations == 0:
+                line = self._render("hesitation_1")
+            else:
+                # Still nothing: the second hesitation line names the first step.
+                line = self._render("hesitation_2", a=self._a)
+            said = self._offer(moment, max(1, self._level), line, "idle",
                                REASON_PROMPT_END if first else REASON_IDLE,
                                ("idle_nudge", "initial_silence"))
+            if said is not None and not first:
+                self._hesitations += 1
+            return said
         return None
 
     def _visibility(self, moment: float, situation: str, held: float) -> str | None:
@@ -807,11 +842,15 @@ class Tutor:
             visual_at = self.effective("no_hands_visual")
             voice_at = self.effective("no_hands_voice")
             if held >= voice_at and self._visibility_voiced < budget:
-                line = self._render("no_hands")
-                self._visibility_voiced += 1
-                return self._offer(moment, 1, line, situation, REASON_HANDS_LOST,
+                line = self._visibility_line("visibility_none")
+                said = self._offer(moment, 1, line, situation, REASON_HANDS_LOST,
                                    ("no_hands_voice", "min_verbal_gap"),
                                    visibility=True)
+                # Counted when it is said, not when it is tried: a line the
+                # verbal gap dropped is a reminder the child never heard.
+                if said is not None:
+                    self._visibility_voiced += 1
+                return said
             if held >= visual_at and not self._visibility_shown:
                 self._visibility_shown = True
                 self._visibility_reminders += 1
@@ -822,16 +861,28 @@ class Tutor:
             return None
         if situation == SIT_ONE_HAND:
             if held >= self.effective("one_hand_voice") and self._visibility_voiced < budget:
-                line = self._render("one_hand")
-                self._visibility_voiced += 1
-                return self._offer(moment, 1, line, situation, REASON_ONE_HAND,
+                line = self._visibility_line("visibility_one")
+                said = self._offer(moment, 1, line, situation, REASON_ONE_HAND,
                                    ("one_hand_voice", "min_verbal_gap"),
                                    visibility=True)
+                if said is not None:
+                    self._visibility_voiced += 1
+                return said
             return None
         return None
 
+    def _visibility_line(self, key: str) -> str | None:
+        """The first spoken reminder names what is missing.
+
+        A later one asks for the hands to stay where the camera can read them:
+        repeating the first line word for word is nagging, not teaching.
+        """
+        if self._visibility_voiced > 0:
+            key = "visibility_keep"
+        return self._render(key)
+
     def _escalate(self, moment: float, situation: str) -> str | None:
-        target = self._gate_level(min(4, self._level + 1))
+        target = self._gate_level(min(RESCUE_LEVEL, self._level + 1))
         if target <= self._level and self._level > 0:
             # hint_2_delay or rescue_delay is holding the ladder here. Saying the
             # same thing again is nagging, and it would spend the budget the step
@@ -841,7 +892,8 @@ class Tutor:
         keys = ("wrong_pose_prompt", "wrong_pose_error_after_help", "min_verbal_gap",
                 "post_movement_silence", "hint_2_delay", "rescue_delay")
         said = self._offer(moment, target, line, situation,
-                           REASON_WRONG_POSE_HELD, keys)
+                           REASON_WRONG_POSE_HELD, keys,
+                           rescue=target >= RESCUE_LEVEL)
         return said
 
     def _gate_level(self, target: int) -> int:
@@ -854,8 +906,8 @@ class Tutor:
         return max(target, self._level)
 
     def _offer(self, moment: float, level: int, line: str | None, problem: str,
-               reason: str, keys: Sequence[str],
-               visibility: bool = False) -> str | None:
+               reason: str, keys: Sequence[str], visibility: bool = False,
+               rescue: bool = False) -> str | None:
         """Apply the anti nag limits, then deliver or drop. Never queue."""
         if line is None:
             return None
@@ -863,7 +915,14 @@ class Tutor:
             if self._ped - self._last_line_ped < self.effective("min_verbal_gap"):
                 self._suppress(REASON_MIN_VERBAL_GAP)
                 return None
-        if not visibility:
+        if rescue:
+            # max_unsolicited_verbal is the budget of L1, L2 and L3. The rescue
+            # sits outside it: the three steps below always spend it first, and a
+            # rescue refused for budget would never be reachable at all. Its own
+            # limit is one per exercise, and it still obeys min_verbal_gap above.
+            if self._rescue_used:
+                return None
+        elif not visibility:
             if self._unsolicited >= self._count("max_unsolicited_verbal"):
                 self._suppress(REASON_BUDGET_SPENT)
                 return None
@@ -880,7 +939,7 @@ class Tutor:
         if not visibility and level > self._level:
             self._level = level
             self._max_level = max(self._max_level, level)
-        if level >= 4 and not visibility:
+        if level >= RESCUE_LEVEL and not visibility:
             self._rescue_used = True
         if line is not None:
             self._say(line, moment)
@@ -914,30 +973,57 @@ class Tutor:
     def _ladder_line(self, level: int, situation: str | None = None,
                      asked: bool = False) -> str | None:
         situation = situation or self._situation_now
-        hint = self._hint or {}
-        hand = hint.get("hand")
-        move_from = hint.get("move_from")
-        move_to = hint.get("move_to")
-        if level >= 4:
+        if level >= RESCUE_LEVEL:
             return self._render("rescue", tens=self._tens,
-                                tens_value=self._tens * 10, units=self._units,
-                                total=self._result, exercise=self._title)
+                                tens_value=self._tens * 10, u1=self._u1,
+                                u2=self._u2, units=self._units,
+                                total=self._result)
         if situation == SIT_NO_CONTACT:
-            return self._render("no_contact")
+            return self._render("not_touching")
         if situation == SIT_SWAPPED:
-            return self._render("hands_swapped")
+            # The two numbers are right and each is on the other hand, so the
+            # line that says which number belongs where is the swap advice.
+            return self._render("wrong_both", a=self._a, b=self._b)
         if asked and level <= 1:
-            return (self._render("hint_asked", hand=hand, move_to=move_to)
-                    or self._render("nudge_wrong_pose"))
+            # Help the child asked for is worth more than a nudge: the first
+            # concrete step, on the hand they start from.
+            return self._render("hesitation_2", a=self._a)
         if level >= 3:
-            return (self._render("show", hand=hand, move_from=move_from,
-                                 move_to=move_to)
-                    or self._render("nudge_wrong_pose"))
+            # Without a hint there is no fingertip to point at, so showing is
+            # meaningless and the nudge is all that is left.
+            if (self._hint or {}).get("hand"):
+                return self._render("show")
+            return self._render("hesitation_1")
         if level == 2:
-            return (self._render("correction", hand=hand, move_from=move_from,
-                                 move_to=move_to)
-                    or self._render("nudge_wrong_pose"))
-        return self._render("nudge_wrong_pose")
+            return self._correction_line()
+        return self._render("hesitation_1")
+
+    def _correction_line(self) -> str | None:
+        """Name the hand, or the two hands, holding a finger nobody asked for."""
+        left_wrong, right_wrong = self._wrong_hands()
+        if left_wrong and right_wrong:
+            return self._render("wrong_both", a=self._a, b=self._b)
+        if right_wrong:
+            return self._render("wrong_right", b=self._b)
+        if left_wrong:
+            return self._render("wrong_left", a=self._a)
+        return self._render("hesitation_1")
+
+    def _wrong_hands(self) -> tuple[bool, bool]:
+        """Which hands hold a finger the exercise did not ask for.
+
+        Both readings of the pair are tried and the kinder one wins, the same
+        way lesson/engine.py aims a wrong finger at the target it is nearest to.
+        """
+        if self._held_key is None:
+            hand = (self._hint or {}).get("hand")
+            return (hand == "left", hand == "right")
+        left, right, _ = self._held_key
+        straight = (left != self._a, right != self._b)
+        crossed = (left != self._b, right != self._a)
+        if sum(crossed) < sum(straight):
+            return crossed
+        return straight
 
     def _visual(self) -> dict[str, Any] | None:
         """What to draw now. Derived, never stored, so it can never go stale."""
@@ -1020,11 +1106,12 @@ class Tutor:
         return self._early_stage != "none"
 
     def early_stop_plan(self) -> dict[str, Any]:
-        """What app/server.py should do next. The tutor never calls the scheduler."""
-        line = None
-        if self._early_stage == "closing":
-            line = self._render("closing")
-        return {"stop": self.early_stop, "stage": self._early_stage, "line": line}
+        """What app/server.py should do next. The tutor never calls the scheduler.
+
+        The twenty lines hold no goodbye, so the closing stage carries no line
+        and the page falls back to the phrase of lesson/tally.py.
+        """
+        return {"stop": self.early_stop, "stage": self._early_stage, "line": None}
 
     # -- modes ---------------------------------------------------------------
 
@@ -1133,7 +1220,7 @@ class Tutor:
         middle = len(moves) // 2
         if len(moves) % 2:
             return moves[middle]
-        return 0.5 * (moves[middle - 1] + moves[middle])
+        return (0.5 * (moves[middle - 1] + moves[middle])) / NOMINAL_PALM
 
     def _update_motion(self, motion: float | None, moment: float) -> None:
         moving = motion is not None and motion > self.motion_threshold
@@ -1215,8 +1302,7 @@ class Tutor:
                 if not self._correct_pose_seen:
                     self._correct_pose_seen = True
                     if self._pose_waived:
-                        confirmed = self._render("pose_confirmed",
-                                                 exercise=self._title)
+                        confirmed = self._render("pose_ready")
                         self._say(confirmed, moment)
                         self._pending_line = confirmed
 
@@ -1349,7 +1435,8 @@ class Tutor:
     def _reset_exercise(self, moment: float, a: int, b: int, title: str) -> None:
         self._a, self._b, self._title = a, b, title
         self._tens = (a - 5) + (b - 5)
-        self._units = (10 - a) * (10 - b)
+        self._u1, self._u2 = 10 - a, 10 - b
+        self._units = self._u1 * self._u2
         self._result = self._tens * 10 + self._units
         self._open = bool(title)
         self._ex_start = moment
@@ -1365,6 +1452,8 @@ class Tutor:
         self._visibility_reminders = 0
         self._visibility_voiced = 0
         self._visibility_shown = False
+        self._hesitations = 0
+        self._counting_nudges = 0
         self._taught = 0
         self._suppressed: str | None = None
         self._pending_line: str | None = None
