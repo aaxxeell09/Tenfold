@@ -494,39 +494,42 @@
 </script>
 </section>
 
-<!-- exercise.html, taken from the export as it stands -->
+<!-- exercise.html, taken from the export as it stands. The prototype driver that
+     came with the page is gone: app.js is what moves this screen now. -->
 <section class="view view-lesson" id="lesson" hidden>
-<div class="frame" id="frame" data-state="waiting">
+<div class="frame clean" data-state="waiting">
 
   <div class="top">
-    <a class="quit" href="practice.html" aria-label="Quit"><span></span></a>
-    <p class="ex" id="ex">8 <span class="eq">×</span> 7</p>
+    <a class="quit" href="#practice" data-action="quit" aria-label="Quit"><span></span></a>
+    <p class="ex" id="ex">Getting ready</p>
     <div class="meta">
-      <span class="count" id="count">2 of 5</span>
-      <span class="bar"><i id="bar" style="width:40%"></i></span>
+      <span class="count" id="count"></span>
+      <span class="hearts" hidden></span>
+      <span class="bar"><i id="bar" style="width:0%"></i></span>
     </div>
   </div>
 
   <div class="camwrap">
-    <div class="cam">
+    <div class="cam" data-state="">
+      <img class="practice-video" alt="">
       <span class="camtag">camera</span>
-      <svg class="gh" id="gh" viewBox="0 0 1194 672" aria-hidden="true"></svg>
+      <svg class="gh practice-overlay" id="gh" viewBox="0 0 1194 672" aria-hidden="true"></svg>
       <div class="veil"><b>I cannot see your hands</b><span>Hold them up, palms toward me</span></div>
-      <div class="why">
-        <span><b>5</b> fingers at and below the touch, so 50</span>
-        <span><b>2</b> tops on the left and <b>3</b> on the right, two threes make 6</span>
-        <span>50 and 6 make <b>56</b></span>
-      </div>
+      <div class="why"></div>
       <div class="cheer-badge"></div>
     </div>
   </div>
 
   <div class="foot">
-    <div class="tally-art"></div>
-    <p class="say" id="say">Touch your 8 with your 7.</p>
-    <div class="mic" id="mic">
-      <span class="bars"><i></i><i></i><i></i><i></i></span>
-      <span id="miclabel">Listening</span>
+    <div class="tally-art" data-tally="ready" data-action="help" role="button" aria-label="Ask Tally for help"></div>
+    <p class="say" id="say" data-action="help"></p>
+    <div class="answer">
+      <span class="typed"></span><span class="caret"></span>
+      <div class="mic" id="mic" data-action="mic" role="button" aria-label="Say the answer">
+        <span class="bars"><i></i><i></i><i></i><i></i></span>
+        <span class="mic-label" id="miclabel">Listening</span>
+      </div>
+      <div class="heard"></div>
     </div>
   </div>
 
@@ -539,171 +542,6 @@
   </div>
 
 </div>
-
-<script>
-(function () {
-  var frame = document.getElementById('frame');
-  var gh = document.getElementById('gh');
-  var say = document.getElementById('say');
-  var mic = document.getElementById('mic');
-  var miclabel = document.getElementById('miclabel');
-
-  // one traced hand per side, a numbered circle at each fingertip
-  var HAND = 'M 64 430 C 58 392 48 336 38 288 C 30 250 22 216 22 192 A 22 22 0 0 1 66 192 ' +
-    'L 74 250 C 74 226 72 150 72 120 A 24 24 0 0 1 120 120 ' +
-    'L 126 232 C 126 208 125 122 125 93 A 25 25 0 0 1 175 93 ' +
-    'L 180 236 C 180 212 180 142 180 118 A 24 24 0 0 1 228 118 ' +
-    'L 238 262 C 232 282 216 296 205 308 L 269 227 A 22 22 0 0 1 303 254 ' +
-    'L 239 335 C 232 346 224 354 216 366 C 210 390 206 410 204 430 Z';
-  var TIPS = { 10: [44, 192], 9: [96, 120], 8: [150, 93], 7: [204, 118], 6: [286, 241] };
-  var S = 1.16, TOP = 42;
-  var ORIGIN = { left: 196, right: 998 };
-  var PIVOT = {
-    left: { x: ORIGIN.left + S * 130, y: TOP + S * 430 },
-    right: { x: ORIGIN.right - S * 130, y: TOP + S * 430 }
-  };
-  var CLOSE_ROT = { left: 22, right: -20 }, GAP = 62;
-
-  function base(hand, n) {
-    var flip = hand === 'left' ? 1 : -1;
-    return { x: ORIGIN[hand] + flip * S * TIPS[n][0], y: TOP + S * TIPS[n][1] };
-  }
-  function spin(p, piv, deg) {
-    var r = deg * Math.PI / 180, c = Math.cos(r), s2 = Math.sin(r);
-    var dx = p.x - piv.x, dy = p.y - piv.y;
-    return { x: piv.x + dx * c - dy * s2, y: piv.y + dx * s2 + dy * c };
-  }
-  function xform(s) {
-    if (!s.close) return { left: { rot: 0, tx: 0, ty: 0 }, right: { rot: 0, tx: 0, ty: 0 } };
-    var pair = s.want.length === 2 ? s.want : ['left8', 'right7'];
-    var a = pair[0].match(/^(left|right)(\d+)$/), b = pair[1].match(/^(left|right)(\d+)$/);
-    var p1 = spin(base(a[1], a[2]), PIVOT[a[1]], CLOSE_ROT.left);
-    var p2 = spin(base(b[1], b[2]), PIVOT[b[1]], CLOSE_ROT.right);
-    return {
-      left: { rot: CLOSE_ROT.left, tx: 0, ty: 0 },
-      right: { rot: CLOSE_ROT.right, tx: (p1.x + GAP) - p2.x, ty: p1.y - p2.y }
-    };
-  }
-  function at(k, X) {
-    var m = k.match(/^(left|right)(\d+)$/), t = X[m[1]];
-    var p = spin(base(m[1], m[2]), PIVOT[m[1]], t.rot);
-    return { x: p.x + t.tx, y: p.y + t.ty };
-  }
-
-  function hand(side, s, X) {
-    var flip = side === 'left' ? 1 : -1, t = X[side];
-    var out = '<g class="hand" data-hand="' + side + '" transform="translate(' + t.tx + ',' + t.ty +
-      ') rotate(' + t.rot + ' ' + PIVOT[side].x + ' ' + PIVOT[side].y + ')">' +
-      '<g transform="translate(' + ORIGIN[side] + ',' + TOP + ') scale(' + (flip * S) + ',' + S + ')">' +
-        '<path class="handline" d="' + HAND + '"></path></g>';
-    Object.keys(TIPS).forEach(function (n) {
-      var p = base(side, n);
-      var cls = 'fin' + (s.want.indexOf(side + n) > -1 ? ' want' : '') + (s.bad.indexOf(side + n) > -1 ? ' bad' : '');
-      out += '<g class="' + cls + '" data-hand="' + side + '" data-n="' + n + '" transform="translate(' + p.x + ',' + p.y + ')">' +
-               '<circle class="halo" r="38"></circle>' +
-               '<circle class="tip" r="32"></circle>' +
-               '<text class="num" y="10">' + n + '</text>' +
-             '</g>';
-    });
-    return out + '</g>';
-  }
-
-  // the correction is drawn on the hands: arc from the wrong finger to the target, target circled
-  function coachSvg(s, X) {
-    if (!s.coach) return '';
-    var a = at(s.coach[0], X), b = at(s.coach[1], X);
-    var mx = (a.x + b.x) / 2, my = Math.min(a.y, b.y) - 128;
-    var ang = Math.atan2((b.y - 44) - my, b.x - mx) * 180 / Math.PI;
-    return '<g class="guide">' +
-      '<path class="arc" d="M ' + a.x + ' ' + (a.y - 40) + ' Q ' + mx + ' ' + my + ' ' + b.x + ' ' + (b.y - 44) + '"></path>' +
-      '<polygon class="head" points="0,-15 30,0 0,15" transform="translate(' + b.x + ',' + (b.y - 44) + ') rotate(' + ang + ')"></polygon>' +
-      '<circle class="ring" cx="' + b.x + '" cy="' + b.y + '" r="47"></circle></g>';
-  }
-
-  // when the pair touches, its two caps are painted above both hands so neither is hidden
-  function contact(s, X) {
-    if (!s.close || s.want.length !== 2) return '';
-    var a = at(s.want[0], X), b = at(s.want[1], X);
-    var out = '<line stroke="#2fae82" stroke-width="10" stroke-linecap="round" x1="' + a.x + '" y1="' + a.y +
-              '" x2="' + b.x + '" y2="' + b.y + '"></line>';
-    [[s.want[0], a], [s.want[1], b]].forEach(function (pair) {
-      var n = pair[0].replace(/^(left|right)/, ''), p = pair[1];
-      out += '<g class="fin want" transform="translate(' + p.x + ',' + p.y + ')">' +
-             '<circle class="halo" r="38"></circle><circle class="tip" r="32"></circle>' +
-             '<text class="num" y="10">' + n + '</text></g>';
-    });
-    return out;
-  }
-
-  function paint(s) {
-    var X = xform(s);
-    var order = s.close ? ['right', 'left'] : ['left', 'right'];
-    gh.innerHTML = order.map(function (h) { return hand(h, s, X); }).join('') + contact(s, X) + coachSvg(s, X);
-  }
-
-  var STATES = {
-    waiting: {
-      say: 'Touch your 8 with your 7.', mic: 'Listening', listening: true,
-      want: ['left8', 'right7'], bad: [], detected: true, close: false, pop: false
-    },
-    almost: {
-      say: 'Almost. Move your right finger from 9 to 7.', mic: 'Listening', listening: true,
-      want: ['left8'], bad: ['right9'], detected: true, close: false, pop: false,
-      coach: ['right9', 'right7']
-    },
-    yes: {
-      say: 'Yes! 8 × 7 = 56.', mic: 'Fifty six', listening: false,
-      want: ['left8', 'right7'], bad: [], detected: true, close: true, pop: true
-    },
-    blind: {
-      say: 'I cannot see your hands. Hold them up in the light.', mic: 'Paused', listening: false,
-      want: [], bad: [], detected: false, close: false, pop: false
-    }
-  };
-
-  function go(name) {
-    var s = STATES[name] || STATES.waiting;
-    frame.className = 'frame' + (s.detected ? ' detected' : '') + (name === 'yes' ? ' yes' : '');
-    frame.dataset.state = name;
-    say.textContent = s.say;
-    miclabel.textContent = s.mic;
-    mic.classList.toggle('off', !s.listening);
-
-    paint(s);
-    if (s.coach) frame.classList.add('coach');
-    if (s.pop) { void frame.offsetWidth; frame.classList.add('is-cheer'); }
-
-    Array.prototype.forEach.call(document.querySelectorAll('.states button'), function (b) {
-      b.classList.toggle('on', b.dataset.go === name);
-    });
-  }
-
-  document.getElementById('states').addEventListener('click', function (e) {
-    var b = e.target.closest('button');
-    if (b) go(b.dataset.go);
-  });
-  document.addEventListener('keydown', function (e) {
-    var map = { '1': 'waiting', '2': 'almost', '3': 'yes', '4': 'blind' };
-    if (map[e.key]) go(map[e.key]);
-  });
-  document.querySelector('.cam').addEventListener('click', function () {
-    var order = ['waiting', 'almost', 'yes', 'blind'];
-    go(order[(order.indexOf(frame.dataset.state) + 1) % order.length]);
-  });
-
-  // ?clean=1 hides the developer switcher, for demos and screenshots
-  if (new URLSearchParams(location.search).get('clean')) frame.classList.add('clean');
-
-  function fit() {
-    var s = Math.min(1, window.innerWidth / 1194, window.innerHeight / 834);
-    document.documentElement.style.setProperty('--fit', s);
-  }
-  window.addEventListener('resize', fit);
-  fit();
-
-  go('waiting');
-})();
-</script>
 </section>
 
 <!-- finish.html, taken from the export as it stands -->
