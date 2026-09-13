@@ -101,8 +101,11 @@ with the loop.
 ## Continuous: new captures in, better perception out
 
 ```
-caffeinate -i ../tenfold/.venv/bin/python loop/watch.py --push --max-cost 20 --critic-args "--skip-heldout"
+caffeinate -i ../tenfold/.venv/bin/python loop/watch.py --push --max-cost 20 --critic-args=--skip-heldout
 ```
+
+Pass critic flags with `=` (`--critic-args=--skip-heldout`): a separate value that starts with `--` and has no
+space is read as an option of `watch.py` itself.
 
 `loop/watch.py` runs in the runner clone. Every 10 minutes it rebases on `origin/main`. It runs the critic when
 the dataset changed since the last accepted version (a new capture was pushed) or when the previous cycle got a

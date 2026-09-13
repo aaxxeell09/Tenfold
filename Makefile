@@ -40,7 +40,7 @@ nightly:
 	bash loop/nightly.sh 20
 
 watch:          ## continuous loop in the runner clone: pull, iterate on new data, push accepted versions
-	caffeinate -i $(PY) loop/watch.py --push --max-cost $${MAX_COST:-20} --critic-args "--skip-heldout"
+	caffeinate -i $(PY) loop/watch.py --push --max-cost $${MAX_COST:-20} --critic-args=--skip-heldout
 
 dashboard:
 	$(PY) -m marimo run dashboard/loop_dashboard.py
