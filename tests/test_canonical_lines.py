@@ -252,6 +252,27 @@ def test_every_line_of_the_file_is_reachable() -> None:
         assert key in raw, key
 
 
+# --- the words the counting lines use ----------------------------------------
+
+# The seven lines that walk a child through the method. The owner's wording:
+# the fingers at the bottom and the fingers on top, because a child who has not
+# met place value yet cannot hear "tens" and "ones" as anything.
+COUNTING_KEYS = ("pose_ready", "count_tens", "multiply_above", "wrong_answer_1",
+                 "wrong_answer_2", "wrong_answer_3", "rescue")
+PLACEHOLDER = re.compile(r"\{[^}]*\}")
+
+
+def test_the_counting_lines_speak_of_the_bottom_and_the_top() -> None:
+    raw = json.loads(LINES_FILE.read_text(encoding="utf-8"))
+    for key in COUNTING_KEYS:
+        spoken = PLACEHOLDER.sub("", raw[key]).lower()
+        assert "bottom" in spoken or "top" in spoken, key
+        # "the ones below" is the owner's own wording for the fingers under the
+        # touch. The place value words are the ones a child cannot hear.
+        for word in ("tens", "units"):
+            assert word not in spoken.split(), f"{key} still says {word}"
+
+
 _TMP: list[str] = []
 
 
