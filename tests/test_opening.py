@@ -131,7 +131,9 @@ def test_the_gate_pause_is_read_as_written_for_every_child() -> None:
 
 
 def test_the_gate_says_its_third_step_from_the_line_file() -> None:
-    assert PAGE_LINE_KEYS == ("gate_ready",)
+    # The page has its own lines now, the gate's among them. The one this test
+    # is about is the third step, and it is the page's, not the tutor's.
+    assert "gate_ready" in PAGE_LINE_KEYS
     assert LINES["gate_ready"] == "Say: I'm ready!"
     assert "6" not in LINES["gate_ready"], "no calculation of any kind"
 
