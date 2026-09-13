@@ -776,6 +776,9 @@ class Lesson:
         # Which client owns the running node. A second tab may not take the
         # session from under it; a socket that goes away gives it back.
         self.owner: object | None = None
+        # The page load the owner socket belongs to. A page that reconnects keeps
+        # it, so it can take its node back before the dead socket is noticed.
+        self.owner_tab: str | None = None
         # The session number of this sitting, and whose it is. A course node is
         # not a session: every node of one visit shares the number.
         self.sitting: int | None = None
@@ -964,6 +967,7 @@ class Lesson:
         self.pick = None
         self.running = False
         self.owner = None
+        self.owner_tab = None
         self.sitting_at = now_utc()
         self.early_stop = False
         self.early_stop_served = False
@@ -1101,15 +1105,23 @@ class Lesson:
     # -- from the browser --
 
     def command(self, message: dict[str, Any], client: object | None = None) -> None:
-        """One command from one client. client identifies the socket it came from."""
+        """One command from one client. client identifies the socket it came from.
+
+        None is the process itself, the mock loop and the tests, and is trusted.
+        """
         kind = message.get("type")
         with self._lock:
             if kind == "start_node":
-                self._start_node(message.get("node") or {}, message.get("state"), client)
+                self._start_node(message.get("node") or {}, message.get("state"), client,
+                                 message.get("tab"))
+            elif kind == "hello":
+                self._hello(message.get("state"), client)
+            elif not self._may_change(client):
+                # A second tab was refused its node but keeps its buttons, its keys
+                # and its microphone. None of them may reach the first tab's lesson.
+                log.info("server: ignored %s from a client that does not own the session", kind)
             elif kind == "quit":
                 self._quit()
-            elif kind == "hello":
-                self._hello(message.get("state"))
             elif kind == "check":
                 self._check(_as_int(message.get("value")))
             elif kind == "next":
@@ -1122,6 +1134,15 @@ class Lesson:
                 self._speech(message.get("text"))
             elif kind == "repeat":
                 self.push(self.engine.repeat())
+
+    def _may_change(self, client: object | None) -> bool:
+        """Whether this client may change the running session. Call with the lock held.
+
+        Only the socket that started it may. A session whose owner went away has
+        nobody to take commands from until a start_node claims it back, which is
+        what a reconnecting page sends first.
+        """
+        return client is None or not self.running or client is self.owner
 
     def _tts(self, speaking: bool) -> None:
         """The page has started or finished saying a line.
@@ -1173,11 +1194,16 @@ class Lesson:
         self._advance()
 
     def _start_node(self, node: dict[str, Any], raw: Any,
-                    client: object | None = None) -> None:
+                    client: object | None = None, tab: Any = None) -> None:
         """Begin a course node: its pairs scope the session, its kind its length."""
-        if self.running and self.owner is not None and client is not self.owner:
+        tab = tab if isinstance(tab, str) and tab else None
+        same_page = tab is not None and tab == self.owner_tab
+        if (self.running and self.owner is not None and client is not self.owner
+                and not same_page):
             # Another tab is in the middle of a lesson. Taking the engine from
             # under it would freeze it with no message, so say no, out loud.
+            # The owner's own page on a new socket is not another tab: its old
+            # socket can stay open on the server for a heartbeat after a drop.
             self._refuse(node)
             return
         pairs = [list(pair) for pair in node.get("pairs") or []]
@@ -1197,6 +1223,7 @@ class Lesson:
 
         self.node = dict(node)
         self.owner = client
+        self.owner_tab = tab
         self.correct = 0
         self.finished = False
         self.running = True
@@ -1243,6 +1270,7 @@ class Lesson:
         with self._lock:
             if self.owner is client:
                 self.owner = None
+                self.owner_tab = None
 
     def _new_scheduler(self, scripted_ok: bool = True) -> Scheduler:
         """A fresh session on the same learner. The demo plays its fixed
@@ -1266,13 +1294,19 @@ class Lesson:
         self.tutor.close("quit", time.monotonic())
         self.demo_played = False
 
-    def _hello(self, raw: Any) -> None:
+    def _hello(self, raw: Any, client: object | None = None) -> None:
         """A client with no course shell: open session, no node, no length."""
-        self.learner = LearnerState.from_dict(raw, now=now_utc())
         # Whether a session is running, not whether one ever ran: outcomes are
         # never emptied, so testing them refused every hello after the first.
         if self.node is not None or self.running:
-            return                      # a node is already running, keep it
+            # Keep it, and keep its learner: swapping the record under a running
+            # session let any tab rewrite whose sitting it was. A bare client
+            # reconnecting to its own open session, now ownerless, takes it back.
+            if self.node is None and self.owner is None:
+                self.owner = client
+            return
+        self.learner = LearnerState.from_dict(raw, now=now_utc())
+        self.owner = client
         self.tutor.open(self.learner.learner_id, _carried_factors(raw))
         self.scheduler = self._new_scheduler()
         self.finished = False
