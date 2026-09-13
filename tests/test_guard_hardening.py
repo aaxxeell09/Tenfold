@@ -309,6 +309,18 @@ def test_a_forged_smoke_verdict_is_rejected(worktree, module):
     assert out and all(l.startswith("GUARD_REJECT smoke") for l in out), out
 
 
+@pytest.mark.parametrize("rel", ["loop/prompts/patch.md", "loop/CLAUDE.critic.md"])
+def test_critic_instructions_describe_the_guard_rules(rel):
+    """The patch agent learns the rules from these two files; they must not lag behind guard.py."""
+    text = (REPO / rel).read_text()
+    for mod in sorted(G.ALLOWED_MODULES - {"__future__", "classifier"}):
+        assert mod in text, f"{rel} does not list the allowed module {mod}"
+    for rule in ("np.load", "np.fromfile", "np.memmap", "tofile", "get_type_hints", "underscore", "dataclasses.sys",
+                 "np.lib", "assigns a module", "smoke not run", "python loop/guard.py --check"):
+        assert rule in text, f"{rel} does not describe {rule!r}"
+    assert "—" not in text and "–" not in text
+
+
 def test_a_hanging_candidate_is_rejected(worktree):
     write_rules(worktree, module="while True:\n    pass")
     out = G.check_smoke(worktree, timeout=5)
