@@ -34,7 +34,9 @@ def run(coroutine):
 
 def settled(engine: Engine, gesture, t0: float = 0.0):
     engine.observe(gesture, t0)
-    return engine.observe(gesture, t0 + 0.3 + 0.01)
+    # unreadable hands wait the visibility grace, every other condition the debounce
+    hold = max(0.3, engine.visibility_grace_ms / 1000.0) if gesture.method == "unknown" else 0.3
+    return engine.observe(gesture, t0 + hold + 0.01)
 
 
 def test_build_message_carries_everything_the_page_renders():
@@ -2289,3 +2291,28 @@ def test_the_mock_never_skips_a_scripted_step_before_its_pose():
     assert served[0] == first.fact
     assert served == [pick.fact for pick in scripted.scheduler.script[:len(served)]], \
         "every scripted step was served in order, none eaten"
+
+
+def test_a_tracking_drop_never_asks_for_both_hands():
+    """Seen live: Tally said show me both hands while both were in frame. The
+    lesson enters waiting_pose only after visibility_grace_ms of unreadable
+    hands, continuously; a drop of a few frames changes nothing on screen."""
+    engine = server.engine_from_params()
+    engine.start()
+    wrong = GestureState(method="6-10", left=8, right=9, contact=False, confidence=0.9)
+    lost = GestureState(method="unknown", confidence=0.1)
+    settled(engine, wrong)
+    assert engine.snapshot().state == "wrong_pose"
+    grace = engine.visibility_grace_ms / 1000.0
+    assert 0.5 <= grace <= 3.0
+    # three lost frames, then the hands are back: nothing shown
+    for step in range(3):
+        assert engine.observe(lost, 1.0 + step / 15) is None
+    assert engine.snapshot().state == "wrong_pose"
+    engine.observe(wrong, 1.3)
+    # gone for the whole grace: now the lesson says so
+    for step in range(int(grace * 15) + 1):
+        engine.observe(lost, 2.0 + step / 15)
+    assert engine.snapshot().state == "wrong_pose", "not before the grace"
+    update = engine.observe(lost, 2.0 + grace + 0.05)
+    assert update is not None and update.state == "waiting_pose"

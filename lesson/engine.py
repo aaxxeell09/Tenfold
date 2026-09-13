@@ -41,6 +41,11 @@ POSE_CONFIRM_FRAMES = 3
 POSE_CONFIRM_FRAMES_BOUNDS = (2, 6)
 POSE_CONFIRM_MS = 250.0
 POSE_CONFIRM_MS_BOUNDS = (120.0, 600.0)
+# How long the hands have to be unreadable, continuously, before the lesson
+# shows waiting_pose and the page says show me both hands. A tracking drop of
+# a few frames is not a child who left: it never reaches the screen.
+VISIBILITY_GRACE_MS = 1500.0
+VISIBILITY_GRACE_MS_BOUNDS = (500.0, 3000.0)
 
 STATE_INTRO = "intro"
 STATE_EXERCISE_SHOWN = "exercise_shown"
@@ -250,6 +255,9 @@ class Engine:
             POSE_CONFIRM_FRAMES_BOUNDS)))
         self.pose_confirm_ms = _policy(
             params, "pose_confirm_ms", POSE_CONFIRM_MS, POSE_CONFIRM_MS_BOUNDS)
+        self.visibility_grace_ms = _policy(
+            params, "visibility_grace_ms", VISIBILITY_GRACE_MS,
+            VISIBILITY_GRACE_MS_BOUNDS)
 
     @property
     def exercise(self) -> Exercise:
@@ -291,6 +299,11 @@ class Engine:
         if condition == COND_CORRECT:
             return (self._pending_frames >= self.pose_confirm_frames
                     or held >= self.pose_confirm_ms / 1000.0)
+        if condition == COND_UNKNOWN:
+            # Seen live: one dropped frame and Tally asked for both hands
+            # while both were there. The hands have to be gone for the whole
+            # grace, continuously, before the lesson says so.
+            return held >= max(self.debounce_s, self.visibility_grace_ms / 1000.0)
         return held >= self.debounce_s
 
     def observe(self, gesture: GestureState, now: float) -> Update | None:

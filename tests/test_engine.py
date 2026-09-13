@@ -30,7 +30,10 @@ def fresh() -> Engine:
 def settle(e: Engine, gesture: GestureState, t0: float = 0.0) -> object:
     """Hold one gesture past the debounce window and return the update."""
     assert e.observe(gesture, t0) is None, "an event must not fire instantly"
-    return e.observe(gesture, t0 + eng.DEBOUNCE_S)
+    # unreadable hands wait the visibility grace, everything else the debounce
+    hold = (max(eng.DEBOUNCE_S, e.visibility_grace_ms / 1000.0)
+            if gesture.method == "unknown" else eng.DEBOUNCE_S)
+    return e.observe(gesture, t0 + hold)
 
 
 # name, gesture, expected state, expected event
