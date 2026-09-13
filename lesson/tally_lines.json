@@ -20,6 +20,7 @@
   "success": "Yes. {a} times {b} is {total}.",
   "autonomous": "You solved that without a hint. I'll give you more space on the next one.",
   "pose_ack": "Yes, that's it.",
+  "hands_back": "Good, I can see your hands.",
   "intro": "Hi, I am Tally. Show me your hands and let us multiply together.",
   "exercise_shown": "Here we go. Put up the two fingers and touch them.",
   "unknown_gesture": "Touch the two fingers tip to tip, gently.",

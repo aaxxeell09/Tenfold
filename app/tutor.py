@@ -155,8 +155,11 @@ FRAME_PARAMS = ("pose_confirm_frames",)
 # pose_ready_delay_ms is the silence between the acknowledgement of a confirmed
 # pose and the canonical cue that follows it: the length of a two beat line, so
 # it is read as written like the other delivery timings.
+# recovery_grace_ms is the hush after the hands come back into frame. It is the
+# machine apologising for its own blind spell, not patience with a child, so it
+# is the same for every child and in every mode: read as written, clamped only.
 MS_PARAMS = ("pose_confirm_ms", "ack_delay_ms", "check_step_min_ms",
-             "answer_first_number_ms", "pose_ready_delay_ms")
+             "answer_first_number_ms", "pose_ready_delay_ms", "recovery_grace_ms")
 LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
 # The success beat, in milliseconds: how long the celebration itself runs, and
 # how long the silence after it lasts before the next exercise is announced.
@@ -183,6 +186,11 @@ WRONG_ANSWER_KEYS = ("wrong_answer_1", "wrong_answer_2", "wrong_answer_3")
 # error: the beat then plays the canonical line alone, at once, as before.
 ACK_LINE_KEY = "pose_ack"
 POSE_READY_KEY = "pose_ready"
+# The first of the two lines of a gentle recovery: the hands are back in frame
+# and Tally says so before asking for anything. Optional like the
+# acknowledgement, so a file without it re-prompts the exercise and no more.
+RECOVERY_LINE_KEY = "hands_back"
+LAUNCH_KEY = "launch"
 # The lines of the older lesson path, lesson/tally.py, which keeps no text of
 # its own. They live in the same file because Tally has one voice and one place
 # to keep it; the live tutor never says them and never has to have them.
@@ -200,7 +208,7 @@ LESSON_LINE_KEYS = (
 # Lines the file may carry and does not have to. "next_one" closes the success
 # beat, and lesson/tally_lines.json does not have it yet: until it does the beat
 # hands the page no second line at all rather than a line nobody wrote.
-OPTIONAL_LINE_KEYS = ("next_one", ACK_LINE_KEY) + LESSON_LINE_KEYS
+OPTIONAL_LINE_KEYS = ("next_one", ACK_LINE_KEY, RECOVERY_LINE_KEY) + LESSON_LINE_KEYS
 NEXT_LINE_KEY = "next_one"
 
 # The success beat. The page plays the parts in this order inside success_ms,
@@ -877,6 +885,8 @@ class Tutor:
             self._situation_since = self._ped
             if situation != SIT_WRONG:
                 self._correction_since = None
+        self._update_recovery(moment, situation)
+        self._release_queued(moment)
         self._update_paused(moment)
         line = self._run(moment, situation)
         cuts = False
@@ -955,7 +965,7 @@ class Tutor:
 
         # 2. A pose problem that has outlived its grace.
         if situation in POSE_PROBLEMS:
-            if not self._past_initial_silence():
+            if not self._past_initial_silence() or self.in_recovery:
                 return None
             if held < self.effective("wrong_pose_prompt"):
                 return None
@@ -1226,6 +1236,10 @@ class Tutor:
             # A visibility failure is never a pedagogical error, so it never
             # shows a pedagogical drawing: the zones, or nothing.
             return {"kind": "placement_zones"} if self._visibility_shown else None
+        if self.in_recovery and situation in POSE_PROBLEMS:
+            # No orange, no ghost, no pointed finger while the grace runs: the
+            # child gets their bearings back before anything is corrected.
+            return {"kind": "finger_numbers"} if self._level >= 1 else None
         if situation == SIT_WRONG and self._level >= 1 and hint.get("hand"):
             if self._level >= 3:
                 return {"kind": "ghost", "hand": hint["hand"],
@@ -1249,6 +1263,10 @@ class Tutor:
 
     def _score_gesture(self, moment: float, situation: str) -> None:
         if self._gesture_errors or situation != SIT_WRONG:
+            return
+        if self.in_recovery:
+            # The hands have just come back. Nothing held in that window is the
+            # child's mistake, so nothing in it is counted as one.
             return
         if self._correction_hand is None or self._correction_since is None:
             return
@@ -1442,6 +1460,74 @@ class Tutor:
         self._pending_line = line
         # The cue is not the yes. It waits its turn in the page's queue like
         # every other line, so only one line of the pair may ever cut.
+        self._pending_cuts = False
+
+    # -- the gentle recovery -------------------------------------------------
+
+    def _update_recovery(self, moment: float, situation: str) -> None:
+        """Losing the hands is the camera's doing. Getting them back is not a test.
+
+        The hands come back, Tally says he can see them, asks for the exercise
+        again, and then keeps a grace of recovery_grace_ms in which no wrong
+        pose is spoken, drawn or counted. When it closes the ladder starts again
+        at L0 with its clocks reset, as if the exercise had just been set.
+
+        The one grace already in the file is the opening silence, and the two
+        never stack: a recovery that happens while initial_silence is still
+        running opens no window of its own, because the hush the child is in is
+        already the hush this would ask for.
+        """
+        if not self._open:
+            self._lost = False
+            self._recover_until = None
+            return
+        if self._recover_until is not None and moment >= self._recover_until:
+            self._recover_until = None
+            # Whatever the child is holding, its clock starts now: the ladder
+            # may not climb on a pose nobody was allowed to correct.
+            self._situation_since = self._ped
+            self._correction_since = None
+            self._level = 0
+        if self._state == VISIBILITY_RECOVERY:
+            self._lost = True
+            return
+        if not self._lost or situation in VISIBILITY_PROBLEMS or not self._hands_ok:
+            return
+        self._lost = False
+        self._level = 0
+        self._correction_since = None
+        self._last_delivery.clear()
+        self._suppressed = None
+        self._queue(moment, self._render(RECOVERY_LINE_KEY))
+        self._queue(moment, self._render(LAUNCH_KEY, a=self._a, b=self._b))
+        if self._past_initial_silence():
+            self._recover_until = moment + self.effective("recovery_grace_ms") / MS_PER_S
+
+    @property
+    def in_recovery(self) -> bool:
+        """Whether the grace after a blind spell is still running."""
+        return (self._recover_until is not None and self._now is not None
+                and self._now < self._recover_until)
+
+    def _queue(self, due: float, line: str | None) -> None:
+        """A line to hand over as soon as a message can carry it."""
+        if line is not None:
+            self._queued.append((due, line))
+
+    def _release_queued(self, moment: float) -> None:
+        """One queued line per message, in the order they were queued.
+
+        The acknowledgement of a confirmed pose always wins the message it lands
+        on: a yes the child has earned is never held behind anything.
+        """
+        if self._pending_line is not None or not self._queued:
+            return
+        due, line = self._queued[0]
+        if moment < due:
+            return
+        self._queued.pop(0)
+        self._say(line, moment)
+        self._pending_line = line
         self._pending_cuts = False
 
     # -- perception helpers --------------------------------------------------
@@ -1733,6 +1819,9 @@ class Tutor:
         self._ack_due = 0.0
         self._cue_line: str | None = None
         self._cue_due = 0.0
+        self._queued: list[tuple[float, str]] = []
+        self._lost = False
+        self._recover_until: float | None = None
         self._beat: dict[str, Any] | None = None
         self._answered = False
         self._answer_correct = False

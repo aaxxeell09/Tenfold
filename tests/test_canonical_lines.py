@@ -246,7 +246,7 @@ def test_every_line_of_the_file_is_reachable() -> None:
     assert set(raw) <= known, sorted(set(raw) - known)
     used = set(tally.KEYS.values()) | set(tally.DETAILED_KEYS.values())
     used |= {tally.FALLBACK_KEY, tally.NEUTRAL_KEY, "launch"}
-    used |= set(live.LINE_KEYS) | {live.ACK_LINE_KEY}
+    used |= set(live.LINE_KEYS) | {live.ACK_LINE_KEY, live.RECOVERY_LINE_KEY}
     assert set(raw) <= used, sorted(set(raw) - used)
     for key in used - {live.NEXT_LINE_KEY}:
         assert key in raw, key
