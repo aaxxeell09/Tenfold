@@ -191,6 +191,12 @@ TUTOR_FIELDS: dict[str, Any] = {
     "scored_math_error": False,
     "first_try": False,
     "mode": "normal",
+    # The one line allowed to cut what the page is saying: the acknowledgement of
+    # a confirmed pose, contract section 4.2 as amended.
+    "tutor_line_cuts": False,
+    # The success beat the page choreographs between exercises. One shot, null on
+    # every other message, so a page replaying it cannot loop the celebration.
+    "tutor_beat": None,
 }
 # The three per learner factors that ride on the learner record under "tutor",
 # contract section 2.4. The server carries them, the tutor owns their values.
@@ -218,6 +224,7 @@ TUTOR_NAMES = {
     "speech": "speech",
     "hint": "hint_requested",
     "answer": "answer",
+    "line_drop": "line_dropped",
     # what the tutor decides
     "decision": "state_fields",
     "factors": "learner_factors",
@@ -284,7 +291,9 @@ def build_message(update: Update, fingers: list[dict[str, Any]],
                   hint_auto: bool = False,
                   tutor: dict[str, Any] | None = None) -> dict[str, Any]:
     context = {"hint": update.hint, "answer": update.answer,
-               "exercise": update.exercise.title}
+               "exercise": update.exercise.title,
+               # A fact the child has never met is announced, not reviewed.
+               "seen": pick.seen if pick else True}
     # A reaction from the scheduler outranks the screen state: it is the thing
     # Tally actually wants to say at this moment.
     moment = reaction or moment_of(update, hands_seen)
@@ -571,6 +580,12 @@ class TutorLink:
 
     def asked_for_help(self, now: float) -> None:
         self._absorb(self._send("hint", now=now))
+
+    def line_dropped(self, line: Any, reason: Any, at: Any, now: float) -> None:
+        """A line the page could not speak. Diagnostic only: it scores nothing,
+        moves no ladder and changes no state, it is written to the tutor log so
+        the lines that never reach the child stop being invisible."""
+        self._absorb(self._send("line_drop", line=line, reason=reason, at=at, now=now))
 
     def answered(self, correct: bool, value: int | None, now: float) -> None:
         self._absorb(self._send("answer", correct=correct, value=value, now=now))
@@ -1134,6 +1149,8 @@ class Lesson:
                 self._tts(bool(message.get("speaking")))
             elif kind == "speech":
                 self._speech(message.get("text"))
+            elif kind == "line_drop":
+                self._line_dropped(message)
             elif kind == "repeat":
                 self.push(self.engine.repeat())
 
@@ -1171,6 +1188,13 @@ class Lesson:
         if not text:
             return
         self.tutor.heard(text, time.monotonic())
+
+    def _line_dropped(self, message: dict[str, Any]) -> None:
+        """The page could not speak a line. Nothing here may raise or filter:
+        this is data about things going wrong, and the tutor is the one that
+        decides what a usable reason looks like."""
+        self.tutor.line_dropped(message.get("line"), message.get("reason"),
+                                message.get("at"), time.monotonic())
 
     def _hint_asked(self) -> None:
         """The child asked for the next level of help.
@@ -1422,8 +1446,16 @@ def encode_jpeg(frame: Any) -> bytes:
     return buffer.tobytes() if ok else b""
 
 
-def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None) -> None:
+def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None,
+                camera_name: str | None = None, mirror: bool = True) -> None:
     """Camera, landmarks, normalize, classifier, engine. One frame at a time.
+
+    The frame is mirrored once, here, and that one flip decides three things at
+    the same time, so they cannot drift apart: the child sees a mirror, the
+    detector gets the selfie orientation MediaPipe expects, and the hand at the
+    smaller x is the child's own left hand (SPEC.md 5.2, classifier/schema.py).
+    A camera that already mirrors its own picture would invert all three at
+    once, which is what --no-mirror is for.
 
     Every step is inside the one try, including loading the classifier and
     building the detector: those two raise on a rules file that will not import
@@ -1442,7 +1474,10 @@ def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None)
         from classifier.loader import load_classifier
 
         try:
-            camera, _ = open_camera(camera_index)
+            # The name preference only travels when one was asked for, so the
+            # ordinary path stays the single argument call it has always been.
+            wanted = {"name": camera_name} if camera_name else {}
+            camera, _ = open_camera(camera_index, **wanted)
         except CameraError as error:
             # The likeliest failure of the whole demo: another app holds the
             # webcam, or the permission was never granted. Say it on the page,
@@ -1469,7 +1504,8 @@ def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None)
                 time.sleep(READ_RETRY_S)
                 continue
             failures = 0
-            frame = cv2.flip(frame, 1)
+            if mirror:
+                frame = cv2.flip(frame, 1)
             lesson.hub.set_frame(encode_jpeg(frame))
             window = normalizer.update(detector.detect(frame))
             verdict = classify(window)
@@ -1733,14 +1769,15 @@ def make_scheduler(demo: bool = False) -> Scheduler:
 
 
 def create_app(mock: bool = False, camera: int | None = None,
-               demo: bool = False) -> web.Application:
+               demo: bool = False, camera_name: str | None = None,
+               mirror: bool = True) -> web.Application:
     """Wire the hub, the lesson and the worker thread into one aiohttp app.
 
     Split out of main so the tests can drive the whole thing in mock mode without
     a camera, a browser or a port.
     """
     hub = Hub()
-    lesson = Lesson(Engine(), hub, make_scheduler)
+    lesson = Lesson(Engine(params=load_tutor_params().get("global", {})), hub, make_scheduler)
     lesson.demo_available = demo
     # data/tutor_log.jsonl is the dataset Loop 2 is built on, so a run with no
     # camera in front of a child never writes a line into it.
@@ -1757,7 +1794,7 @@ def create_app(mock: bool = False, camera: int | None = None,
     stop = threading.Event()
     worker = threading.Thread(
         target=mock_loop if mock else camera_loop,
-        args=(lesson, stop) if mock else (lesson, stop, camera),
+        args=(lesson, stop) if mock else (lesson, stop, camera, camera_name, mirror),
         daemon=True,
         name="tenfold-capture",
     )
@@ -1788,11 +1825,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--camera", type=int, default=None,
-                        help="camera index, probed over 0 to 3 when not given")
+                        help="camera index, probed over 0 to 3 when not given. "
+                             "Wins over --camera-name when both are given")
+    parser.add_argument("--camera-name", default=None,
+                        help="use the camera whose name contains this, case "
+                             "insensitively. Without it the built in camera is "
+                             "preferred and an iPhone is never picked")
     parser.add_argument("--mock", action="store_true",
                         help="no camera, cycle the three states every 2 s")
     parser.add_argument("--demo", action="store_true",
                         help=f"run the fixed sequence in {DEFAULT_SCENARIO}")
+    parser.add_argument("--no-mirror", action="store_true",
+                        help="the camera already mirrors its own picture, so do "
+                             "not mirror it again. Raise your left hand: if it "
+                             "shows on the right of the screen, you need this")
     parser.add_argument("--no-open", action="store_true", help="do not open the browser")
     args = parser.parse_args(argv)
 
@@ -1800,7 +1846,8 @@ def main(argv: list[str] | None = None) -> int:
     load_env()
     enable_tutor()
 
-    app = create_app(mock=args.mock, camera=args.camera, demo=args.demo)
+    app = create_app(mock=args.mock, camera=args.camera, demo=args.demo,
+                     camera_name=args.camera_name, mirror=not args.no_mirror)
 
     url = f"http://localhost:{args.port}"
     labels = [name for name, on in (("mock", args.mock), ("demo", args.demo)) if on]

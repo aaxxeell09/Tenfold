@@ -12,9 +12,15 @@ TRAIN REPORT (eval/last_train_report.json):
 below the others, say so: the metric gate rejects any patch that drops a class or a condition by more than 5
 points, so the patch agent needs to know which views are fragile.
 
+`failures_by_class` counts failed windows and failed holds per class, the class costing the most holds first, and
+`worst_samples` takes failures from those classes in turn. Aim at the failure family that costs the most failed
+holds, negatives included: `transition`, `out_of_frame` and `partial_hand` must come back unknown, and a hold lost
+there counts as much as a positive. A fix that rescues many failed holds beats a nudge to a class that is already
+mostly right, and a constant change that wins one or two windows on train rarely holds up on other hands.
+
 Produce exactly this, nothing else:
 
-DIAGNOSIS: <one sentence: the most frequent failure and the classes it hits, with the numbers from the report>
+DIAGNOSIS: <one sentence: the failure family that costs the most failed holds and the classes it hits, with the numbers from the report>
 HYPOTHESIS: <one sentence: the mechanism in rules.py that causes it>
 EVIDENCE: <one or two lines quoting sample ids and the distances or flags that support the hypothesis>
 

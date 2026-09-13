@@ -541,6 +541,43 @@ def test_the_demo_scenario_respects_the_two_pick_rules():
         assert not shared, f"factor {shared} three times in the demo"
 
 
+def test_the_demo_sequence_is_unchanged_step_by_step():
+    """The stage sequence, written out. Widening the lesson must not reach the
+    scripted path: the demo plays the file, in that order, with those hands."""
+    expected = [
+        {"fact": "7x8", "left": 8, "right": 7, "pose": "8x7",
+         "reason": "review", "is_new": False, "seen": True},
+        {"fact": "6x8", "left": 6, "right": 8, "pose": "6x8",
+         "reason": "next_new", "is_new": True, "seen": True},
+        {"fact": "6x6", "left": 6, "right": 6, "pose": "6x6",
+         "reason": "confidence", "is_new": False, "seen": True},
+        {"fact": "7x8", "left": 7, "right": 8, "pose": "7x8",
+         "reason": "retry", "is_new": False, "seen": True},
+        {"fact": "6x8", "left": 8, "right": 6, "pose": "8x6",
+         "reason": "next_new", "is_new": False, "seen": True},
+        {"fact": "10x10", "left": 10, "right": 10, "pose": "10x10",
+         "reason": "level_up", "is_new": False, "seen": True},
+    ]
+    engine = ScriptedScheduler.load(REPO / "demo" / "scenario.json",
+                                    state=LearnerState.new(T0), now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    played = []
+    now = T0
+    while True:
+        pick = engine.next_exercise(now)
+        if pick is None:
+            break
+        played.append(pick.to_dict())
+        engine.record(answered(pick), now=now)
+        now += timedelta(seconds=15)
+    assert played == expected, "the demo drifted"
+
+    scenario = json.loads((REPO / "demo" / "scenario.json").read_text())
+    for step, want in zip(scenario["exercises"], expected):
+        assert step["fact"] == want["fact"]
+        assert step["left"] == want["left"] and step["right"] == want["right"]
+
+
 def test_the_demo_never_plays_the_onboarding():
     engine = ScriptedScheduler.load(REPO / "demo" / "scenario.json",
                                     state=LearnerState.new(T0), now=T0)
@@ -575,7 +612,9 @@ def test_the_pick_rules_hold_even_when_almost_nothing_is_known():
 # --- course nodes ------------------------------------------------------------
 
 
-def test_a_node_scopes_new_material_to_its_own_pairs():
+def test_a_node_opens_on_its_own_pairs_and_only_teaches_them():
+    """The node is the theme of the lesson, and the only place new material can
+    be opened. The rest of the lesson is practice drawn from the whole range."""
     state = learner(sessions=3)
     engine = Scheduler(state, now=T0)
     engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
@@ -585,7 +624,9 @@ def test_a_node_scopes_new_material_to_its_own_pairs():
         assert pick is not None
         picks.append(pick)
         engine.record(answered(pick), now=T0)
-    assert {p.fact for p in picks} <= {"6x6", "7x7"}
+    assert picks[0].fact in {"6x6", "7x7"}, "a lesson opens on the facts it is named after"
+    assert {p.fact for p in picks} >= {"6x6", "7x7"}, "both pairs are served"
+    assert {p.fact for p in picks if p.is_new} <= {"6x6", "7x7"}
     assert engine.next_exercise(T0) is None, "a lesson is exactly five exercises"
 
 
@@ -619,19 +660,93 @@ def test_a_node_uses_the_orientations_it_lists():
     seen = set()
     for _ in range(4):
         pick = engine.next_exercise(T0)
-        seen.add((pick.left, pick.right))
+        if pick.fact == "6x8":
+            seen.add((pick.left, pick.right))
         engine.record(answered(pick), now=T0)
-    assert seen == {(6, 8), (8, 6)}
+    assert seen == {(6, 8), (8, 6)}, "both listed orientations are asked"
 
 
 def test_a_node_with_one_orientation_never_flips_it():
+    """The lesson widens past the single pair, but that pair is only ever asked
+    the way the node lists it."""
     state = learner(sessions=3)
     engine = Scheduler(state, now=T0)
     engine.start_session(T0, pairs=[[9, 6]], length=3)
+    served = 0
     for _ in range(3):
         pick = engine.next_exercise(T0)
-        assert (pick.left, pick.right) == (9, 6)
+        if pick.fact == "6x9":
+            served += 1
+            assert (pick.left, pick.right) == (9, 6)
         engine.record(answered(pick), now=T0)
+    assert served >= 1, "the node's own pair is served"
+
+
+def test_a_widened_fact_the_child_has_never_met_is_not_marked_seen():
+    """The lesson fills its count from the whole range, so it can hand the child
+    a fact for the first time. The pick has to say so, or the phrase layer calls
+    a first meeting a review."""
+    state = LearnerState.new(T0)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 7], [7, 6]], length=5)
+    picks = []
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        picks.append(pick)
+        engine.record(answered(pick), now=T0)
+
+    widened = [pick for pick in picks if pick.fact != "6x7"]
+    assert widened, "the lesson widened past its node"
+    for pick in widened:
+        assert pick.seen is False, f"{pick.fact} was never attempted before"
+        assert pick.is_new is False, "widening is practice, never new material"
+
+
+def test_a_fact_the_child_has_met_is_marked_seen_wherever_it_comes_from():
+    """Inside the node or outside it, the history is the only thing that counts."""
+    state = learner(sessions=3, **{"10x10": 1, "6x6": 2})
+    state.fact("10x10").due_session = 4
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    seen_by_fact = {}
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        seen_by_fact.setdefault(pick.fact, pick.seen)
+        engine.record(answered(pick), now=T0)
+
+    assert seen_by_fact.get("10x10") is True, "a due fact from outside was met"
+    assert seen_by_fact.get("6x6") is True, "a node fact with history was met"
+    assert seen_by_fact.get("7x7") is False, "the node's untouched pair was not"
+
+
+def test_being_met_before_does_not_move_the_mastery_gate():
+    """seen is wording only. Two first try successes still gate new material,
+    and a widened fact the child never met is still not new material."""
+    state = learner(sessions=3, **{"10x10": 2, "6x10": 2, "7x10": 2})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0)
+    opened = []
+    for _ in range(6):
+        pick = engine.next_exercise(T0)
+        if pick is None:
+            break
+        opened.append(pick.is_new)
+        if not pick.seen:
+            assert pick.is_new or pick.reason != sch.REACTION_NEXT_NEW
+        engine.record(answered(pick, correct=True, hinted=1 if pick.is_new else 0), now=T0)
+    assert opened.count(True) <= 2, "hinted successes must not unlock more new facts"
+
+
+def test_a_scripted_step_is_served_as_written():
+    """The demo says what it says: a scripted pick counts as met, whatever the
+    state behind it, so the stage wording never moves."""
+    engine = ScriptedScheduler.load(REPO / "demo" / "scenario.json",
+                                    state=LearnerState.new(T0), now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    pick = engine.next_exercise(T0)
+    assert pick is not None and pick.seen is True
 
 
 def test_a_due_review_from_another_node_may_be_inserted():
@@ -701,9 +816,9 @@ def test_the_opening_exercise_is_the_fragile_fact_of_the_node_and_costs_nothing(
     assert engine.outside_reviews == 0, "an opening in scope spends no outside review"
 
 
-def test_a_node_never_serves_more_than_one_fact_from_outside_itself():
-    """Even with mastered facts and due facts waiting outside, and even when
-    every answer is wrong, which is what buys a confidence exercise."""
+def test_a_lesson_widens_past_its_node_to_fill_the_count():
+    """The node cannot fill five questions with two pairs without repeating, so
+    the lesson draws on the other tables once its own theme is served."""
     state = learner(sessions=3, **{"10x10": 5, "6x10": 5, "9x9": 4, "7x10": 1})
     state.fact("7x10").due_session = 4
     engine = Scheduler(state, now=T0)
@@ -713,23 +828,32 @@ def test_a_node_never_serves_more_than_one_fact_from_outside_itself():
         pick = engine.next_exercise(T0)
         assert pick is not None
         facts.append(pick.fact)
-        engine.record(answered(pick, correct=False), now=T0)
+        engine.record(answered(pick), now=T0)
 
-    # One fact from outside may be slipped in, and it may come back as its own
-    # retry. A second outside fact may not.
-    outside = {key for key in facts if key not in {"6x6", "7x7"}}
-    assert len(outside) <= sch.MAX_OUTSIDE_REVIEWS, facts
+    assert facts[0] in {"6x6", "7x7"}, "the theme still opens the lesson"
+    assert {"6x6", "7x7"} <= set(facts), "the theme is served"
+    outside = [key for key in facts if key not in {"6x6", "7x7"}]
+    assert len(outside) == 3, facts
+    assert engine.outside_reviews == 3, "the count is kept, it is no longer a budget"
 
 
-def test_the_confidence_exercise_after_two_errors_stays_in_the_node():
-    state = learner(sessions=3, **{"10x10": 5, "6x10": 5, "6x6": 1, "7x7": 5})
+def test_the_confidence_exercise_prefers_the_node_then_widens():
+    """Two errors buy a solid fact. The node's own solid fact comes first, and
+    when it is the fact that was just missed the lesson reaches outside rather
+    than hand back the question the child has just failed."""
+    state = learner(sessions=3, **{"10x10": 5, "6x10": 5, "6x6": 1, "7x7": 5,
+                                   "8x9": 5})
     engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
-    for _ in range(2):
-        pick = engine.next_exercise(T0)
-        engine.record(answered(pick, correct=False), now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [8, 9]], length=5)
+    first = engine.next_exercise(T0)
+    assert first.fact == "6x6", "the fragile fact of the node opens"
+    engine.record(answered(first, correct=False), now=T0)
+    second = engine.next_exercise(T0)
+    engine.record(answered(second, correct=False), now=T0)
     pick = engine.next_exercise(T0)
-    assert pick.fact in {"6x6", "7x7"}, "a mastered fact from another unit is out of scope"
+    assert pick.reason == sch.REACTION_CONFIDENCE
+    assert state.math[pick.fact].mastery >= sch.MASTERED_FROM
+    assert pick.fact not in {first.fact, second.fact}, "never the fact just failed"
 
 
 def test_mastered_facts_are_only_the_ones_in_scope():
@@ -766,9 +890,110 @@ def test_a_node_orientation_keeps_alternating_over_a_long_session():
     for _ in range(10):
         pick = engine.next_exercise(T0)
         assert pick is not None
-        seen.append((pick.left, pick.right))
+        if pick.fact == "6x8":
+            seen.append((pick.left, pick.right))
         engine.record(answered(pick), now=T0)
-    assert seen.count((6, 8)) == 5 and seen.count((8, 6)) == 5
+    assert seen == [(6, 8), (8, 6)] or seen == [(8, 6), (6, 8)], seen
+
+
+# --- variety -----------------------------------------------------------------
+
+
+def test_a_five_question_lesson_serves_five_different_facts():
+    """The complaint that started this: every lesson repeated the same facts.
+    Two pairs cannot fill five questions, so the lesson widens."""
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 7], [7, 8]], length=5)
+    facts = []
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        facts.append(pick.fact)
+        engine.record(answered(pick), now=T0)
+    assert len(set(facts)) == 5, facts
+    assert facts[0] in {"6x7", "7x8"}, "and it still opens on its own theme"
+
+
+def test_a_wrong_fact_comes_back_and_is_the_only_repeat():
+    state = learner(sessions=3)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 7], [7, 8]], length=6)
+    facts = []
+    for index in range(6):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        facts.append(pick.fact)
+        engine.record(answered(pick, correct=index > 0), now=T0)
+    missed = facts[0]
+    assert facts.count(missed) == 2, f"the missed fact comes back: {facts}"
+    assert len(facts) - len(set(facts)) == 1, f"and nothing else repeats: {facts}"
+
+
+def test_orientation_flips_when_a_fact_comes_back():
+    """A double has one orientation and a node keeps the ones it lists, so this
+    is the open session and a plain fact: asked again, it is asked the other way
+    round."""
+    state = learner(sessions=3, **{k.replace("x", "_"): 2 for k in DIFFICULTY_ORDER})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0)
+    poses: dict[str, list[tuple[int, int]]] = {}
+    missed: str | None = None
+    for _ in range(8):
+        pick = engine.next_exercise(T0)
+        if pick is None:
+            break
+        poses.setdefault(pick.fact, []).append((pick.left, pick.right))
+        low, high = factors_of(pick.fact)
+        wrong = missed is None and low != high
+        if wrong:
+            missed = pick.fact
+        engine.record(answered(pick, correct=not wrong), now=T0)
+
+    assert missed is not None
+    seen = poses[missed]
+    assert len(seen) == 2, f"the missed fact comes back once: {poses}"
+    assert seen[0] != seen[1] and seen[0] == (seen[1][1], seen[1][0])
+
+
+def test_never_the_same_table_twice_in_a_row_over_a_long_session():
+    for pairs, length in (([[6, 7], [7, 8]], 10), ([[9, 9]], 8), (None, None)):
+        state = learner(sessions=3, **{k.replace("x", "_"): 2 for k in DIFFICULTY_ORDER})
+        engine = Scheduler(state, now=T0)
+        engine.start_session(T0, pairs=pairs, length=length)
+        picks = []
+        for _ in range(length or 10):
+            pick = engine.next_exercise(T0)
+            if pick is None:
+                break
+            picks.append(pick)
+            engine.record(answered(pick), now=T0)
+        assert len(picks) >= 6, picks
+        for i in range(1, len(picks)):
+            shared = set(factors_of(picks[i].fact)) & set(factors_of(picks[i - 1].fact))
+            assert not shared, (
+                f"table {shared} twice in a row at {i} for {pairs}: "
+                f"{[p.fact for p in picks[:i + 1]]}")
+
+
+def test_a_first_lesson_opens_on_its_pairs_and_draws_from_the_whole_range():
+    """A brand new child has no history to unlock anything with, and does not
+    need one: the tables are six to ten for everybody."""
+    state = LearnerState.new(T0)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 7], [7, 6]], length=5)
+    facts = []
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        facts.append(pick.fact)
+        engine.record(answered(pick), now=T0)
+    assert facts[0] == "6x7", "the lesson opens on the pair it is named after"
+    assert len(set(facts)) >= 4, facts
+    assert set(facts) - {"6x7"}, "and it draws on the other tables to fill up"
+    for key in facts:
+        low, high = factors_of(key)
+        assert low in sch.FACTORS and high in sch.FACTORS
 
 
 # --- the error profile names the hand ----------------------------------------

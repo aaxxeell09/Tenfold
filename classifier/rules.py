@@ -21,14 +21,50 @@ Hypothesis log (one line per accepted patch, newest last):
   CONTACT_THRESHOLD 0.2975 -> 0.2826 fixes near-contact samples (e.g. class 9x6) sitting just above the
   old threshold, near_contact_accuracy 0.736 -> 0.778, exact_match 0.497 -> 0.500, false_unknown_rate
   unchanged at 0.047, no class regressed.
+- v4: diagnosis's "no frame with both hands present" claim for 6x6/6x8/6x9 (s000001, s000002, s000010,
+  s000011, s000012) does not hold: both_present_frames on those windows is empty regardless of the finite
+  check, i.e. no rule can recover them (tracker hand loss). Measured instead that the biggest reachable
+  failure is last-frame pair noise (e.g. s000421, s000426: 3-4 of 5 frames agree on one pair, the last
+  frame flips to a neighbour by a hair). A flat vote/average over the window was already tried (v2) and
+  regresses a small class every time (this run: near:10x8 or 8x10 depending on window size), because early
+  frames of a settling hand outvote a decisive last frame. Instead only fall back to the window average
+  when the last frame's own top two pairs are within AMBIGUITY_MARGIN=0.025 of each other (a coin flip);
+  otherwise keep trusting the last frame as before. exact_match 0.500 -> 0.505, false_unknown_rate
+  unchanged at 0.047, no class regressed beyond the gate's limit.
 """
 from __future__ import annotations
 
+import numpy as np
+
 from classifier import features
-from classifier.schema import GestureState, Window
+from classifier.schema import FINGER_NUMBERS, GestureState, Window
 
 CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale
 UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer
+AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the last frame's own top pair is a coin flip
+
+
+def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:
+    """Nearest pair, falling back to the window average only when the last frame's own choice is ambiguous.
+
+    The last frame alone is what classify() has always used, and it is right the great majority of the
+    time: trusting it by default avoids the regressions seen when every frame is blended (a hand still
+    settling into position early in the window then outvotes a decisive final frame). But when the last
+    frame's closest pair and the next-closest pair are almost tied, a single noisy frame can flip the
+    argmin to the wrong finger. In that narrow case only, average the distance matrix over all finite
+    both-present frames and let the steadier consensus break the tie.
+    """
+    d = features.tip_distance_matrix(*last)
+    flat = np.sort(d.reshape(-1))
+    if flat[1] - flat[0] >= AMBIGUITY_MARGIN:
+        return features.nearest_pair(*last)
+    mats = [m for m in (features.tip_distance_matrix(l, r) for l, r in features.both_present_frames(window))
+            if np.isfinite(m).all()]
+    if len(mats) < 2:
+        return features.nearest_pair(*last)
+    mean_d = np.mean(mats, axis=0)
+    i, j = np.unravel_index(int(np.argmin(mean_d)), mean_d.shape)
+    return FINGER_NUMBERS[i], FINGER_NUMBERS[j], float(d[i, j])
 
 
 def classify(window: Window) -> GestureState:
@@ -39,7 +75,7 @@ def classify(window: Window) -> GestureState:
     confidence = min(float(left.detection_conf), float(right.detection_conf))
     if confidence < UNKNOWN_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
-    lf, rf, dist = features.nearest_pair(left, right)
+    lf, rf, dist = averaged_pair(window, frame)
     return GestureState(
         method="6-10",
         left=lf,

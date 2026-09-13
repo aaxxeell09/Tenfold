@@ -7,9 +7,13 @@ the listening window are the parts that can silently submit a wrong answer.
 The same browser drives the ready gate, which runs before every activity and is
 the one screen that asks for a word rather than a number: its steps, its Ready
 button for a browser that cannot hear, and the skip once a gate has worked.
-The rest of the answer paths around voice are here too: the question counter,
-the first try bonus and the XP a child keeps when quitting, none of which can be
-exercised without a real page.
+The rest of the answer paths around voice are here too: the digits typed in the
+pill, the question counter, the first try bonus and the XP a child keeps when
+quitting, none of which can be exercised without a real page.
+
+One event is shown once: the lesson's answer field is the export's mic pill, and
+the number heard, the digits typed and the listening state all show there. The
+"heard:" readout is a developer's line and only comes back with ?debug=1.
 
 Skipped when playwright or its browser is missing, so make test stays green on a
 machine that has neither.
@@ -217,6 +221,12 @@ def wait_for_state(tab, state: str, timeout: int = 30000):
         timeout=timeout)
 
 
+def pill(tab) -> str:
+    """What the lesson's answer pill says: listening, the digits typed, or the number
+    heard. It is the only place in the lesson an answer is shown."""
+    return tab.inner_text("#lesson .mic .mic-label").strip()
+
+
 def spoken(number: int) -> str:
     """English words for the results this lesson produces, 36 to 100."""
     if number == 100:
@@ -305,8 +315,9 @@ delete window.webkitSpeechRecognition;
 """
 
 
-def test_without_the_api_the_microphone_never_appears(page):
-    """Firefox and Safari have no speech recognition. Keyboard only, no error."""
+def test_without_the_api_the_pill_is_the_typing_field(page):
+    """Firefox and Safari have no speech recognition. Keyboard only, no error, and the
+    pill stays on screen because it is where the digits show."""
     context, url = page
     tab = context.new_page()
     errors = []
@@ -314,12 +325,13 @@ def test_without_the_api_the_microphone_never_appears(page):
     tab.add_init_script(NO_SPEECH_API)
     open_lesson(tab, url)
     tab.wait_for_timeout(500)
-    assert tab.is_hidden("#lesson .mic")
     assert tab.evaluate("Tenfold.voice.recognition") is None
-    assert tab.is_visible("#lesson .answer") and tab.is_visible("#lesson .caret")
+    assert tab.is_visible("#lesson .mic")
+    assert pill(tab).lower() == "type it"
     # the keyboard has to keep working with no speech API at all
     tab.keyboard.type("42")
-    assert tab.inner_text("#lesson .typed") == "42"
+    assert pill(tab) == "42"
+    assert tab.is_hidden("#lesson .typed"), "the big number beside the pill is gone"
     assert errors == []
 
 
@@ -398,10 +410,10 @@ def test_a_refused_microphone_falls_back_to_typing(page):
     tab.wait_for_timeout(300)
     assert tab.evaluate("Tenfold.voice.denied") is True
     assert "is-denied" in tab.get_attribute("#lesson .mic", "class")
-    assert tab.inner_text("#lesson .mic .mic-label").strip().lower() == "type it"
-    assert tab.is_visible("#lesson .caret")
+    assert pill(tab).lower() == "type it"
+    assert tab.is_hidden("#lesson .caret"), "the caret went with the big number"
     tab.keyboard.type("42")
-    assert tab.inner_text("#lesson .typed") == "42"
+    assert pill(tab) == "42"
 
 
 def test_a_spoken_answer_is_sent_and_shown(page):
@@ -415,10 +427,10 @@ def test_a_spoken_answer_is_sent_and_shown(page):
     exercise = tab.inner_text("#lesson .ex").replace("×", "x")
     a, b = (int(part.strip()) for part in exercise.split(" x "))
 
-    # an interim result is shown but never submitted
-    tab.evaluate("() => window.__say('thirty', false)")
+    # an interim result with no number in it moves nothing: the pill keeps listening
+    tab.evaluate("() => window.__say('um', false)")
     tab.wait_for_timeout(150)
-    assert "thirty" in tab.inner_text("#lesson .heard")
+    assert pill(tab).lower() == "listening"
     assert stage_state(tab) == "correct_pose"
 
     tab.evaluate("(text) => window.__say(text, true)", spoken(a * b))
@@ -462,7 +474,7 @@ def test_after_a_wrong_spoken_answer_the_next_spoken_answer_is_heard(page):
 
     tab.evaluate("() => window.__say('forty two', true)")
     assert tab.evaluate("window.__checks") == [52, 42]
-    assert tab.inner_text("#lesson .typed") == "42"
+    assert pill(tab) == "42", "the number heard is shown in the pill"
 
     # once the server moves on, a number heard is no longer an answer
     feed(tab, node, state="answer_correct", exercise="6 x 7", answer=42)
@@ -664,7 +676,7 @@ BOTH_HANDS = [{"hand": hand, "number": 6, "x": 0.3 if hand == "left" else 0.7, "
 # is written by other hands, so the test reads the line from it rather than spelling it
 # out, and covers the gate with the key still missing too: no line is then spoken, and
 # every other thing the step does has to happen all the same.
-READY_LINE_KEY = "check_ready"
+READY_LINE_KEY = "gate_ready"
 READY_LINE = json.loads((REPO / "lesson" / "tally_lines.json").read_text(encoding="utf-8")).get(READY_LINE_KEY, "")
 READY_SAID = [READY_LINE] if READY_LINE else []
 
@@ -680,6 +692,332 @@ def known_child(name: str = "ada") -> str:
     """A child this computer already knows, whose first gate is behind them."""
     return (f"localStorage.setItem('tenfold.child', '{name}');"
             f"localStorage.setItem('{KEY_POSE}.{name}', '1');")
+
+
+def queued_lesson(tab, url):
+    """A lesson with its own socket watched and its own speech engine held open.
+
+    The engine never reports the end of a line by itself, so a line stays on the air
+    for as long as the test needs, which is how the queue can be looked at while it
+    has something in it.
+    """
+    open_lesson(tab, url)
+    node = running_lesson(tab)
+    tab.evaluate(WATCH_SENDS)
+    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; }")
+    tab.evaluate("() => Tenfold.speak('A long instruction still playing.')")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
+    return node
+
+
+def drops(tab):
+    return [(m["line"], m["reason"]) for m in sent(tab, "line_drop")]
+
+
+def test_an_acknowledgement_is_never_dropped_and_cuts_what_is_playing(page):
+    """The measurement that started this: the queue moved slower than the dialogue, so
+    every acknowledgement went stale before its turn and the child was never told yes.
+    An acknowledgement now cuts the line in flight, and staleness cannot touch it."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    queued_lesson(tab, url)
+
+    tab.evaluate("""() => {
+      window.__moved = false;
+      Tenfold.say('Take your time.', null, null,
+        { kind: 'nudge', key: 'hint_1', still: () => !window.__moved });
+      Tenfold.say('Yes, that is it.', null, null,
+        { kind: 'ack', key: 'correct_pose', still: () => !window.__moved });
+      window.__moved = true;
+    }""")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    assert said(tab)[1] == "Yes, that is it.", "the acknowledgement waited its turn"
+    assert tab.evaluate("window.__cancelled") >= 1, "the line in flight was not cut"
+
+    # the nudge behind it is no longer true, so it goes, and it goes on the record
+    tab.evaluate("() => { window.__endUpTo = 99; window.__finish(); window.__finish(); }")
+    tab.wait_for_timeout(600)
+    assert said(tab) == ["A long instruction still playing.", "Yes, that is it."]
+    assert drops(tab) == [("hint_1", "no_longer_true")]
+    assert all(m["at"] > 0 for m in sent(tab, "line_drop")), "a drop is stamped with its moment"
+
+
+def test_a_newer_nudge_replaces_the_one_still_waiting(page):
+    """Only the newest nudge is worth saying, and the one it replaces is reported."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    queued_lesson(tab, url)
+    tab.evaluate("""() => {
+      Tenfold.say('Look at your hands.', null, null, { kind: 'nudge', key: 'hint_1' });
+      Tenfold.say('See the faint circle.', null, null, { kind: 'nudge', key: 'hint_2' });
+    }""")
+    tab.wait_for_timeout(200)
+    assert drops(tab) == [("hint_1", "replaced_by_newer_of_same_kind")]
+    tab.evaluate("() => { window.__endUpTo = 99; window.__finish(); }")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    tab.wait_for_timeout(400)
+    assert said(tab) == ["A long instruction still playing.", "See the faint circle."]
+
+
+def test_a_correction_is_kept_and_spoken_to_the_end(page):
+    """The queue holds one line behind the one being spoken. When it is full the line
+    that goes is never the correction, and a correction already on the air is never cut
+    by the one that follows it."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    queued_lesson(tab, url)
+    tab.evaluate("""() => {
+      Tenfold.say('Move your left finger to seven.', null, null,
+        { kind: 'correction', key: 'wrong_left_finger' });
+      Tenfold.say('Take your time.', null, null, { kind: 'nudge', key: 'hint_1' });
+    }""")
+    tab.wait_for_timeout(200)
+    assert drops(tab) == [("hint_1", "queue_full")], "the correction was dropped for a nudge"
+
+    # the correction takes the air and keeps it: a nudge behind it does not cut it
+    tab.evaluate("() => { window.__endUpTo = 2; window.__finish(); }")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    assert said(tab)[1] == "Move your left finger to seven."
+    cancelled = tab.evaluate("window.__cancelled")
+    tab.evaluate("() => Tenfold.say('Almost there.', null, null, { kind: 'nudge', key: 'hint_2' })")
+    tab.wait_for_timeout(300)
+    assert said(tab)[-1] == "Move your left finger to seven.", "the correction was cut off"
+    assert tab.evaluate("window.__cancelled") == cancelled
+
+
+def test_the_pose_turns_green_before_tally_has_finished_talking(page):
+    """Visual before voice. The pose is confirmed, so the picture says yes on that tick
+    and the two touching fingertips are marked, whatever Tally is still saying."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    node = queued_lesson(tab, url)
+    fingers = [{"hand": "left", "number": 6, "x": 0.3, "y": 0.5},
+               {"hand": "right", "number": 7, "x": 0.7, "y": 0.5}]
+    feed(tab, node, state="correct_pose", exercise="6 x 7", fingers=fingers,
+         match=[{"hand": "left", "number": 6}, {"hand": "right", "number": 7}])
+    # no wait at all: the same tick as the message
+    assert tab.get_attribute("#lesson .frame", "data-state") == "yes"
+    assert "yes" in tab.get_attribute("#lesson .frame", "class")
+    assert tab.eval_on_selector_all("#lesson .gh g.fin.on.want", "els => els.length") == 2
+    # and Tally is demonstrably still talking while the screen already says yes
+    assert tab.evaluate("window.__spoken.length") == 1
+
+
+def test_the_pill_holds_the_number_heard_and_nothing_else_shows_it(page):
+    """One event, shown once. The number heard goes in the pill, with the bars stopped,
+    for the time it takes the tutor to answer. The big number and the "heard:" line that
+    used to show the same event alongside it are off the screen."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
+    assert pill(tab).lower() == "listening"
+    bars = ("() => Array.from(document.querySelectorAll('#lesson .mic .bars i'))"
+            ".map((b) => getComputedStyle(b).animationName)")
+    assert tab.evaluate(bars) and all(name == "mic" for name in tab.evaluate(bars)), \
+        "the bars are running while Tally listens"
+
+    tab.evaluate("() => window.__say('eleven', false)")
+    assert pill(tab) == "11"
+    assert all(name == "none" for name in tab.evaluate(bars)), "the bars kept moving on a number"
+    assert tab.is_hidden("#lesson .typed") and tab.is_hidden("#lesson .caret")
+    assert tab.is_hidden("#lesson .heard")
+
+    # the pill goes back to listening once the number has been shown
+    tab.wait_for_function("() => document.querySelector('#lesson .mic .mic-label')"
+                          ".textContent.trim().toLowerCase() === 'listening'", timeout=5000)
+    assert all(name == "mic" for name in tab.evaluate(bars))
+
+
+# The success beat, as the tutor sends it: one message carries the whole thing, and the
+# page reads its numbers rather than inventing them.
+SUCCESS_BEAT = {"kind": "success", "parts": ["line", "halo", "stars", "counter"],
+                "success_ms": 900, "pause_ms": 600, "total_ms": 1500,
+                "line": "Yes. Six times seven is forty two.", "next_line": None}
+
+
+def listening(tab, timeout: int = 1000):
+    tab.wait_for_function("() => document.querySelector('#lesson .mic .mic-label')"
+                          ".textContent.trim().toLowerCase() === 'listening'", timeout=timeout)
+
+
+def test_the_pill_drops_the_number_on_the_success_beat(page):
+    """One number belongs to one exercise. The success beat is where it goes: the pill
+    is listening again from the start of the beat, well before the hold it would have
+    run out on, and the next exercise is armed with nothing of the last one on screen."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + CAPTURE_SOCKET)
+    open_lesson(tab, url)
+    node = running_lesson(tab)
+    feed(tab, node, state="correct_pose")
+    tab.evaluate("() => { window.__t0 = Date.now(); window.__say('forty two', true); }")
+    assert pill(tab) == "42"
+
+    feed(tab, node, state="answer_correct", answer=42, first_try=True, tutor_beat=SUCCESS_BEAT)
+    listening(tab, timeout=600)
+    spent = tab.evaluate("() => Date.now() - window.__t0")
+    assert spent < 800, f"the pill was cleared by its own hold after {spent} ms, not by the beat"
+
+    # the new exercise is armed empty
+    feed(tab, node, state="exercise_shown")
+    tab.wait_for_timeout(150)
+    assert pill(tab).lower() == "listening"
+
+    # and a number the exercise ended badly on is gone by the next one too
+    feed(tab, node, state="correct_pose")
+    tab.evaluate("() => window.__say('eleven', true)")
+    assert pill(tab) == "11"
+    feed(tab, node, state="answer_wrong", answer=11)
+    feed(tab, node, state="exercise_shown")
+    tab.wait_for_timeout(150)
+    assert pill(tab).lower() == "listening"
+
+
+def test_a_lesson_line_never_plays_over_the_finish_card(page):
+    """Every view change cuts the dialogue: the queue is emptied and the utterance in
+    flight is cancelled, so a long lesson line is silent the moment the card appears and
+    the card's own line is the only thing spoken on it."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_lesson(tab, url)
+    node = running_lesson(tab)
+    # a line the engine never reports the end of: it is still in the air, with another
+    # waiting behind it, when the node ends
+    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; window.__cancelled = 0; }")
+    feed(tab, node, state="wrong_pose", tutor_line="Count the tens again, slowly, and keep the fingers touching.")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
+    feed(tab, node, state="wrong_pose", tutor_line="And then check the fingers above the two that touch.")
+
+    tab.evaluate("(id) => window.__feed({ type: 'node_end', node_id: id, correct: 5, total: 5, tally: 'Lovely work.' })", node)
+    tab.wait_for_selector("#finish", state="visible", timeout=10000)
+    assert tab.evaluate("window.__cancelled") >= 1, "the utterance in flight was not cancelled"
+    tab.wait_for_function("window.__spoken.some((u) => u.text === 'Lovely work.')", timeout=10000)
+    tab.wait_for_timeout(1400)
+    assert said(tab)[1:] == ["Lovely work."], "a lesson line was spoken over the finish card"
+
+
+def test_the_heard_line_is_debug_only(page):
+    """The "heard:" readout is for a developer. It is off the screen unless the url asks
+    for it with ?debug=1."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
+    tab.evaluate("() => window.__say('eleven', false)")
+    tab.wait_for_timeout(200)
+    assert tab.is_hidden("#lesson .heard")
+    assert tab.inner_text("#lesson .heard").strip() == ""
+
+    debug = context.new_page()
+    debug.add_init_script(FAKE_RECOGNITION)
+    open_lesson(debug, url + "?debug=1")
+    wait_for_state(debug, "correct_pose")
+    debug.evaluate("() => window.__say('eleven', false)")
+    debug.wait_for_timeout(200)
+    assert debug.is_visible("#lesson .heard")
+    assert "heard: eleven" in debug.inner_text("#lesson .heard")
+
+
+def test_the_answer_goes_on_the_first_number_heard(page):
+    """Speech recognition hands over interim results long before the end of the
+    utterance. The answer leaves on the first one that parses to a number: waiting for
+    the final result is a wait the child sees on the screen."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
+    tab.evaluate(WATCH_SENDS)
+    # no final result at all, only what the recogniser thinks so far
+    tab.evaluate("() => window.__say('eleven', false)")
+    tab.wait_for_timeout(300)
+    assert checks(tab) == [11], "the answer waited for the end of the utterance"
+    assert pill(tab) == "11", "the number heard is held in the pill"
+    # the sentence itself still goes to the server on the final result, not before
+    assert sent(tab, "speech") == []
+    tab.evaluate("() => window.__say('eleven', true)")
+    tab.wait_for_timeout(300)
+    assert [m["text"] for m in sent(tab, "speech")] == ["eleven"]
+    # settle time is a parameter, and it is off unless the server asks for it
+    assert tab.evaluate("Tenfold.timing.answer_first_number_ms") == 0
+
+
+def test_an_interim_number_and_its_final_are_one_answer(page):
+    """One breath reaches the page twice, as an interim result and then as the final
+    one. That is one answer, not two."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
+    tab.evaluate(WATCH_SENDS)
+    tab.evaluate("() => { window.__say('eleven', false); window.__say('eleven', true); }")
+    tab.wait_for_timeout(400)
+    assert checks(tab) == [11], "the same number was sent twice"
+
+
+def test_the_check_steps_turn_with_no_wait_at_all(page):
+    """The step is not on a clock. The moment the camera says the condition is true the
+    step is turned, in the same breath as the message that carried it: check_step_min_ms
+    is zero unless the server sets it, and zero means no wait at all."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_check(tab, url)
+    tab.wait_for_function("window.__spoken.length === 1", timeout=10000)
+    assert tab.evaluate("Tenfold.timing.check_step_min_ms") == 0
+    assert tab.evaluate("Tenfold.checkStep") == 1
+
+    # both hands seen: the step is already turned when the message handler returns
+    step = tab.evaluate("(m) => { window.__feed(m); return Tenfold.checkStep; }",
+                        state_message("check", state="waiting_pose", fingers=BOTH_HANDS))
+    assert step == 2, "the step sat on a clock after the hands were seen"
+
+    # the pose is right: the same, with no minimum display time on step 2 either
+    step = tab.evaluate("(m) => { window.__feed(m); return Tenfold.checkStep; }",
+                        state_message("check", state="correct_pose", fingers=BOTH_HANDS))
+    assert step == 3, "the step sat on a clock after the pose was right"
+
+
+def test_the_line_marked_by_the_server_cuts_the_one_in_flight(page):
+    """The acknowledgement is the one line allowed to cut. A line marked able to
+    interrupt ends the line being spoken and takes its place; an ordinary line asked for
+    at the same moment still waits its turn and its beat."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    # the engine never reports the end by itself: the first line stays on the air
+    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; }")
+    tab.evaluate("() => Tenfold.speak('A long instruction.')")
+    tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
+
+    tab.evaluate("""() => {
+      Tenfold.say('Ordinary line.', null, null, {});
+      Tenfold.say('Yes, that is it.', null, null, { interrupt: true });
+    }""")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    tab.wait_for_timeout(300)
+    assert said(tab) == ["A long instruction.", "Yes, that is it."], "the marked line waited its turn"
+    assert tab.evaluate("window.__cancelled") >= 1, "the line in flight was left playing"
+
+    # the ordinary line was not dropped: it follows the acknowledgement, and with no
+    # beat behind it, because the beat belongs after an instruction
+    tab.evaluate("() => { window.__endUpTo = 99; window.__t0 = Date.now(); window.__finish(); window.__finish(); }")
+    tab.wait_for_function("window.__spoken.length === 3", timeout=5000)
+    spoken = tab.evaluate("window.__spoken")
+    assert spoken[2]["text"] == "Ordinary line."
+    follow = spoken[2]["at"] - tab.evaluate("window.__t0")
+    assert follow < 900, f"the ordinary line waited {follow} ms behind the acknowledgement"
 
 
 def open_check(tab, url):
@@ -796,17 +1134,18 @@ def test_the_check_acknowledges_on_the_event_not_on_a_timer(page):
 
     tab.evaluate("() => { window.__t0 = Date.now(); }")
     feed_check(tab, state="waiting_pose")
-    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    tab.wait_for_function("window.__spoken.length >= 2", timeout=5000)
     spoken = tab.evaluate("window.__spoken")
     assert spoken[1]["text"] == "Perfect."
     delay = spoken[1]["at"] - tab.evaluate("window.__t0")
     assert delay < 500, f"the acknowledgement waited {delay} ms, that is a clock and not the event"
 
-    tab.wait_for_function("window.__spoken.length === 3", timeout=5000)
+    tab.wait_for_function("window.__spoken.length >= 3", timeout=5000)
     spoken = tab.evaluate("window.__spoken")
     assert spoken[2]["text"] == "Touch your 6 with your 6."
-    beat = spoken[2]["at"] - spoken[1]["at"]
-    assert beat >= 900, f"the instruction followed the acknowledgement after only {beat} ms"
+    # no beat after an acknowledgement: the child is past it, the instruction follows
+    follow = spoken[2]["at"] - spoken[1]["at"]
+    assert follow < 900, f"the instruction waited {follow} ms behind the acknowledgement"
     # the screen moves with the instruction, not before it
     tab.wait_for_function("document.querySelector('#check .frame').dataset.step === '2'", timeout=5000)
 
@@ -814,18 +1153,20 @@ def test_the_check_acknowledges_on_the_event_not_on_a_timer(page):
     tab.wait_for_timeout(1200)
     tab.evaluate("() => { window.__t0 = Date.now(); }")
     feed_check(tab, state="correct_pose")
-    tab.wait_for_function("window.__spoken.length === 4", timeout=5000)
+    tab.wait_for_function("window.__spoken.length >= 4", timeout=5000)
     spoken = tab.evaluate("window.__spoken")
     assert spoken[3]["text"] == "Yes, that's it."
     delay = spoken[3]["at"] - tab.evaluate("window.__t0")
     assert delay < 500, f"the acknowledgement waited {delay} ms, that is a clock and not the event"
+    # the pill belongs to the last step and comes up with its line; that it is never up
+    # before it is what test_the_check_walks_its_three_steps_on_one_frame holds, and
+    # there is no beat between the two any more for a test to look through
     if READY_LINE:
-        assert tab.is_hidden("#check-mic"), "the word was asked for before the step it belongs to"
-        tab.wait_for_function("window.__spoken.length === 5", timeout=5000)
+        tab.wait_for_function("window.__spoken.length >= 5", timeout=5000)
         spoken = tab.evaluate("window.__spoken")
         assert spoken[4]["text"] == READY_LINE
-        beat = spoken[4]["at"] - spoken[3]["at"]
-        assert beat >= 900, f"the question followed the acknowledgement after only {beat} ms"
+        follow = spoken[4]["at"] - spoken[3]["at"]
+        assert follow < 900, f"the question waited {follow} ms behind the acknowledgement"
     wait_step(tab, "ready")
     tab.wait_for_selector("#check-mic", state="visible", timeout=5000)
     # the gate listens for a word, so the answer gate that carries numbers stays shut
@@ -2021,3 +2362,4 @@ def test_the_hub_names_the_child_and_is_the_way_back_to_the_welcome_screen(page)
     tab.wait_for_function("document.body.dataset.view === 'home'")
     assert tab.evaluate("Tenfold.child") == "ilan"
     assert errors == []
+
