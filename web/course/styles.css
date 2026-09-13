@@ -121,17 +121,7 @@ h1.page{margin:0;font-size:56px;line-height:1.05;font-weight:800}
 .tally.lg{width:300px}
 .tally.is-locked{opacity:.82}
 
-.tally .t-palm,.tally .t-fingers rect,.tally .t-thumb rect{fill:var(--skin);stroke:var(--skin-line);stroke-width:3}
-.tally .t-eye{fill:#fff;stroke:var(--skin-line);stroke-width:2.5}
-.tally .t-pupil{fill:var(--ink)}
-.tally .t-eyeline,.tally .t-mouth{fill:none;stroke:var(--ink);stroke-width:6;stroke-linecap:round}
-.tally .t-mouth-fill{fill:var(--ink)}
-.tally .t-glasses circle{fill:none;stroke:#3b3a38;stroke-width:5}
-.tally .t-glasses line{stroke:#3b3a38;stroke-width:5;stroke-linecap:round}
-.tally .t-hat .hat-cone{fill:var(--accent)}
-.tally .t-hat .hat-brim{fill:var(--accent-press)}
-.tally .t-headband rect,.tally .t-headband circle{fill:var(--warn)}
-.tally .t-cape path{fill:var(--warn)}
+/* Tally's colours come from tally.svg itself, the green one, nothing repaints him */
 
 @keyframes t-wave{0%,100%{transform:rotate(0)}25%{transform:rotate(-9deg)}75%{transform:rotate(9deg)}}
 @keyframes t-bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-10px)}}
@@ -736,7 +726,10 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 .mic .bars i:nth-child(2) { animation-delay: 150ms; }
 .mic .bars i:nth-child(3) { animation-delay: 300ms; }
 @keyframes mic { 0%, 100% { height: 7px; } 50% { height: 19px; } }
+.mic .mic-label { white-space: nowrap; }
 .mic.is-off { color: var(--hare); }
+.mic.is-denied { border-color: var(--orange); color: #a85f00; }
+.micpill.is-off svg, .micpill.is-off .bars i { color: rgba(250, 247, 242, .5); background: rgba(250, 247, 242, .5); animation: none; }
 .mic.is-off svg, .mic.is-off .bars i { color: var(--hare); background: var(--hare); animation: none; }
 
 /* prototype state switcher, in the same dashed style as the dev reset */
@@ -826,7 +819,7 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 /* ---------- camera lesson, the design layout with the live video ---------- */
 .camera-lesson { background: var(--bg); }
 .camera-lesson .lesson-top { max-width: 1100px; padding: 26px 36px 0; }
-.cl-cam { width: 720px; position: relative; }
+.cl-cam { position: relative; flex: 1 1 0; min-height: 0; width: auto; max-width: 720px; aspect-ratio: var(--cam-ratio, 4 / 3); }
 .practice-stage { position: absolute; inset: 0; }
 .practice-stage .practice-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0.9; }
 .practice-stage .practice-overlay { position: absolute; pointer-events: none; }
@@ -849,6 +842,13 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 .cl-foot .practice-answer { position: static; display: flex; align-items: center; gap: 10px; color: var(--ink); font-size: 44px; font-weight: 900; margin-bottom: 22px; }
 .practice-answer .mic { border: 0; background: none; padding: 0 8px 0 0; cursor: pointer; color: var(--hare); font: inherit; line-height: 0; height: auto; margin: 0; }
 .practice-answer .mic svg { width: 30px; height: 30px; color: inherit; }
+.practice-answer .mic { display: flex; align-items: center; gap: 8px; }
+.practice-answer .mic .bars { display: flex; align-items: center; gap: 3px; height: 20px; }
+.practice-answer .mic .bars i { width: 4px; height: 8px; border-radius: 2px; background: currentColor; animation: mic 900ms ease-in-out infinite; }
+.practice-answer .mic .bars i:nth-child(2) { animation-delay: 150ms; }
+.practice-answer .mic .bars i:nth-child(3) { animation-delay: 300ms; }
+.practice-answer .mic.is-off .bars i { animation: none; height: 6px; }
+.practice-answer .mic .mic-label { font-size: 13px; font-weight: 900; letter-spacing: 0.8px; text-transform: uppercase; line-height: 1; }
 .practice-answer .mic.is-on { color: var(--good); animation: mic-breathe 1.6s ease-in-out infinite; }
 .practice-answer .mic.is-denied { color: var(--warn); animation: none; }
 @keyframes mic-breathe { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }

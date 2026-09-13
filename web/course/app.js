@@ -254,7 +254,7 @@
     if (!checkRun) return;
     checkRun.timers.forEach(clearTimeout);
     checkRun = null;
-    stopVoice();
+    gateVoice(false);
     sendLesson({ type: "quit" });
   }
   function setStepDots(n) {
@@ -296,7 +296,7 @@
           root.classList.remove("check", "banner"); setStepDots(3);
           $("#check-say").textContent = "Say the answer.";
           $("#check-mic").hidden = false;
-          $("#check-miclabel").textContent = voice.recognition ? "Listening" : "Type it";
+          $("#check-miclabel").textContent = micLabel();
           setTally($("#check-tally"), "ready");
           listenWhile("correct_pose");
         });
@@ -313,6 +313,7 @@
       $("#check-say").textContent = "Thirty six. Exactly.";
       setTally($("#check-tally"), "happy");
       run.done = true;
+      gateVoice(false);
     } else if (run.step === 3 && m.state === "answer_wrong" && m.tally) {
       $("#check-say").textContent = m.tally;
       setTally($("#check-tally"), "almost");
@@ -337,14 +338,21 @@
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.lang = "en-US"; u.rate = 0.95; u.pitch = 1.15;
-      const talk = (on) => { if (host) host.classList.toggle("is-talking", on); };
+      voice.said = numbersIn(text);
+      const talk = (on) => {
+        if (host) host.classList.toggle("is-talking", on);
+        voice.spokeUntil = on ? Infinity : Date.now() + 800;
+      };
       u.onstart = () => talk(true); u.onend = () => talk(false); u.onerror = () => talk(false);
       window.speechSynthesis.speak(u);
     } catch (e) { /* the sentence is on screen anyway */ }
   }
 
   // ---------- voice answers ----------
-  const voice = { recognition: null, wanted: false, running: false, last: null, at: 0 };
+  // Chrome starts recognition only from a user gesture: the first click of the session arms
+  // it, then it stays alive across screens. "gate" says whether a heard number is an answer
+  // right now; "denied" means the mic was refused and the type field is the way in.
+  const voice = { recognition: null, wanted: false, running: false, denied: false, gate: false, spokeUntil: 0, said: [], last: null, at: 0 };
   const ONES = { zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9 };
   const TEENS = { ten: 10, eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19 };
   const TENS = { twenty: 20, thirty: 30, forty: 40, fourty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 };
@@ -362,44 +370,74 @@
     }
     return started ? value : null;
   }
+  // every number a sentence carries, as words or digits, plus the whole read as one number
+  function numbersIn(text) {
+    const tokens = String(text || "").toLowerCase().replace(/[^a-z0-9\s-]/g, " ").split(/[\s-]+/).filter(Boolean);
+    const found = new Set();
+    tokens.forEach((t) => {
+      if (/^\d+$/.test(t)) found.add(Number(t));
+      else if (t in ONES) found.add(ONES[t]);
+      else if (t in TEENS) found.add(TEENS[t]);
+      else if (t in TENS) found.add(TENS[t]);
+    });
+    const whole = parseNumber(text);
+    if (whole !== null) found.add(whole);
+    return Array.from(found);
+  }
   function setupVoice() {
     const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Recognition || voice.recognition) return;
     const r = new Recognition();
     r.lang = "en-US"; r.continuous = true; r.interimResults = true;
     r.onstart = () => { voice.running = true; markMic(); };
-    r.onend = () => { voice.running = false; markMic(); if (voice.wanted) setTimeout(startVoice, 300); };
-    r.onerror = (e) => { if (e.error === "not-allowed" || e.error === "service-not-allowed") { voice.wanted = false; markMic("denied"); } };
+    r.onend = () => { voice.running = false; markMic(); if (voice.wanted && !voice.denied) setTimeout(startVoice, 300); };
+    r.onerror = (e) => {
+      if (e.error === "not-allowed" || e.error === "service-not-allowed") { voice.wanted = false; voice.denied = true; markMic(); }
+    };
     r.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const text = e.results[i][0].transcript.trim();
         const heard = $(".heard");
-        if (heard) heard.textContent = text ? `heard: ${text}` : "";
-        if (checkRun) $("#check-miclabel").textContent = text || "Listening";
+        if (heard) heard.textContent = text && voice.gate ? `heard: ${text}` : "";
+        if (checkRun && checkRun.step === 3 && !checkRun.done) $("#check-miclabel").textContent = text || "Listening";
         if (e.results[i].isFinal) submitSpoken(text);
       }
     };
     voice.recognition = r;
   }
-  function markMic(forced) {
+  function armVoice() {
+    setupVoice();
+    if (!voice.recognition || voice.denied || voice.running) return;
+    voice.wanted = true;
+    startVoice();
+  }
+  function micLabel() { return voice.denied ? "Type it" : voice.running ? "Listening" : "Mic off"; }
+  // the live listening state, on the lesson's mic and on the check's pill
+  function markMic() {
     const mic = $(".mic");
-    if (!mic) return;
-    mic.hidden = !voice.recognition;
-    mic.classList.toggle("is-on", voice.running && !forced);
-    mic.classList.toggle("is-denied", forced === "denied");
+    if (mic) {
+      mic.hidden = !voice.recognition;
+      mic.classList.toggle("is-on", voice.running && !voice.denied);
+      mic.classList.toggle("is-off", !voice.running || voice.denied);
+      mic.classList.toggle("is-denied", voice.denied);
+      const label = $(".mic-label", mic);
+      if (label) label.textContent = micLabel();
+    }
+    const pill = $("#check-mic");
+    if (pill) {
+      pill.classList.toggle("is-off", !voice.running || voice.denied);
+      if (checkRun && checkRun.step === 3 && !checkRun.done && !(checkRun.typed || "")) $("#check-miclabel").textContent = micLabel();
+    }
   }
-  function startVoice() { if (!voice.recognition || voice.running || !voice.wanted) return; try { voice.recognition.start(); } catch (e) { /* starting */ } }
+  function startVoice() { if (!voice.recognition || voice.running || !voice.wanted || voice.denied) return; try { voice.recognition.start(); } catch (e) { /* starting */ } }
   function stopVoice() { voice.wanted = false; if (voice.recognition && voice.running) { try { voice.recognition.stop(); } catch (e) { /* done */ } } }
-  function listenWhile(state) {
-    if (!voice.recognition) return;
-    const should = state === "correct_pose" || state === "waiting_answer";
-    if (should === voice.wanted) return;
-    voice.wanted = should;
-    if (should) startVoice(); else stopVoice();
-  }
+  function gateVoice(on) { voice.gate = Boolean(on); markMic(); }
+  function listenWhile(state) { gateVoice(state === "correct_pose" || state === "waiting_answer"); }
   function submitSpoken(text) {
     const value = parseNumber(text);
-    if (value === null || (!lesson && !checkRun)) return;
+    if (value === null || (!lesson && !checkRun) || !voice.gate) return;
+    // Tally's own voice is not an answer: a number he just said is dropped while he says it
+    if (Date.now() < voice.spokeUntil && voice.said.includes(value)) return;
     const now = Date.now();
     if (value === voice.last && now - voice.at < 1500) return;
     voice.last = value; voice.at = now;
@@ -440,7 +478,7 @@
     const fresh = m.state !== lesson.last;
     // a new fact: a clean first try again
     if (fresh && m.fact && m.fact !== lesson.fact) { lesson.fact = m.fact; lesson.done += 1; lesson.slipped = false; }
-    if (m.hint_level > 0) lesson.slipped = true;
+    if (m.hint_level > 0 || (fresh && m.state === "wrong_pose")) lesson.slipped = true;
     if (fresh && m.state === "answer_wrong") {
       lesson.slipped = true;
       if (lesson.hearts !== null) {
@@ -509,7 +547,7 @@
             <div class="speech"><span class="tally-say">Show me both hands.</span><small class="speech-sub">I am watching your fingers</small></div>
           </div>
           <div class="practice-answer">
-            <button class="mic" type="button" data-action="mic" hidden aria-label="say the answer">${use("icon-mic")}</button>
+            <button class="mic" type="button" data-action="mic" hidden aria-label="say the answer">${use("icon-mic")}<span class="bars"><i></i><i></i><i></i></span><span class="mic-label">Listening</span></button>
             <span class="typed"></span><span class="caret"></span>
             <div class="heard"></div>
           </div>
@@ -518,15 +556,24 @@
     decorate($("#lesson"));
     markMic();
   }
+  // the overlay covers exactly the rendered video box: the img's own box, corrected for what
+  // object-fit did with it (contain letterboxes, cover crops). Landmarks are frame fractions,
+  // so a viewBox of ratio x 1 maps them straight through. The lesson box also takes the
+  // camera's ratio so there is no letterbox to begin with.
+  function videoRatio(video) {
+    return (video && video.naturalWidth && video.naturalHeight) ? video.naturalWidth / video.naturalHeight : 4 / 3;
+  }
   function fitOverlay(stage) {
     const video = $(".practice-video", stage), overlay = $(".practice-overlay", stage);
     if (!stage || !video || !overlay) return 4 / 3;
-    const W = stage.clientWidth, H = stage.clientHeight;
-    const ratio = (video.naturalWidth && video.naturalHeight) ? video.naturalWidth / video.naturalHeight : 4 / 3;
-    const cover = stage.classList.contains("cam-full");
+    const ratio = videoRatio(video);
+    const cam = video.closest(".cam");
+    if (cam && !cam.classList.contains("cam-full")) cam.style.setProperty("--cam-ratio", String(ratio));
+    const W = video.clientWidth, H = video.clientHeight;
+    const cover = getComputedStyle(video).objectFit === "cover";
     const w = cover ? Math.max(W, H * ratio) : Math.min(W, H * ratio), h = w / ratio;
     overlay.setAttribute("viewBox", `0 0 ${ratio} 1`);
-    overlay.style.cssText = `left:${(W - w) / 2}px;top:${(H - h) / 2}px;width:${w}px;height:${h}px`;
+    overlay.style.cssText = `left:${video.offsetLeft + (W - w) / 2}px;top:${video.offsetTop + (H - h) / 2}px;width:${w}px;height:${h}px`;
     return ratio;
   }
   function renderPractice(m) {
@@ -590,7 +637,7 @@
   // ---------- finish ----------
   function finish(outOfHearts) {
     const s = lesson;
-    stopVoice();
+    gateVoice(false);
     const total = s.total;
     const correct = s.serverCorrect === null || s.serverCorrect === undefined ? s.correct : s.serverCorrect;
     const res = L.recordLesson(progress, s.node.id, correct, total);
@@ -680,7 +727,7 @@
   }
   function leaveLesson() {
     if (lesson) sendLesson({ type: "quit" });
-    stopVoice();
+    gateVoice(false);
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     lesson = null;
   }
@@ -726,7 +773,7 @@
     else if (action === "chest") openChest(id);
     else if (action === "unit") { unitAt = Number(el.dataset.u); renderCourse(); }
     else if (action === "profile") { leaveLesson(); go("profile"); }
-    else if (action === "mic") { voice.wanted = !voice.wanted; if (voice.wanted) startVoice(); else stopVoice(); }
+    else if (action === "mic") { if (voice.denied) return; if (voice.wanted) stopVoice(); else { voice.wanted = true; startVoice(); } markMic(); }
     else if (action === "quit" || action === "home") backToMap();
     else if (action === "retry") startLesson(id);
     else if (action === "reset") { progress = L.emptyProgress(); unitAt = null; save(); try { localStorage.removeItem(KEY_LEARNER); } catch (err) { /* fine */ } renderCourse(); toast("Progress reset"); }
@@ -753,6 +800,8 @@
     else if (e.key === "n" && lesson) { setTyped(""); sendLesson({ type: "next" }); }
     else if (e.key === "Escape") backToMap();
   });
+  // the first click of the session is the gesture Chrome needs to open the mic
+  document.addEventListener("click", armVoice, { capture: true });
   window.addEventListener("hashchange", route);
   window.addEventListener("resize", () => { if (lesson) fitOverlay($("#lesson .practice-stage")); if (checkRun) fitOverlay($("#check-cam")); });
 
@@ -769,7 +818,7 @@
     probe.alt = ""; probe.src = "/video";
   }
   if (params.get("dev") === "1") $$(".dev-reset").forEach((el) => { el.hidden = false; });
-  window.Tenfold = { parseNumber, voice, get lesson() { return lesson; }, get xp() { return xp(); } };
+  window.Tenfold = { parseNumber, numbersIn, voice, fitOverlay, get lesson() { return lesson; }, get xp() { return xp(); } };
   route();
   watchCamera();
   decorate(document);

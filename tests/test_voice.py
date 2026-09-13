@@ -176,20 +176,88 @@ def test_without_the_api_the_microphone_never_appears(page):
     assert errors == []
 
 
-def test_listening_only_while_an_answer_is_expected(page):
+def test_the_first_click_arms_the_microphone_and_it_stays_on(page):
+    """Chrome opens the mic only from a user gesture: the tap on Start is that gesture,
+    and recognition then stays alive across states. Only the gate moves."""
     context, url = page
     tab = context.new_page()
     tab.add_init_script(FAKE_RECOGNITION)
     open_lesson(tab, url)
     assert tab.is_visible("#lesson .mic")
+    assert tab.evaluate("window.__voice.started") >= 1
+    assert tab.evaluate("Tenfold.voice.wanted") is True
+    assert "is-on" in tab.get_attribute("#lesson .mic", "class")
+    assert tab.inner_text("#lesson .mic .mic-label").strip().lower() == "listening"
 
     wait_for_state(tab, "wrong_pose")
-    assert tab.evaluate("Tenfold.voice.wanted") is False
+    assert tab.evaluate("Tenfold.voice.gate") is False
+    assert tab.evaluate("Tenfold.voice.running") is True
 
     wait_for_state(tab, "correct_pose")
-    assert tab.evaluate("Tenfold.voice.wanted") is True
-    assert tab.evaluate("window.__voice.started") >= 1
-    assert "is-on" in tab.get_attribute("#lesson .mic", "class")
+    assert tab.evaluate("Tenfold.voice.gate") is True
+    assert tab.evaluate("window.__voice.stopped") == 0
+
+
+def test_a_number_heard_outside_the_answer_window_is_not_sent(page):
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION)
+    open_lesson(tab, url)
+    wait_for_state(tab, "wrong_pose")
+    tab.evaluate("""() => {
+      window.__sent = 0;
+      const original = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) { window.__sent += 1; return original.call(this, data); };
+    }""")
+    tab.evaluate("() => window.__say('thirty six', true)")
+    tab.wait_for_timeout(300)
+    assert tab.evaluate("window.__sent") == 0
+
+
+def test_tallys_own_numbers_are_not_answers(page):
+    """The mic stays open while Tally talks through the speakers. A number he just said
+    is dropped for as long as he says it; any other number still counts."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION)
+    open_lesson(tab, url)
+    wait_for_state(tab, "correct_pose")
+    assert sorted(tab.evaluate("Tenfold.numbersIn('Six and six. What is six times six?')")) == [6, 12]
+    assert sorted(tab.evaluate("Tenfold.numbersIn('Thirty six. Exactly.')")) == [6, 30, 36]
+    tab.evaluate("""() => {
+      window.__sent = 0;
+      const original = WebSocket.prototype.send;
+      WebSocket.prototype.send = function (data) { window.__sent += 1; return original.call(this, data); };
+      Tenfold.voice.said = [36]; Tenfold.voice.spokeUntil = Date.now() + 5000;
+      window.__say('thirty six', true);
+      window.__say('eleven', true);
+    }""")
+    tab.wait_for_timeout(300)
+    assert tab.evaluate("window.__sent") == 1
+
+
+DENIED_RECOGNITION = FAKE_RECOGNITION + """
+function DeniedRecognition() {
+  FakeRecognition.call(this);
+  this.start = () => { window.__voice.started += 1; if (this.onerror) this.onerror({ error: 'not-allowed' }); };
+}
+window.SpeechRecognition = DeniedRecognition;
+window.webkitSpeechRecognition = DeniedRecognition;
+"""
+
+
+def test_a_refused_microphone_falls_back_to_typing(page):
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(DENIED_RECOGNITION)
+    open_lesson(tab, url)
+    tab.wait_for_timeout(300)
+    assert tab.evaluate("Tenfold.voice.denied") is True
+    assert "is-denied" in tab.get_attribute("#lesson .mic", "class")
+    assert tab.inner_text("#lesson .mic .mic-label").strip().lower() == "type it"
+    assert tab.is_visible("#lesson .caret")
+    tab.keyboard.type("42")
+    assert tab.inner_text("#lesson .typed") == "42"
 
 
 def test_a_spoken_answer_is_sent_and_shown(page):
