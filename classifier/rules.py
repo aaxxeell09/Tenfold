@@ -37,6 +37,16 @@ Hypothesis log (one line per accepted patch, newest last):
   only above TIP_MOTION_CONF_GATE=0.75, since low-confidence tracking jitter (e.g. class 8x9, conf ~0.56-0.74)
   looks like motion but is noise, not travel. TIP_MOTION_THRESHOLD=0.2 (best passing value from --sweep):
   exact_match 0.510 -> 0.516, false_unknown_rate unchanged at 0.047, no class regressed.
+- v6: measured (--class transition) that most reachable transition failures (e.g. s000004, s000018,
+  s000026, s000067) keep the same or a drifting closest fingertip pair steadily separating across the
+  window even though whole-hand tip_motion stays under threshold, since only two fingers move while the
+  rest of both hands hold still. An unsigned drift (max-min) gate caught these but also flagged real
+  holds captured mid-approach (s000007, s000008 converge into contact within the window) and blew up
+  false_unknown_rate to 0.193 with 10 classes regressed, so it was replaced with a signed mean per-step
+  trend that only fires when the pair is separating, not converging. Added pair_separation_trend, gated
+  above TIP_MOTION_CONF_GATE like tip_motion, PAIR_DRIFT_THRESHOLD=0.05 (best passing value from --sweep):
+  exact_match 0.516 -> 0.534, transition 0.27 -> 0.31, false_unknown_rate 0.047 -> 0.064, no class
+  regressed beyond the gate's limit.
 """
 from __future__ import annotations
 
@@ -51,6 +61,7 @@ AMBIGUITY_MARGIN = 0.025  # distance gap, in mean-scale units, below which the l
 MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units, above which hands are still moving
 TIP_MOTION_THRESHOLD = 0.2  # mean per-frame fingertip displacement, in mean-scale units, above which fingers are still moving into shape
 TIP_MOTION_CONF_GATE = 0.75  # only trust tip_motion above this confidence: low-confidence tracking jitter looks like motion but isn't
+PAIR_DRIFT_THRESHOLD = 0.05  # mean per-step increase of the closest-pair distance, in mean-scale units, above which the hands are still separating
 
 
 def wrist_motion(window: Window) -> float:
@@ -109,6 +120,31 @@ def tip_motion(window: Window) -> float:
     return total / steps if steps else 0.0
 
 
+def pair_separation_trend(window: Window) -> float:
+    """Mean signed per-step change of each frame's own closest fingertip-pair distance, in mean-scale
+    units; positive means the hands are steadily moving apart.
+
+    A held gesture is either steady or still closing into contact (converging, negative trend), even
+    when it is captured mid-approach: whole-hand wrist_motion and tip_motion cannot see this because
+    only two fingers travel while the rest of both hands stay put. A transition that never reaches a
+    hold instead keeps separating: signed averaging (not the unsigned range tried and rejected, which
+    also flagged converging holds like s000007/s000008 and blew up false_unknown_rate) catches only the
+    diverging case.
+    """
+    dists = []
+    for l, r in features.both_present_frames(window):
+        try:
+            d = features.tip_distance_matrix(l, r)
+        except (ValueError, TypeError):
+            continue
+        if np.isfinite(d).all():
+            dists.append(float(np.min(d)))
+    if len(dists) < 2:
+        return 0.0
+    diffs = [b - a for a, b in zip(dists, dists[1:])]
+    return sum(diffs) / len(diffs)
+
+
 def averaged_pair(window: Window, last: tuple) -> tuple[int, int, float]:
     """Nearest pair, falling back to the window average only when the last frame's own choice is ambiguous.
 
@@ -143,6 +179,8 @@ def classify(window: Window) -> GestureState:
     if wrist_motion(window) > MOTION_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     if confidence > TIP_MOTION_CONF_GATE and tip_motion(window) > TIP_MOTION_THRESHOLD:
+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
+    if confidence > TIP_MOTION_CONF_GATE and pair_separation_trend(window) > PAIR_DRIFT_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     lf, rf, dist = averaged_pair(window, frame)
     return GestureState(
