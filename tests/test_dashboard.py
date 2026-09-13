@@ -1,6 +1,7 @@
 """The marimo dashboard runs top to bottom on the committed snapshot, on a snapshot with every curve, and on an
 empty one, with no W&B key and no network."""
 import copy
+import hashlib
 import json
 import os
 import subprocess
@@ -92,12 +93,39 @@ def test_snapshot_explorer_is_computed_from_the_train_file_with_the_real_rules(t
     assert any(abs(r["value"] - explorer["constants"]["CONTACT_THRESHOLD"]) < 1e-9 and r["gate"] == "FAIL" for r in rows)
     for example in explorer["examples"]:
         assert len(example["left"]) == len(example["right"]) == 21 and len(example["tip_distances"]) == 5
-        assert len(example["answers_by_contact_threshold"]) == 33
+        thresholds = [a["threshold"] for a in example["answers_by_contact_threshold"]]
+        assert len(thresholds) >= 33 and thresholds == sorted(thresholds)
+        assert explorer["constants"]["CONTACT_THRESHOLD"] in thresholds  # the slider lands exactly on the rule in use
     # "before the AI" is the first committed rules.py scored on the same file; in this repo it is the running one
     compare = explorer["compare"]
     assert "error" not in compare and compare["windows"] == windows
     assert compare["a"]["commit"] == compare["b"]["commit"] and compare["a"]["exact_match"] == compare["b"]["exact_match"]
     assert compare["a"]["constants"]["CONTACT_THRESHOLD"] == 0.35
+    # what the dashboard needs to call the comparison verified: same data, same scorers, rules of the version in use
+    assert compare["data_sha"] == explorer["data_sha"] and compare["b"]["rules_sha256"] == explorer["rules_sha256"]
+    assert compare["scorers_sha256"] == hashlib.sha256((repo / "eval" / "scorers.py").read_bytes()).hexdigest()
+
+
+def test_snapshot_versions_carry_the_identity_of_their_rules_and_scorers(tmp_path):
+    sys.path.insert(0, str(REPO / "tests"))
+    from test_guard_and_loop import make_repo
+    repo = make_repo(tmp_path)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+    (repo / "data" / "metrics.json").write_text(json.dumps({"rejected": [], "versions": [
+        {"tag": "v0", "version": 0, "sha": head, "kind": "baseline", "data": {"sha": "abc", "n_samples": 1}, "train": {"exact_match": 0.5},
+         "hidden": {"validation": {"exact_match": 0.46, "n_holds": 55, "n_samples": 125, "per_class": {"6x6": 1.0}}}},
+        {"tag": "v1", "version": 1, "sha": "no-commit", "kind": "patch", "train": {"exact_match": 0.6, "scorers_sha256": "f" * 64}}]}))
+    p = subprocess.run([sys.executable, "loop/snapshot.py", "--repo", str(repo)], cwd=repo, capture_output=True, text=True,
+                       env={**os.environ, "PYTHONPATH": str(repo)})
+    assert p.returncode == 0, p.stderr
+    v0, v1 = json.loads((repo / "data" / "snapshot.json").read_text())["informed"]
+    assert v0["rules_sha256"] == hashlib.sha256((repo / "classifier" / "rules.py").read_bytes()).hexdigest()
+    assert v0["scorers"] == {"sha256": hashlib.sha256((repo / "eval" / "scorers.py").read_bytes()).hexdigest(),
+                             "source": "eval/scorers.py at the version commit"}
+    assert v1["rules_sha256"] is None and v1["scorers"] == {"sha256": "f" * 64, "source": "recorded with the metrics"}
+    # the hidden gate record is kept, slim, so the page can say from which version the held-back gestures select patches
+    assert v0["hidden_gate"] == {"validation": {"exact_match": 0.46, "n_holds": 55, "n_samples": 125}}
+    assert v1["hidden_gate"] is None
 
 
 def test_snapshot_collects_refusals_from_every_run_log_once(tmp_path):
@@ -138,13 +166,26 @@ def test_snapshot_carries_the_retrospective_validation_under_its_own_name(tmp_pa
     assert all(v["heldout"] is None for v in snap["informed"])  # never folded into the held-out fields
 
 
-@pytest.mark.parametrize("case", ["committed", "full", "empty"])
+def test_dashboard_page_text_is_english():
+    source = NOTEBOOK.read_text()
+    assert "retrospective validation, participants not identified" in source
+    for french in ("rétrospective", "identifiés", "données", "règle"):
+        assert french not in source, french
+
+
+@pytest.mark.parametrize("case", ["committed", "full", "partial", "empty"])
 def test_dashboard_runs_on_every_kind_of_snapshot(tmp_path, case):
     if case == "committed":
         path = None
     else:
         path = tmp_path / "snapshot.json"
-        data = full_snapshot() if case == "full" else {"informed": [], "blind": [], "rejected": [], "critic_commits": []}
+        if case == "full":
+            data = full_snapshot()
+        elif case == "partial":  # versions only: no hands, no sweep, no retrospective check, as older snapshots were
+            data = {k: v for k, v in json.loads((REPO / "data" / "snapshot.json").read_text()).items()
+                    if k not in ("explorer", "retrospective_validation", "retrospective_versions", "refused")}
+        else:
+            data = {"informed": [], "blind": [], "rejected": [], "critic_commits": []}
         path.write_text(json.dumps(data))
     p = run_notebook(path)
     assert p.returncode == 0, p.stdout[-2000:] + p.stderr[-2000:]
