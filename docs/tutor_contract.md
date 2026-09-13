@@ -5,8 +5,8 @@ The shared contract for the three files built next, in parallel, against this pa
 | File | Owner of the change | What it does with this contract |
 |---|---|---|
 | `app/tutor.py` | new file | The tutor state machine. Owns the states, the ladder, the timers, the scoring and the log. Reads `lesson/tutor_params.json`. |
-| `app/server.py` | existing | Ticks the tutor from the camera thread, puts its eight new fields on the `state` message, accepts the two new page messages. |
-| `web/course/app.js` | existing | Renders `tutor_line` and `tutor_visual`, sends `tts` and `speech`, and stops computing first try for itself. |
+| `app/server.py` | existing | Ticks the tutor from the camera thread, puts its ten new fields on the `state` message, accepts the three new page messages. |
+| `web/course/app.js` | existing | Renders `tutor_line` and `tutor_visual`, sends `tts`, `speech` and `line_drop`, and stops computing first try for itself. |
 
 Nothing else changes. `lesson/engine.py`, `lesson/scheduler.py`, `lesson/tally.py` and `classifier/` are untouched.
 `lesson/tutor.py` (Ilan, W&B Inference) is a different module with a similar name: it phrases a line, `app/tutor.py`
@@ -18,7 +18,7 @@ Everything here is V0 policy. Section 6 says why every number lives in a file in
 
 ## 1. Message contract
 
-One websocket, `/ws`, JSON both ways. No new message types in either direction beyond the two named below.
+One websocket, `/ws`, JSON both ways. No new message types in either direction beyond the three named below.
 
 ### 1.1 Page to server
 
@@ -58,9 +58,29 @@ pauses the pedagogical timers, and it proves engagement.
 Text is sent verbatim, trimmed, capped at 200 characters. Interim results are not sent. Nothing is stored: the
 server keeps only the arrival time and the fact that speech happened.
 
+```json
+{"type": "line_drop", "line": "check_touch", "reason": "queue_full", "at": 1789322569000}
+```
+
+A line the page was given and could not speak. Sent from `reportDrop` in `web/course/app.js`, once per dropped
+line. `line` is the line's key when it has one and its text otherwise, `at` is `Date.now()`. It scores nothing,
+moves no ladder and changes no state: `app/tutor.py` writes it to the log as a `line_drop` record so the gap
+between lines decided and lines heard can be measured. Nothing about it is refused or validated away, because a
+malformed report about a line going missing is itself the evidence.
+
+`reason` is meant to be one of four machine tokens, `replaced`, `queue_full`, `interrupted` and `unknown`
+(`DROP_REASONS` in `app/tutor.py`); anything else is logged as `unknown` with the raw string kept beside it in
+`reported_reason`.
+
+> **The two ends do not agree today.** `web/course/app.js` sends
+> `replaced_by_newer_of_same_kind` (`enqueue`), `queue_full` (`enqueue`) and `no_longer_true` (`pump`). Only
+> `queue_full` is in the vocabulary, so two of the three land as `unknown`. `replaced` is never sent under that
+> name, and `interrupted` is unreachable: `cutLine` ends the line in flight without calling `reportDrop` at all.
+> One list, in one place, is the fix. Until then the log undercounts every drop reason but one.
+
 ### 1.2 Server to page
 
-One message type, `state`, exactly as today, with eight new fields. No new message types. `node_end` and
+One message type, `state`, exactly as today, with ten new fields. No new message types. `node_end` and
 `session_end` are unchanged.
 
 ```json
@@ -95,14 +115,16 @@ One message type, `state`, exactly as today, with eight new fields. No new messa
   "scored_gesture_error": false,
   "scored_math_error": false,
   "first_try": true,
-  "mode": "normal"
+  "mode": "normal",
+  "tutor_line_cuts": false,
+  "tutor_beat": null
 }
 ```
 
 `fingers` carries all ten fingertips when both hands are seen, in mirrored image coordinates, 0 to 1. The two shown
 above are an extract.
 
-The eight new fields:
+The ten new fields:
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -114,11 +136,32 @@ The eight new fields:
 | `scored_math_error` | boolean | True once a math error has been scored on this exercise. Section 5. |
 | `first_try` | boolean | True while this exercise is still eligible for the first try bonus. Computed server side. Section 5. |
 | `mode` | string | `supportive`, `normal` or `independent`. Section 2.4. |
+| `tutor_line_cuts` | boolean | True when this line may interrupt whatever is being spoken instead of queueing behind it. Only the acknowledgement of a confirmed pose ever sets it. Delivery, not pedagogy: it is the one field here that says nothing about the lesson. |
+| `tutor_beat` | object or null | Null on every message but the one carrying the success line, where it is the whole success beat the page has to play. Shape below. The tutor owns the decision and the timings; the page owns the pixels. |
+
+```json
+{"kind": "success", "parts": ["line", "halo", "stars", "counter"],
+ "success_ms": 1300, "pause_ms": 1200, "total_ms": 2500,
+ "line": "Yes. 8 times 7 is 56.", "next_line": null}
+```
+
+`parts` run in that order inside `success_ms`; then `pause_ms` of silence; then `next_line` is said and the new
+exercise fades in. `next_line` is null while `lesson/tally_lines.json` has no `next_one`, and the page then closes
+the beat in silence rather than on words the tutor made up. The beat rides exactly one decision and is cleared as
+it is read, so a page that replayed it on every message cannot loop the celebration.
 
 Absent means false or null: a page that receives a message without one of these fields treats a boolean as false,
-`tutor_line` and `tutor_visual` as null, `intervention_level` as 0, `tutor_state` as `"WORKING"` and `mode` as
-`"normal"`. The server always sends all eight; the rule exists so a page can talk to an older server without a
-special case.
+`tutor_line`, `tutor_visual` and `tutor_beat` as null, `intervention_level` as 0, `tutor_state` as `"WORKING"` and
+`mode` as `"normal"`. The server always sends all ten; the rule exists so a page can talk to an older server
+without a special case.
+
+> **Neither of the last two is read today.** `web/course/app.js` contains no occurrence of `tutor_line_cuts` or of
+> `tutor_beat`. It infers the right to cut for itself instead, from `lineKind`/`ACK_STATES`, and it plays no beat
+> at all: `app/server.py::_check` pushes `answer_correct` and then `exercise_shown` in the same lock, so the cheer
+> class and the recap band are both replaced microseconds later and the success line is cut mid sentence by the
+> line announcing the next exercise. `success_beat_ms` and `next_pause_ms` therefore size nothing the child can
+> see. Whoever lands this has to decide where the beat is enforced, on the server by holding `_advance` or on the
+> page by holding the render, and do it in one place only.
 
 ### 1.3 tutor_visual
 
@@ -152,9 +195,16 @@ special case.
 | `hint` | Stays, unchanged | The engine's geometric hint, `{hand, move_from, move_to}`. It is the input `app/tutor.py` builds `correction` and `ghost` from. Still sent on every message. |
 | `hint_level` | Stays on the wire, changes role | Still 0 to 3, still the scheduler's `hint_1`, `hint_2`, `hint_3` and still what `Outcome.hint_level` records. It is no longer a rendering input: the page must stop testing `m.hint_level >= 2` in `drawFingers` and draw the ghost from `tutor_visual.kind === "ghost"` instead. Do not confuse it with `intervention_level`. |
 | `hint_auto` | Stays on the wire, superseded for the page | Still says whether the clock or the child raised `hint_level`. It becomes an input to the server side `first_try` computation only. The page must stop reading it. |
-| `pose_slip` | Superseded by `scored_gesture_error` | Same clock, wider meaning. The server keeps sending it for the length of this build so nothing breaks mid flight, and it is removed once the three files have landed. The page must stop reading it now. |
+| `pose_slip` | Superseded by `scored_gesture_error` | Same clock, wider meaning. The page has stopped reading it, and `app/server.py` still sends it. It can now be removed from the message. |
 | `tally` | Stays | Still the phrase from `lesson/tally.py` for the current moment. It is the fallback line, and the only line for the start check. |
 | everything else | Stays, unchanged | `state`, `exercise`, `wrong`, `match`, `answer`, `reasoning`, `fingers`, `reason`, `reaction`, `fact`, `session`, `node`, `demo`. |
+
+**What the page actually reads, as of 554dc0d.** Seven fields on the message are write-only: `pose_slip`,
+`hint_level`, `hint_auto`, `scored_gesture_error`, `scored_math_error`, `tutor_line_cuts` and `tutor_beat` have
+zero occurrences in `web/course/app.js`. The first three are by design, this section asked for it. The two scored
+flags are not: `app/server.py` latches them, computes `first_try` from them and sends all three, and the page reads
+only `first_try`, which is the right answer but leaves two fields on the wire that nothing consumes. The last two
+are section 1.2's problem.
 
 ### 1.5 First try moves to the server
 
@@ -198,13 +248,16 @@ The file is loaded once at startup, into a frozen dataclass. There is no reload.
 
 ### 2.1 The file
 
+As it stands on 554dc0d. `global` has grown from the 21 keys this contract was written against to 29:
+the eight added by the morning passes are called out in 2.2.
+
 ```json
 {
   "global": {
     "fps": 15,
     "hands_visible_stable": 0.5,
     "pose_stable": 0.8,
-    "initial_silence": 4.0,
+    "initial_silence": 3.0,
     "idle_nudge": 5.0,
     "wrong_pose_prompt": 2.0,
     "wrong_pose_error_after_help": 2.5,
@@ -221,7 +274,21 @@ The file is loaded once at startup, into a frozen dataclass. There is no reload.
     "max_unsolicited_verbal": 3,
     "max_visibility_reminders": 2,
     "supportive_mode_factor": 0.8,
-    "independent_mode_factor": 1.4
+    "independent_mode_factor": 1.4,
+    "live_sample_windows": 8,
+    "pose_confirm_frames": 3,
+    "pose_confirm_ms": 250,
+    "ack_delay_ms": 0,
+    "pose_ready_delay_ms": 800,
+    "recovery_grace_ms": 3000,
+    "contact_ratio": 0.35,
+    "visibility_prompt_ms": 2500,
+    "post_line_grace_ms": 2500,
+    "gate_step_pause_ms": 1000,
+    "check_step_min_ms": 0,
+    "answer_first_number_ms": 0,
+    "success_beat_ms": 1300,
+    "next_pause_ms": 1200
   },
   "bounds": {
     "fps": [15, 15],
@@ -244,7 +311,21 @@ The file is loaded once at startup, into a frozen dataclass. There is no reload.
     "max_unsolicited_verbal": [2, 4],
     "max_visibility_reminders": [1, 3],
     "supportive_mode_factor": [0.65, 1.0],
-    "independent_mode_factor": [1.1, 2.0]
+    "independent_mode_factor": [1.1, 2.0],
+    "live_sample_windows": [4, 32],
+    "pose_confirm_frames": [2, 6],
+    "pose_confirm_ms": [120, 600],
+    "ack_delay_ms": [0, 300],
+    "pose_ready_delay_ms": [300, 2000],
+    "recovery_grace_ms": [1500, 6000],
+    "contact_ratio": [0.2, 0.6],
+    "visibility_prompt_ms": [1000, 5000],
+    "post_line_grace_ms": [1500, 5000],
+    "gate_step_pause_ms": [500, 2000],
+    "check_step_min_ms": [0, 400],
+    "answer_first_number_ms": [0, 400],
+    "success_beat_ms": [600, 2500],
+    "next_pause_ms": [400, 2500]
   },
   "invariants": [
     "Movement means Tally is silent.",
@@ -285,19 +366,60 @@ All durations are seconds. Counts are integers. Factors are unitless multipliers
 | `supportive_mode_factor` | 0.8 | The mode multiplier in supportive mode: every duration is shorter, so help comes sooner. |
 | `independent_mode_factor` | 1.4 | The mode multiplier in independent mode: every duration is longer, so the child gets more room. |
 
+`initial_silence` was 4.0 when this contract was written and is 3.0 on 554dc0d.
+
+**Added by the morning passes.** These eight are not patience, so no learner factor and no mode factor scales any
+of them: they are read as written and only clamped. Who reads each one, checked rather than assumed:
+
+| Key | V0 | Read by | Meaning |
+|---|---|---|---|
+| `live_sample_windows` | 8 | `app/live_samples.py`, through `windows_from_params` | How many perception windows one live sample event is worth. The one key in this file that is not the tutor's; `app/tutor.py` does not require it. |
+| `pose_confirm_frames` | 3 | `lesson/engine.py` (amendment F8) and `app/tutor.py` (the contact ratio check) | How many consecutive matching frames confirm a correct pose. |
+| `pose_confirm_ms` | 250 | `lesson/engine.py` only | The other half of F8, whichever comes first. **`app/tutor.py` requires it and never reads it**: its own acknowledgement rides `pose_stable`, 0.8 s, so the engine latches the pose about 550 ms before the tutor says yes. |
+| `ack_delay_ms` | 0 | `app/tutor.py`, `_arm_ack` / `_release_ack` | How long the acknowledgement of a confirmed pose waits. Zero, so it is armed and released inside one tick. |
+| `check_step_min_ms` | 0 | `web/course/app.js`, `turnStep` | The floor on how fast a start check step may turn. Zero, so a step turns the instant its condition is true. |
+| `answer_first_number_ms` | 0 | `web/course/app.js` | The only wait between hearing a number and sending it. |
+| `success_beat_ms` | 1300 | `app/tutor.py` only | How long the success beat itself runs. **Nothing plays it**: see the note in 1.2. |
+| `next_pause_ms` | 1200 | `app/tutor.py` only | The silence after the beat, before the next exercise is announced. Same. |
+
+`pose_ready_delay_ms`, `recovery_grace_ms`, `contact_ratio`, `visibility_prompt_ms` and `post_line_grace_ms`
+arrived with the recovery, contact threshold and post-correction grace passes and belong to the owners of those
+passes; they are in the file on 554dc0d and are not documented here yet.
+
+`gate_step_pause_ms` (1000, bounds `[500, 2000]`) is read by nothing at all. It belongs to the start gate, which
+is not built: `lesson/tally_lines.json` carries `gate_ready` ("Say: I'm ready!"), `app/tutor.py` declares it in
+`PAGE_LINE_KEYS` with a comment saying the server hands it to the page, `app/server.py` has no occurrence of
+`gate`, and `web/course/app.js` has no gate either. A bounded parameter nobody reads is exactly what Loop 2 will
+later try to tune, so it should either be wired up or taken out.
+
 ### 2.3 motion_threshold is not in the file
 
 `motion_threshold` is the only quantity the tutor uses that is not a parameter, because it is a property of this
 camera in this room, not a policy. It is computed once per server run:
 
 ```
-motion_threshold = max(0.03, 4 * idle_jitter)
+motion_threshold = max(0.3, 4 * idle_jitter)
 ```
+
+The floor is **0.3, in palm widths, not 0.03 in frame fractions**. `app/server.py::MotionMeter` divides every
+fingertip displacement by the palm size (wrist to middle MCP, both hands averaged), so that a child leaning
+towards the camera does not read as a child fidgeting, and the measured jitter shares that unit. A palm is about a
+tenth of the frame, so the 0.03 of a frame this section originally named is 0.3 of a palm. `MOTION_FLOOR` in
+`app/tutor.py` is 0.3 and the conversion is only this one constant: the multiplier and the percentile are
+unchanged.
 
 `idle_jitter` is measured during the camera check, which is the `check` node the page opens on the way into the
 practice path (`startCheck` in `web/course/app.js`, `{"id": "check", "kind": "check", "pairs": [[6, 6]], "count": 1}`).
 Step 1 of that check is exactly a still hands measurement: the child holds both hands up, palms forward, while the
 numbers light up ten down to six, and nothing is being asked of them.
+
+> **That `pairs` is ignored.** Amendment F10 removed node scoping from the draw: `Scheduler.set_scope` stores
+> `self.allowed` and its own docstring says "Neither one steers the draw", and `_choose` never consults it. The
+> check therefore serves a random fact while its screen is hard coded to 6 x 6, down to "That is a 6 and a 6" and
+> a pre-rendered 36 in `web/course/index.html`. Driven on the mock server the check served 9 x 9 on one run and
+> 7 x 7 on another, and answering 36 was marked wrong. The jitter measurement itself is unaffected, since step 1
+> asks nothing of the child, but the rest of the check is broken until the check node is exempted from F10 or
+> taken off the scheduler.
 
 The measurement, in `app/tutor.py`:
 
@@ -310,8 +432,14 @@ The measurement, in `app/tutor.py`:
 
 If the check is skipped (`sessionStorage` already holds `tenfold.checked`, or the child goes straight into a
 lesson), or fewer than 20 usable pairs are collected, `idle_jitter` is treated as 0 and `motion_threshold` is its
-floor, 0.03. The value in force is written into `effective_params` on every `intervention` log line, so Loop 2 can
+floor, 0.3. The value in force is written into `effective_params` on every `intervention` log line, so Loop 2 can
 see which threshold produced which behaviour.
+
+Step 2 of the measurement above describes the fallback inside `app/tutor.py::_motion`, which runs only when
+`app/server.py` hands over no measure of its own. That fallback currently returns **two different units**: the even
+fingertip count branch divides by the nominal palm and the odd one does not (`app/tutor.py`, the tail of
+`_motion`). On an odd count it therefore reports a number ten times too small against a floor of 0.3, and
+invariant 1 stops holding. One character.
 
 ### 2.4 Per learner factors
 
@@ -350,8 +478,11 @@ Counts use `help_factor` instead, by the rule in the table above.
 `mode` is chosen by `app/tutor.py` alone, once per exercise, at the moment the exercise is loaded. `app/server.py`
 and `web/course/app.js` only carry and render it. V0 rule:
 
-- `supportive` when either of the last two exercises in this node ended with a scored error or a rescue.
-- `independent` when the last three exercises in this node were all `first_try`.
+- `supportive` when **both** of the last two exercises in this node were hard, that is ended with a scored error
+  or reached L2 or above. `_choose_mode` is `all(r.hard for r in recent)`, not either.
+- `independent` when the last three exercises in this node were all `autonomous_success`, which is a correct
+  answer with the ladder never above L1 and no rescue. That is not the same predicate as `first_try`, which also
+  requires no scored error and no requested hint: a child can be `first_try` without being autonomous.
 - `normal` otherwise, and always on the first exercise of a node.
 
 **Adaptation schedule**
@@ -407,7 +538,11 @@ take the lesson down.
 Every line has `ts`, `kind`, `learner_id` and `exercise`.
 
 - `ts`: string, ISO 8601 UTC with a `Z`, from `lesson/scheduler.now_utc`.
-- `kind`: string, one of `decision`, `intervention`, `exercise`. It is the discriminator, present on every line.
+- `kind`: string, one of `decision`, `intervention`, `exercise`, `line_drop`. It is the discriminator, present on
+  every line. `line_drop` is the fourth, added with the page's drop report of 1.1: it carries `line`, `line_key`,
+  `reason`, `reported_reason`, `reported_at`, `state`, `intervention` and `mode`, it scores nothing and it moves
+  no timer. `line_key` is filled in when the text matches one of Tally's lines verbatim, which is how many
+  acknowledgements never reached the child can be counted. Read 1.1's warning before trusting `reason`.
 - `learner_id`: string, `LearnerState.learner_id`, the 12 hex character id. Never a name.
 - `exercise`: string, `Exercise.title`, for example `"8 x 7"`. Ordered as it was asked, not as it was posed.
 
@@ -519,12 +654,18 @@ wire.
 | `PROMPTING` | The exercise has just been shown and the prompt is being said. Timers start at `tts {speaking: false}`. | The exercise title, Tally talking, no zones, no numbers. |
 | `WORKING` | Hands are up and the child is arranging them. Nothing is wrong yet, or a wrong pose has been held for less than `wrong_pose_prompt`. | Finger circles only. `tutor_visual` is usually null. |
 | `WRONG_POSE` | A wrong pose has been held past `wrong_pose_prompt`. | `pulse_finger`, then `correction`, then `ghost`, as the ladder climbs. |
-| `POSE_READY` | The correct pose has been held for `pose_stable`. The engine has latched. | Green fingers, the reasoning band, Tally counting. |
+| `POSE_READY` | The correct pose has been held for `pose_stable`. | Green fingers, the reasoning band, Tally counting. |
 | `CHECK_ANSWER` | Waiting for the answer, by voice or keyboard. | The answer field, the mic pill, the reasoning band. |
 | `ANSWER_RETRY` | The answer was wrong and the child is trying again. | The shake, the recount line, the reasoning band kept. |
 | `VISIBILITY_RECOVERY` | No hands, or one hand, past `no_hands_visual` or `one_hand_voice`. Not a pedagogical state. | `placement_zones`, the camera veil, no judgement anywhere. |
 | `SUCCESS` | The answer was right. | The result, the flash, the star or XP animation. |
 | `PAUSED` | No movement, no speech, no command for `no_engagement_pause`. Every clock is stopped. | Nothing new. The screen holds. Any movement, speech or key leaves the state. |
+
+`POSE_READY` and the engine's latch are **two different clocks on the same event**, and the row above used to say
+they were one. `lesson/engine.py` latches after `pose_confirm_frames` or `pose_confirm_ms`, whichever comes first,
+which is amendment F8 and about 250 ms. `app/tutor.py::_update_pose` reaches `POSE_READY` after `pose_stable`,
+0.8 s. The page goes green on the engine and hears the tutor's acknowledgement roughly half a second later. F8
+says validation has to feel instant; half of the system honours it.
 
 ### 4.2 The ladder
 
@@ -540,11 +681,15 @@ wire.
 
 The level never goes down inside one exercise, and it resets to 0 on every new exercise.
 
-It normally climbs one step at a time, but the rescue has three triggers of its own and two of them can
-raise it from any level: two wrong numeric answers on the same exercise, and the child's third help request.
-The third trigger, a correct pose held with no answer after earlier help, is the only one gated by
-`rescue_delay`. The rescue is delivered at most once per exercise, it obeys `min_verbal_gap` like every other
-line, and it sits outside `max_unsolicited_verbal`, which is the budget of L1, L2 and L3 alone.
+It normally climbs one step at a time, and **exactly one trigger can raise it from any level: two wrong numeric
+answers on the same exercise.** `_answer_rescue` says so itself, "the only one that reads no clock". Every other
+route to L4, the child asking for help included, goes through `_gate_level`, which caps the target at 3 until
+`rescue_delay` has run on the ladder clock and at 2 until `hint_2_delay` has. `hint_requested` is not an
+exception: it computes `min(RESCUE_LEVEL, level + 1)` and then passes it straight through that gate, so a third
+help request early in an exercise reaches L3 and no further.
+
+The rescue is delivered at most once per exercise, it obeys `min_verbal_gap` like every other line, and it sits
+outside `max_unsolicited_verbal`, which is the budget of L1, L2 and L3 alone.
 
 ---
 
@@ -575,9 +720,13 @@ Increments once, at most once per exercise, when all of these hold:
 3. The pose has stayed wrong for `wrong_pose_error_after_help` since that correction.
 4. The vision is not `unknown` and both hands are present.
 
-This is the same clock the server calls `pose_slip` today (`_count_pose_slip`, `POSE_GRACE_SECONDS`), with the
-grace now coming from the params file and now starting at the correction rather than at the first sight of the
-wrong pose. It feeds `Outcome.pose_error` in exactly the place `pose_error` is set today.
+This is the same clock the server used to call `pose_slip`, with the grace now coming from the params file and now
+starting at the correction rather than at the first sight of the wrong pose. It feeds `Outcome.pose_error` in
+exactly the place `pose_error` is set today.
+
+On the server the pair is now `_score_gesture` and `_grace_spent` in `app/server.py`. `_score_gesture` asks the
+tutor (`self.tutor.fields["scored_gesture_error"]`) whenever there is one; `_grace_spent` and
+`POSE_GRACE_SECONDS` (4.0) are the fallback clock for a run with no `app/tutor.py` to ask, and nothing else.
 
 ### 5.3 scored_math_error
 

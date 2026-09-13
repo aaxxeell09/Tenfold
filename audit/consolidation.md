@@ -23,30 +23,32 @@ line for its owner.
 
 ## 1. The suite
 
-`python -m pytest -q`, full run on the pre-merge tree, then the affected files
-re-run on 554dc0d.
+`python -m pytest -q` on 554dc0d, plus the affected files re-run on their own.
 
 ### Reds
 
+Four, all the same one.
+
 | Test | Failure | Reading |
 |---|---|---|
-| `tests/test_dashboard.py::test_dashboard_runs_on_every_kind_of_snapshot[committed]` | `ModuleNotFoundError: No module named 'altair'` at `dashboard/loop_dashboard.py:34` | **Neither the test nor the code is wrong. The environment is.** `altair>=5.4` is declared in `requirements.txt:12` (and `pandas>=2.0` on line 13) and is genuinely imported by the notebook. This container simply does not have it installed. `pip install -r requirements.txt` clears all three. Worth saying out loud because SPEC section 15 item 14 is "`make doctor` then `make demo` work on a clean machine": a clean machine that ran the requirements file will not see this. |
-| `…[full]` | same | same |
-| `…[empty]` | same | same |
+| `tests/test_dashboard.py::test_dashboard_runs_on_every_kind_of_snapshot`, all four cases (`committed`, `full`, `partial`, `empty`) | `ModuleNotFoundError: No module named 'altair'`, raised inside the notebook subprocess at `dashboard/loop_dashboard.py:37` | **Neither the test nor the code is wrong. The environment is.** `altair>=5.4` is declared in `requirements.txt:12`, with `pandas>=2.0` on line 13, and the notebook genuinely imports it (`mo.ui.altair_chart` at four call sites). This container simply never installed it. `pip install -r requirements.txt` clears all four. Worth stating plainly because SPEC section 15 item 14 is "`make doctor` then `make demo` work on a clean machine in under five minutes": a clean machine that ran the requirements file does not see this, so it is not evidence against item 14. |
+
+`tests/test_dashboard.py` is otherwise 5 passed. `tests/test_server.py` passes
+70/70 in isolation.
 
 Not counted as reds, per `audit/xfail.md`: the 30 stale tests in
 `tests/test_live_tutor.py` and the `web/course/app.js` arm of
-`tests/test_canonical_lines.py`. They are deliberately xfail and the file
-explains each one.
-
-`tests/test_server.py` passes 70/70 in isolation on 554dc0d.
+`tests/test_canonical_lines.py`. They are deliberately xfail, the marking is not
+strict, and the file explains each one. They show as `x` in the run.
 
 ### Not a red, but worth knowing
 
-The full suite takes roughly forty minutes on this machine, almost all of it in
+A full run does not finish inside fifteen minutes; the first attempt was killed
+at 900 s having reached about 95 percent. Almost all of the time is
 `tests/test_voice.py` (59 tests, each launching a browser). That is fine for a
-nightly but it is not a pre-commit gate, and the metric gate of SPEC section 19
-(E2/G1) will feel it.
+nightly, but it is not a pre-commit gate, and the metric gate of SPEC section 19
+(E2/G1) will feel it. `make test` should probably grow a fast default with the
+browser tests behind a marker.
 
 ---
 
@@ -422,22 +424,26 @@ follows the `if / elif / else` cannot fire, because every branch above assigns
 ## 3. Docs against code
 
 `docs/tutor_table.md` does not exist. `docs/tutor_contract.md` does, and had
-drifted on eleven points. **Fixed in this commit** (docs are mine):
+drifted on thirteen points. **All thirteen fixed in this commit** (`docs/` is
+mine; nothing in `app/`, `lesson/`, `web/course/` or `tests/` was touched).
 
 | Section | Was | Now |
 |---|---|---|
-| header table, 1.2 | "eight new fields" throughout | ten, with `tutor_line_cuts` and `tutor_beat` documented and both marked as not yet read by the page |
-| 1.1 | "No new message types beyond the two named below" | three: `tts`, `speech` and `line_drop`, with `line_drop`'s shape and its reason vocabulary, and the mismatch of 2.7 called out |
-| 1.2 | example message missing the two new fields | both added |
-| 1.4 | `pose_slip` "the page must stop reading it now" | it has; the server still sends it |
-| 2.1 | the 21 key file | the 29 key file as it stands on 554dc0d, including `initial_silence` 3.0 |
-| 2.2 | 21 rows | rows for the eight added keys, each saying who reads it and whether anything does |
-| 2.3 | `motion_threshold = max(0.03, 4 * idle_jitter)` | `max(0.3, 4 * idle_jitter)` in palm widths, with the unit conversion the code's own comment describes |
+| header table, 1.1, 1.2 | "eight new fields", "the two new page messages" | ten and three |
+| 1.1 | "No new message types beyond the two named below" | three. `line_drop` documented: its shape, where it is sent from, what it is for, and a block quote naming the vocabulary mismatch of 2.7 |
+| 1.2 | example message and field table stop at `mode` | `tutor_line_cuts` and `tutor_beat` added to both, with the beat's own shape, and a block quote saying neither is read by the page today and why the beat never plays |
+| 1.4 | `pose_slip` "the page must stop reading it now" | it has, and the server still sends it, so it can go. Plus a new paragraph listing all seven write-only fields, measured rather than assumed |
+| 2.1 | the 21 key file | the 29 key file as it stands on 554dc0d |
+| 2.2 | 21 rows | `initial_silence` 3.0 noted, then a second table for the eight added keys, each naming who actually reads it, and a paragraph on `gate_step_pause_ms`, which nothing reads |
+| 2.3 | `motion_threshold = max(0.03, 4 * idle_jitter)` | `max(0.3, ...)`, in palm widths, with the unit conversion the code's own comment describes |
+| 2.3 | the check node's `pairs` taken at face value | a block quote saying F10 ignores it, with what the check actually served when driven |
+| 2.3 | step 2 of the jitter measurement | plus the odd/even unit split in `_motion` (2.8) |
 | 2.4 | supportive "when **either** of the last two exercises ended with a scored error or a rescue" | **both**, which is what `_choose_mode` does (`all(r.hard for r in recent)`) |
-| 2.4 | independent when the last three were "all `first_try`" | all `autonomous_success`, which is a different and weaker predicate |
-| 4.2 | the rescue's triggers, "two of them can raise it from any level… the child's third help request" | one of them does. `hint_requested` goes through `_gate_level`, so `rescue_delay` gates it like every other route; only two wrong answers bypass the clock, and the code says so itself |
-| 5.2 | refers to `_count_pose_slip` and `POSE_GRACE_SECONDS` | `_score_gesture` / `_grace_spent`, and `POSE_GRACE_SECONDS` is now the no-tutor fallback only |
-| 3 | `kind` is one of `decision`, `intervention`, `exercise` | four; `line_drop` documented with its fields |
+| 2.4 | independent when the last three were "all `first_try`" | all `autonomous_success`, which is a different and weaker predicate, with the difference spelled out |
+| 3 | `kind` is one of `decision`, `intervention`, `exercise` | four, with `line_drop`'s fields |
+| 4.1 | `POSE_READY` "has been held for `pose_stable`. The engine has latched." | the two clocks separated, with the 550 ms gap and what it costs F8 |
+| 4.2 | "the rescue has three triggers and **two** can raise it from any level… the child's third help request" | exactly one can. `hint_requested` passes its target through `_gate_level` like every other route, so `rescue_delay` gates it too; only two wrong answers bypass the clock, and `_answer_rescue`'s own docstring says so |
+| 5.2 | refers to `_count_pose_slip`, which no longer exists | `_score_gesture` / `_grace_spent`, with `POSE_GRACE_SECONDS` now the no-tutor fallback only |
 
 ### SPEC.md section 19, against the code
 
@@ -468,14 +474,14 @@ SPEC.md is not mine to edit, so these are reported, not fixed.
 Both were driven with playwright, chromium at
 `/opt/pw-browsers/chromium-1194/chrome-linux/chrome`.
 
-**`python app/server.py --mock --no-open --port 8890`** — welcome → check →
+**`python app/server.py --mock --no-open --port 8890`**: welcome, then the check, then
 lesson → finish card. The lesson path works: five questions, the counter, the
 hearts, the finish card, 70 XP. The check is 2.1 above, and additionally its
 step-2 dot never lights, because `setStepDots(2)` lives in the `onStart` of the
 "Touch your 6 with your 6." line, which the queue drops as `queue_full` before
 it is ever spoken. The child goes from step 1 straight to step 3 on screen.
 
-**`python app/server.py --mock --demo --no-open --port 8891`** — the scripted
+**`python app/server.py --mock --demo --no-open --port 8891`**: the scripted
 scenario runs end to end and reaches the finish card with 83 XP. It served four
 of its five steps, losing the retry beat, for the reason in 2.4.
 
