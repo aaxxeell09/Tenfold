@@ -23,6 +23,34 @@
   const $$ = (sel, root) => Array.prototype.slice.call((root || document).querySelectorAll(sel));
   const NS = "http://www.w3.org/2000/svg";
 
+  // ---------- what the server is allowed to slow down ----------
+  // The page validates on the event. The only two waits it still knows about are these
+  // parameters, both zero unless a state message sets them, so a server that says
+  // nothing about them means no wait at all: the step turns and the answer goes the
+  // moment each is true.
+  const PARAMS = { check_step_min_ms: 0, answer_first_number_ms: 0 };
+  // One event, one thing on screen. The lesson's answer field is the export's pill and
+  // nothing else: the digits typed and the number heard are shown in the pill itself,
+  // the big number beside it and the "heard:" line above it are gone. That line was a
+  // developer's readout, so it comes back only with ?debug=1 in the url.
+  const DEBUG = params.get("debug") === "1";
+  const HEARD_MS = 800;           // how long the pill holds the number before the tutor answers
+  let heardTimer = null;
+  function readParams(m) {
+    const from = (m && m.params) || m || {};
+    ["check_step_min_ms", "answer_first_number_ms"].forEach((name) => {
+      const value = Number(from[name]);
+      if (Number.isFinite(value) && value >= 0) PARAMS[name] = value;
+    });
+  }
+  // The one line allowed to cut another is the acknowledgement, and the server is what
+  // marks it. The mark is being added on the server side and may not be on the message
+  // at all: every spelling it could arrive under is read, and a message carrying none
+  // of them means nothing cuts, which is the rhythm the dialogue has today.
+  const INTERRUPT_FIELDS = ["interrupt", "can_interrupt", "interrupts", "interruptible",
+    "tally_interrupt", "tally_interrupts", "barge_in"];
+  function interrupts(m) { return INTERRUPT_FIELDS.some((name) => Boolean(m && m[name])); }
+
   // ---------- storage ----------
   function read(key, fallback) {
     try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : fallback; }
@@ -366,10 +394,10 @@
     if (checkRun) return;
     const root = $("#check");
     const frame = checkFrame();
-    checkRun = { step: 1, lit: 0, timers: [], done: false, typed: "", said: null };
+    checkRun = { step: 1, stepAt: Date.now(), turning: false, lit: 0, timers: [], done: false, typed: "", said: null };
     frame.className = "frame";
     frame.dataset.step = "1";
-    checkSay("Show me both hands.");
+    checkSay("Show me both hands.", { kind: "instruction", key: "check_show" });
     // the check ends on a spoken answer too: its own pill, armed the same way
     armVoice();
     setTally($("#check-tally"), "ready");
@@ -387,6 +415,7 @@
     const step = run.step;
     run.said = text;
     checkSay(text, {
+      kind: "correction", key: "check_correction",
       still: () => checkRun === run && run.said === text && run.step === step && !run.done,
       onStart: () => setTally($("#check-tally"), mood),
     });
@@ -409,54 +438,74 @@
     });
   }
   function later(ms, fn) { if (checkRun) checkRun.timers.push(setTimeout(fn, ms)); }
+  // A step turns the instant its condition is true. check_step_min_ms is the only thing
+  // that can hold one back, and it is zero by default: the turn then runs here and now,
+  // with no timer between the child being right and the screen saying so. The number
+  // sweep keeps its own timers, it is decoration and not the step.
+  function turnStep(run, fn) {
+    const wait = PARAMS.check_step_min_ms - (Date.now() - (run.stepAt || 0));
+    const turn = () => { if (checkRun !== run) return; run.stepAt = Date.now(); run.turning = false; fn(); };
+    if (!(wait > 0)) { turn(); return; }
+    run.turning = true;
+    later(wait, turn);
+  }
   function checkMessage(m) {
     const run = checkRun;
     const frame = checkFrame();
     if (!run || m.type !== "state") return;
+    readParams(m);
+    const cuts = interrupts(m);
     drawFingers(m, $("#check .stage"));
     const hands = new Set((m.fingers || []).map((f) => f.hand)).size;
     if (run.step === 1) {
-      if (hands === 2 && !frame.classList.contains("detected")) {
+      if (hands === 2 && !frame.classList.contains("detected") && !run.turning) {
         frame.classList.add("detected");
-        // the child is past this step the moment both hands are there, whatever Tally
-        // is still saying: the acknowledgement rides the event, the next instruction
-        // waits its turn in the queue instead of a clock that can run ahead
-        run.step = 2; run.said = null;
-        // the numbers light up one by one, ten down to six
+        // the numbers light up one by one, ten down to six. Decoration on its own
+        // timers: the step never waits for it
         [10, 9, 8, 7, 6].forEach((n, i) => later(400 + i * 300, () => {
           $$("#check .practice-overlay [data-number]").forEach((el) => { if (Number(el.dataset.number) <= 10 && Number(el.dataset.number) >= n) el.classList.add("lit"); });
           run.lit = n;
         }));
-        checkSay("Perfect.", { onStart: () => { frame.classList.add("check"); setTally($("#check-tally"), "happy"); } });
-        checkSay("Touch your 6 with your 6.", {
-          still: () => checkRun === run && run.step === 2,
-          onStart: () => {
-            frame.dataset.step = "2"; frame.classList.remove("check"); setStepDots(2);
-            setTally($("#check-tally"), "thinking");
-          },
+        // the child is past this step the moment both hands are there, whatever Tally
+        // is still saying: the acknowledgement rides the event, the next instruction
+        // waits its turn in the queue instead of a clock that can run ahead
+        turnStep(run, () => {
+          run.step = 2; run.said = null;
+          checkSay("Perfect.", { kind: "ack", key: "check_hands_seen", interrupt: cuts, onStart: () => { frame.classList.add("check"); setTally($("#check-tally"), "happy"); } });
+          checkSay("Touch your 6 with your 6.", {
+            kind: "instruction", key: "check_touch",
+            still: () => checkRun === run && run.step === 2,
+            onStart: () => {
+              frame.dataset.step = "2"; frame.classList.remove("check"); setStepDots(2);
+              setTally($("#check-tally"), "thinking");
+            },
+          });
         });
       }
       if (hands === 2) $$("#check .practice-overlay [data-number]").forEach((el) => { if (run.lit && Number(el.dataset.number) >= run.lit) el.classList.add("lit"); });
       return;
     }
     if (run.step === 2) {
-      if (m.state === "correct_pose" || m.state === "waiting_answer") {
-        run.step = 3; run.said = null;
-        frame.classList.add("matched", "banner", "check");
-        $("#check .banner-top").textContent = "That is a 6 and a 6.";
-        setTally($("#check-tally"), "happy");
-        checkSay("Yes, that's it.");
-        // no microphone in this browser, or one that was refused: say so and
-        // show the digits in the pill, which is the only answer field here. The pill
-        // belongs to step 3, so it comes up with the question and never before it.
-        checkSay(canHear() ? "Say the answer." : "Type the answer.", {
-          still: () => checkRun === run && !run.done,
-          onStart: () => {
-            frame.dataset.step = "3"; frame.classList.remove("check", "banner"); setStepDots(3);
-            $("#check-miclabel").textContent = micLabel();
-            setTally($("#check-tally"), "ready");
-            listenWhile("correct_pose");
-          },
+      if ((m.state === "correct_pose" || m.state === "waiting_answer") && !run.turning) {
+        turnStep(run, () => {
+          run.step = 3; run.said = null;
+          frame.classList.add("matched", "banner", "check");
+          $("#check .banner-top").textContent = "That is a 6 and a 6.";
+          setTally($("#check-tally"), "happy");
+          checkSay("Yes, that's it.", { kind: "ack", key: "check_pose", interrupt: cuts });
+          // no microphone in this browser, or one that was refused: say so and
+          // show the digits in the pill, which is the only answer field here. The pill
+          // belongs to step 3, so it comes up with the question and never before it.
+          checkSay(canHear() ? "Say the answer." : "Type the answer.", {
+            kind: "instruction", key: "check_ask",
+            still: () => checkRun === run && !run.done,
+            onStart: () => {
+              frame.dataset.step = "3"; frame.classList.remove("check", "banner"); setStepDots(3);
+              $("#check-miclabel").textContent = micLabel();
+              setTally($("#check-tally"), "ready");
+              listenWhile("correct_pose");
+            },
+          });
         });
       } else if (m.state === "wrong_pose" && m.tally) {
         checkReact(m.tally, "almost");
@@ -470,7 +519,7 @@
       $("#check-miclabel").textContent = "Thirty six";
       run.done = true;
       gateVoice(false);
-      checkSay("Thirty six. Exactly.", { onStart: () => setTally($("#check-tally"), "happy") });
+      checkSay("Thirty six. Exactly.", { kind: "ack", key: "check_answer", interrupt: cuts, onStart: () => setTally($("#check-tally"), "happy") });
     } else if (run.step === 3 && m.state === "answer_wrong" && m.tally) {
       checkReact(m.tally, "almost");
     }
@@ -480,7 +529,7 @@
     if (!run) return;
     // the path opens when Tally has finished saying so, not on a clock. The export
     // slides its practice path in on that line, and behind it is the same path
-    checkSay("Your path is open.", { onStart: () => checkFrame().classList.add("mapin"), after: closeCheck });
+    checkSay("Your path is open.", { kind: "instruction", key: "check_done", onStart: () => checkFrame().classList.add("mapin"), after: closeCheck });
   }
   function closeCheck() {
     if (!checkRun) return;
@@ -525,8 +574,12 @@
   }
   // The dialogue is paced: one line at a time, then silence while the child works.
   // A line asked for while Tally is still talking waits for the end of that line plus
-  // PAUSE_MS. Nothing is ever cancelled and nothing overlaps.
-  const PAUSE_MS = 1000;          // the beat between two lines, the rhythm of the whole dialogue
+  // PAUSE_MS. Nothing overlaps. The single exception is a line the server has marked as
+  // able to interrupt, the acknowledgement: it cuts the line in flight and takes its
+  // place at once, because the child has already moved on and a late yes is the wait
+  // they can feel. Every other line keeps the beat exactly as it was.
+  const PAUSE_MS = 1000;          // the beat after an instruction, the rhythm of the dialogue
+  const MAX_PENDING = 1;          // one line waiting behind the one being spoken, no deeper
   const READ_MS_PER_WORD = 320;   // how long a line stands when this browser cannot speak it
   const SPEAK_GRACE_MS = 4000;    // an engine that never reports the end must not hold the queue
   const speech = { queue: [], line: null, serial: 0, timer: null, guard: null, waiting: false, lastLine: null };
@@ -554,6 +607,52 @@
     voice.spokeUntil = 0;
   }
   function readMs(text) { return Math.min(6000, 700 + String(text).split(/\s+/).length * READ_MS_PER_WORD); }
+  // What the queue does with a line depends on what kind of line it is, and there are
+  // three. An acknowledgement, which is the pose acknowledgement, the success line and
+  // the line that opens the next exercise: the child earned it, so it is never dropped
+  // and it cuts whatever is playing. A correction, which is always spoken to the end
+  // once it has started. Everything else is a nudge, and only the newest nudge is worth
+  // saying. The kind is read off the state message, or given by the caller.
+  const ACK_STATES = ["correct_pose", "waiting_answer", "answer_correct", "exercise_shown"];
+  const CORRECTION_MOMENTS = ["wrong_left_finger", "wrong_right_finger", "hands_swapped",
+    "same_hand_twice", "recount_tens", "recount_units", "no_contact"];
+  function lineKind(m) {
+    if (ACK_STATES.includes(m.state)) return "ack";
+    if (CORRECTION_MOMENTS.includes(m.reaction) || m.state === "wrong_pose" || m.state === "answer_wrong") return "correction";
+    return "nudge";
+  }
+  // Nothing is dropped quietly. Every line the queue lets go is reported to the server,
+  // which keeps the record in data/tutor_log.jsonl: what the line was, why it went, and
+  // when. The page is the only place that knows, so the page is what says so.
+  function reportDrop(item, reason) {
+    if (!item || item.reported) return;
+    item.reported = true;
+    sendLesson({ type: "line_drop", line: item.key || item.text, reason, at: Date.now() });
+  }
+  function dropLine(item, reason) {
+    const at = speech.queue.indexOf(item);
+    if (at >= 0) speech.queue.splice(at, 1);
+    reportDrop(item, reason);
+    closeItem(item);
+  }
+  // A newer line takes the place of an older unspoken one of its own kind, and the
+  // queue is never deeper than one waiting line: past that, the line that goes is the
+  // one the child can most afford to lose, never an acknowledgement and never a
+  // correction while anything else is there to go instead.
+  const REPLACEABLE = ["nudge", "correction"];
+  function enqueue(item) {
+    if (REPLACEABLE.includes(item.kind)) {
+      speech.queue.filter((q) => q.kind === item.kind)
+        .forEach((q) => dropLine(q, "replaced_by_newer_of_same_kind"));
+    }
+    speech.queue.push(item);
+    while (speech.queue.length > MAX_PENDING) {
+      const droppable = speech.queue.filter((q) => q.kind !== "ack");
+      const victim = droppable.find((q) => q.kind !== "correction") || droppable[0];
+      if (!victim) break;
+      dropLine(victim, "queue_full");
+    }
+  }
   // The one door. Only Tally's bubble goes through it: a title, a label, an XP number
   // or a level name is shown and stays silent. The bubble is written when the line is
   // spoken, not when it is asked for, so what is on screen is what Tally is saying.
@@ -563,9 +662,17 @@
   function say(text, bubble, tally, opts) {
     const line = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
     if (!line) return null;
+    const cuts = Boolean(opts && opts.interrupt);
     const item = { text: line, bubble: bubble || null, tally: tally || null, done: false,
+      kind: (opts && opts.kind) || (cuts ? "ack" : "instruction"), key: (opts && opts.key) || null,
       still: (opts && opts.still) || null, onStart: (opts && opts.onStart) || null, after: (opts && opts.after) || null };
-    speech.queue.push(item);
+    if (item.kind === "ack") {
+      // ahead of whatever is waiting, then the line in flight is ended where it stands
+      speech.queue.unshift(item);
+      cutLine();
+    } else {
+      enqueue(item);
+    }
     pump();
     return item;
   }
@@ -574,6 +681,8 @@
   // belonged to: nothing behind the child's back, nothing spoken out of turn
   function stale(item) {
     if (item.bubble && (!item.bubble.isConnected || item.bubble.closest("[hidden]"))) return true;
+    // the child earned this one: it reaches them however much has happened since
+    if (item.kind === "ack") return false;
     return Boolean(item.still) && !item.still();
   }
   function closeItem(item) {
@@ -589,7 +698,7 @@
     let item = speech.queue.shift();
     while (item && stale(item)) { dropped.push(item); item = speech.queue.shift(); }
     if (item) startLine(item);
-    dropped.forEach(closeItem);
+    dropped.forEach((gone) => { reportDrop(gone, "no_longer_true"); closeItem(gone); });
   }
   function talking(item, on) {
     if (item && item.tally) item.tally.classList.toggle("is-talking", on);
@@ -632,14 +741,30 @@
     talking(item, false);
     ttsPair(false);
     // the beat starts before anything this line was waiting on, so a line asked for
-    // from inside "after" still waits its turn
-    speech.timer = setTimeout(() => { speech.timer = null; pump(); }, PAUSE_MS);
+    // from inside "after" still waits its turn. There is no beat after an
+    // acknowledgement: the child is already past it and the next line follows at once.
+    const beat = item && item.kind === "ack" ? 0 : PAUSE_MS;
+    speech.timer = setTimeout(() => { speech.timer = null; pump(); }, beat);
     closeItem(item);
   }
   // The pedagogical clock on the server stops while Tally talks, so every line is
   // bracketed by this pair, muted or not, engine or no engine: the clock must never
   // wait on a voice that is not coming.
   function ttsPair(on) { sendLesson({ type: "tts", speaking: Boolean(on) }); }
+  // One line cut, not the dialogue: the line being spoken is ended where it stands, its
+  // tts pair closed and the beat cleared, so the line that cut it goes out now instead
+  // of one beat after a sentence the child has stopped listening to. What was queued
+  // behind is kept and follows in order.
+  function cutLine() {
+    clearTimeout(speech.timer); speech.timer = null;
+    clearTimeout(speech.guard); speech.guard = null;
+    speech.serial += 1;          // the engine may still report the end of a line that is over
+    const line = speech.line;
+    speech.line = null;
+    if (line) { talking(line, false); ttsPair(false); }
+    if (hasVoice()) { try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } }
+    closeItem(line);
+  }
   // the dialogue is over: mute, or a screen the child has left. Whatever is left to say
   // is dropped, and the pair around the line being spoken is closed.
   function cutSpeech() {
@@ -705,10 +830,14 @@
     r.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i++) {
         const text = e.results[i][0].transcript.trim();
-        const heard = $("#lesson .heard");
-        if (heard) heard.textContent = text && voice.gate ? `heard: ${text}` : "";
+        showTranscript(text);
         if (checkRun && checkRun.step === 3 && !checkRun.done) $("#check-miclabel").textContent = text || "Listening";
-        if (e.results[i].isFinal) { sendSpeech(text); submitSpoken(text); }
+        // the answer goes on the first number heard, interim or not: waiting for the end
+        // of the utterance is a wait the child feels. The whole sentence still goes to
+        // the server on the final result, where it is what tells the tutor they are
+        // working; the guards below are what keep one number from being sent twice.
+        submitSpoken(text);
+        if (e.results[i].isFinal) sendSpeech(text);
       }
     };
     voice.recognition = r;
@@ -724,18 +853,44 @@
   function hasSpeech() { return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition); }
   function canHear() { return hasSpeech() && !voice.denied; }
   function micLabel() { return canHear() ? (voice.running ? "Listening" : "Mic off") : "Type it"; }
+  // the answer field of the lesson: the number heard, held in the pill with the bars
+  // stopped, for as long as it takes the tutor to answer. The bars are stopped the way
+  // the export stops them on the check's own heard state, by taking the animation off.
+  function lessonBars(still) {
+    const mic = $("#lesson .mic");
+    if (!mic) return;
+    mic.classList.toggle("is-heard", Boolean(still));
+    $$(".bars i", mic).forEach((bar) => { bar.style.animation = still ? "none" : ""; });
+  }
+  function showHeard(value) {
+    const label = $("#lesson .mic .mic-label");
+    if (!label || !lesson) return;
+    clearTimeout(heardTimer);
+    label.textContent = String(value);
+    lessonBars(true);
+    heardTimer = setTimeout(() => { heardTimer = null; lessonBars(false); setTyped(""); }, HEARD_MS);
+  }
+  // the "heard:" readout is for a developer, not for the child: off unless the url asks
+  function showTranscript(text) {
+    const heard = $("#lesson .heard");
+    if (!heard) return;
+    heard.hidden = !DEBUG;
+    heard.textContent = DEBUG && text && voice.gate ? `heard: ${text}` : "";
+  }
   // the live listening state, on the lesson's mic and on the check's pill
   function markMic() {
     const mic = $("#lesson .mic");
     if (mic) {
-      mic.hidden = !voice.recognition;
+      // the pill is the lesson's answer field, spoken or typed, so it is always there:
+      // a browser that cannot hear says "Type it" on it and the digits land in it
+      mic.hidden = false;
       mic.classList.toggle("is-on", voice.running && !voice.denied);
       mic.classList.toggle("is-off", !voice.running || voice.denied);
       // the export writes the quiet pill as .off; the app has said is-off since v1
       mic.classList.toggle("off", !voice.running || voice.denied);
       mic.classList.toggle("is-denied", voice.denied);
       const label = $(".mic-label", mic);
-      if (label) label.textContent = micLabel();
+      if (label && !heardTimer) label.textContent = (lesson && lesson.typed) || micLabel();
     }
     const pill = $("#check-mic");
     if (pill) {
@@ -776,15 +931,27 @@
     if (tallyEcho(said)) return;
     sendLesson({ type: "speech", text: said });
   }
+  // answer_first_number_ms is the only wait between hearing a number and sending it, and
+  // it is zero by default: the answer leaves on the first result that parses, interim or
+  // final. The guards are unchanged, so the same number heard again, as the interim then
+  // the final of one breath, is still one answer, and Tally's own voice is still not the
+  // child's. The typed path does not come through here at all.
   function submitSpoken(text) {
     const value = parseNumber(text);
-    if (value === null || (!lesson && !checkRun) || !voice.gate) return;
+    if (value === null) return;
+    const wait = PARAMS.answer_first_number_ms;
+    if (wait > 0) { setTimeout(() => sendAnswer(value), wait); return; }
+    sendAnswer(value);
+  }
+  function sendAnswer(value) {
+    if ((!lesson && !checkRun) || !voice.gate) return;
     // Tally's own voice is not an answer: a number he just said is dropped while he says it
     if (Date.now() < voice.spokeUntil && voice.said.includes(value)) return;
     const now = Date.now();
     if (value === voice.last && now - voice.at < 1500) return;
     voice.last = value; voice.at = now;
     setTyped(String(value).slice(0, 3));
+    showHeard(value);
     sendLesson({ type: "check", value });
   }
 
@@ -882,6 +1049,7 @@
     }
     if (m.type !== "state") return;
     if (checkRun && m.node === "check") return checkMessage(m);
+    readParams(m);
     if (!lesson || m.node !== lesson.node.id) return;
     const fresh = m.state !== lesson.last;
     // A new exercise, not a new fact: a node can serve the same fact five times over
@@ -908,7 +1076,10 @@
     if (tutorLine && tutorLine !== lesson.said) {
       lesson.said = tutorLine;
       const turn = ++lesson.turn;
-      say(tutorLine, $("#lesson .say"), lessonTally(), { still: () => Boolean(lesson) && lesson.turn === turn });
+      say(tutorLine, $("#lesson .say"), lessonTally(), {
+        kind: lineKind(m), key: m.reaction || m.state, interrupt: interrupts(m),
+        still: () => Boolean(lesson) && lesson.turn === turn,
+      });
     }
   }
   // --demo: the map opens as a showcase, first unit done, second current
@@ -985,8 +1156,10 @@
     $(".hearts", root).dataset.hearts = "";
     $(".bar i", root).style.width = "0%";
     $(".say", root).textContent = "";
-    $(".typed", root).textContent = "";
-    $(".heard", root).textContent = "";
+    clearTimeout(heardTimer); heardTimer = null;
+    lessonBars(false);
+    setTyped("");
+    showTranscript("");
     $(".gh", root).replaceChildren();
     const band = $(".why", root);
     band.replaceChildren(); band.classList.remove("is-on"); band.dataset.band = "";
@@ -999,7 +1172,7 @@
     decorate(root);
     renderHearts();
     // the first line of the lesson goes through the same door as every other line
-    say("Show me both hands.", $("#lesson .say"), lessonTally());
+    say("Show me both hands.", $("#lesson .say"), lessonTally(), { kind: "instruction", key: "waiting_pose" });
     videoOn($(".practice-video", root));
     markMic();
   }
@@ -1081,9 +1254,13 @@
   // The four looks the export draws, from the state the server is in. The server's
   // own state stays on the camera box and on the view, which is what the overlay
   // and the tests read; this is only what the picture is dressed as.
+  // Visual before voice: the moment the pose is confirmed the picture goes green, on
+  // the same tick as the message that confirmed it and with nothing in between. Tally
+  // may still be finishing a sentence; the child has already been told yes.
+  const POSED = ["correct_pose", "waiting_answer", "answer_correct"];
   function lessonLook(m) {
     if (m.reaction === "cannot_see") return "blind";
-    if (m.state === "answer_correct") return "yes";
+    if (POSED.includes(m.state)) return "yes";
     if (m.state === "wrong_pose" || m.state === "answer_wrong") return "almost";
     return "waiting";
   }
@@ -1115,8 +1292,10 @@
     // the export's guide, the arc and the ring drawn on the hands, is what a
     // correction and a ghost are made of
     frame.classList.toggle("coach", kind === "correction" || kind === "ghost");
-    if (look !== "yes") frame.classList.remove("is-cheer");
-    else if (frame.dataset.state !== "yes") { void frame.offsetWidth; frame.classList.add("is-cheer"); }
+    // the badge that pops is for the answer, not for the pose
+    const cheer = m.state === "answer_correct";
+    if (!cheer) frame.classList.remove("is-cheer");
+    else if (root.dataset.state !== "answer_correct") { void frame.offsetWidth; frame.classList.add("is-cheer"); }
     frame.dataset.state = look;
     root.dataset.state = m.state;
     root.dataset.reaction = m.reaction || "";
@@ -1309,9 +1488,11 @@
     // once the answer is in. The numbers 6 to 10 are supportive mode's own, plus the
     // one visual that asks for them by name.
     const supportive = (m.mode || "normal") === "supportive";
-    const answered = m.state === "answer_correct";
+    // the two target tips are marked as soon as the pose is confirmed: that green is
+    // the yes the child reads, and it does not wait for Tally or for the answer
+    const posed = POSED.includes(m.state);
     const aid = new Set([pulse, expect, ghostTo, ghostFrom].filter(Boolean));
-    const marked = (tag) => supportive || (answered && match.has(tag))
+    const marked = (tag) => supportive || (posed && match.has(tag))
       || (visual !== null && (aid.has(tag) || match.has(tag) || wrong.has(tag)));
     if (kind === "placement_zones") placementZones(overlay, W, H);
     if (kind === "correction") handOutline(overlay, fingers.filter((f) => f.hand === visual.wrong_hand).map((f) => at[id(f)]), W);
@@ -1349,7 +1530,13 @@
   function setTyped(value) {
     if (!lesson && !checkRun) return;
     if (lesson) lesson.typed = value;
-    const el = $("#lesson .typed"); if (el) el.textContent = value;
+    // kept in the markup and off the screen: the pill is the one place an answer shows
+    const el = $("#lesson .typed"); if (el) { el.textContent = value; el.hidden = true; }
+    const caret = $("#lesson .caret"); if (caret) caret.hidden = true;
+    if (lesson) {
+      const label = $("#lesson .mic .mic-label");
+      if (label && !heardTimer) label.textContent = value || micLabel();
+    }
     if (checkRun && !lesson) {
       // the check has no answer field of its own: the pill carries the digits, and
       // it has to follow a Backspace back down to the label
@@ -1627,9 +1814,10 @@
   // startLesson is on the surface so the camera lesson can be opened without the path
   // screen, and the child helpers so a test can switch child: the screens are wired by
   // different hands and each one's test should fail for its own reasons.
-  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay,
+  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, timing: PARAMS,
     startLesson, addXp, setChild, roster,
     get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); },
+    get checkStep() { return checkRun ? checkRun.step : 0; },
     get child() { return child(); }, get name() { return name(); } };
   route();
   markMute();
