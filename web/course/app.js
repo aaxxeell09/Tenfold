@@ -291,7 +291,7 @@
     setTally($("#check-tally"), "ready");
     setStepDots(1);
     videoOn($("#check-cam .practice-video"));
-    connect(() => sendLesson({ type: "start_node", state: learner(), node: { id: "check", kind: "check", pairs: [[6, 6]], count: 1 } }));
+    connect(() => sendLesson({ type: "start_node", tab: TAB, state: learner(), node: { id: "check", kind: "check", pairs: [[6, 6]], count: 1 } }));
     decorate(root);
   }
   function checkSay(text) { say($("#check-say"), text, $("#check-tally")); }
@@ -607,7 +607,9 @@
   function startVoice() { if (!voice.recognition || voice.running || !voice.wanted || voice.denied) return; try { voice.recognition.start(); } catch (e) { /* starting */ } }
   function stopVoice() { voice.wanted = false; if (voice.recognition && voice.running) { try { voice.recognition.stop(); } catch (e) { /* done */ } } }
   function gateVoice(on) { voice.gate = Boolean(on); markMic(); }
-  function listenWhile(state) { gateVoice(state === "correct_pose" || state === "waiting_answer"); }
+  // answer_wrong keeps the pose latched and waits for another try: the next number said
+  // out loud is that try, so the gate stays open until the server moves on
+  function listenWhile(state) { gateVoice(state === "correct_pose" || state === "waiting_answer" || state === "answer_wrong"); }
   // Tally's own voice is never the child speaking: while one of his lines is in the
   // air, a transcript that is part of that line, or that carries only numbers he just
   // said, is dropped instead of being forwarded.
@@ -656,6 +658,10 @@
   const LINK_TIMEOUT_MS = 4000;
   const LINK_MAX_WAIT_MS = 8000;
   let socket = null, socketReady = false;
+  // This page load, as opposed to this socket: a reconnect keeps it, so the server can
+  // hand the running node back to it even before it has noticed the old socket is dead.
+  // A second tab, a duplicated one included, runs its own script and gets its own.
+  const TAB = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const link = { start: null, waiting: [], tries: 0, timer: null, guard: null, trouble: false };
   function connect(onOpen) {
     if (onOpen) {
@@ -784,7 +790,7 @@
       // replayed after a dropped socket: the server starts the node again, so the
       // page banks what was already earned and counts this node from zero too
       restartCounters();
-      sendLesson({ type: "start_node", state: learner(), node: { id: node.id, kind: node.kind, pairs: node.pairs, count: total } });
+      sendLesson({ type: "start_node", tab: TAB, state: learner(), node: { id: node.id, kind: node.kind, pairs: node.pairs, count: total } });
     });
   }
   function restartCounters() {

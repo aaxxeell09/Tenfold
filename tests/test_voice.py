@@ -381,6 +381,42 @@ def test_a_spoken_wrong_answer_is_sent_too(page):
     saw_state(tab, "answer_wrong", timeout=10000)
 
 
+def test_after_a_wrong_spoken_answer_the_next_spoken_answer_is_heard(page):
+    """Right pose, wrong answer out loud, right answer out loud: the second try has to
+    reach the server with no keyboard. answer_wrong keeps the pose latched and waits,
+    so the listening window has to stay open on it."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION)
+    tab.add_init_script(CAPTURE_SOCKET)
+    open_lesson(tab, url)
+    node = running_lesson(tab)
+    tab.evaluate("""() => {
+      window.__checks = [];
+      const ws = window.__socket, send = ws.send.bind(ws);
+      ws.send = (data) => { const m = JSON.parse(data); if (m.type === 'check') window.__checks.push(m.value); return send(data); };
+    }""")
+
+    feed(tab, node, state="correct_pose", exercise="6 x 7")
+    assert tab.evaluate("Tenfold.voice.gate") is True
+    tab.evaluate("() => window.__say('fifty two', true)")
+    feed(tab, node, state="answer_wrong", exercise="6 x 7",
+         reaction="recount_units", tally="Almost. Count the units again.")
+    assert stage_state(tab) == "answer_wrong"
+    assert tab.evaluate("Tenfold.voice.gate") is True, "the microphone closed on the wrong answer"
+
+    tab.evaluate("() => window.__say('forty two', true)")
+    assert tab.evaluate("window.__checks") == [52, 42]
+    assert tab.inner_text("#lesson .typed") == "42"
+
+    # once the server moves on, a number heard is no longer an answer
+    feed(tab, node, state="answer_correct", exercise="6 x 7", answer=42)
+    feed(tab, node, state="exercise_shown", exercise="7 x 7")
+    assert tab.evaluate("Tenfold.voice.gate") is False
+    tab.evaluate("() => window.__say('forty nine', true)")
+    assert tab.evaluate("window.__checks") == [52, 42]
+
+
 def test_the_same_number_twice_in_a_row_is_one_answer(page):
     """Recognition repeats itself. Two identical finals must not be two answers."""
     context, url = page

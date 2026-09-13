@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-13T14:06:54+00:00",
-  "best_version": "23a3711532ddba8f49afa09a74dca47c3ee9585e",
+  "generated_at": "2026-09-13T14:25:52+00:00",
+  "best_version": "04c7566d51b71500e4249b1088b5846aace8d5fe",
   "informed": [
     {
       "tag": "v0",
@@ -307,7 +307,7 @@
     {
       "tag": "v2",
       "version": 2,
-      "sha": "23a3711532ddba8f49afa09a74dca47c3ee9585e",
+      "sha": "df8231fdf938c3d3cf6a1cadba3f625c01674034",
       "ts": "2026-09-13T14:06:52+00:00",
       "kind": "patch",
       "data": {
@@ -404,13 +404,119 @@
       },
       "heldout": null,
       "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex dce690c..b799053 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -8,6 +8,12 @@ Hypothesis log (one line per accepted patch, newest last):\n - v1: measured (not the diagnosis's pair-selection guess) that near_contact holds were the biggest failure:\n   the correct pair is found but sits just under 0.35, so contact flips true when the label expects false.\n   Lowered CONTACT_THRESHOLD to 0.2975 (best passing value from --sweep-all), near_contact_accuracy 0.41 -> 0.73.\n+- v2: measured that the diagnosed 6x7/6x8 pair-selection failure (nearest-pair picks index-index over\n+  thumb-index) is real but not reachable by any single constant or a recent-frame vote/average without\n+  regressing a small class (e.g. 8x10, near:6x10 each lose their one hold). Instead found low-confidence\n+  frames (~0.50-0.52, e.g. s000500, s000513, s000560, s000561) slip past UNKNOWN_THRESHOLD and produce a\n+  spurious pair on negative/transition samples. Raised UNKNOWN_THRESHOLD to 0.525 (best passing value from\n+  --sweep-all), exact_match 0.492 -> 0.497, false_unknown_rate unchanged at 0.047.\n \"\"\"\n from __future__ import annotations\n \n@@ -15,7 +21,7 @@ from classifier import features\n from classifier.schema import GestureState, Window\n \n CONTACT_THRESHOLD = 0.2975  # fingertip distance, in units of mean hand scale\n-UNKNOWN_THRESHOLD = 0.5  # below this detection confidence we refuse to answer\n+UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer\n \n \n def classify(window: Window) -> GestureState:\n"
+    },
+    {
+      "tag": "v3",
+      "version": 3,
+      "sha": "04c7566d51b71500e4249b1088b5846aace8d5fe",
+      "ts": "2026-09-13T14:25:49+00:00",
+      "kind": "patch",
+      "data": {
+        "sha": "448d3292a217",
+        "n_samples": 483
+      },
+      "diagnosis": "DIAGNOSIS: The most frequent failure is misclassifying 6x6, 6x7, and 6x8 as 7x7 or 7x8 due to incorrect nearest fingertip pair selection, with 6x6 at 66.7%, 6x7 at 33.3%, and 6x8 at 44.4% accuracy.  \nHYPOTHESIS: The classifier uses the single nearest fingertip pair without validating anatomical plau",
+      "patch_hypothesis": "Measured the diagnosed 6x6/6x7/6x8 pair-selection failure directly and confirmed it (index-index nearest-pair beats thumb-index in 3 of 4 failing 6x7 samples), but `--sweep-all` and v2's prior log both show no single constant or frame-vote reaches it without regressing a small class; the biggest reachable failure by measurement was a near-contact boundary miscalibration (near_contact_accuracy 0.736, several near-contact samples like class 9x6 sitting just above the old 0.2975 threshold).",
+      "patch": "Lowered `CONTACT_THRESHOLD` from 0.2975 to 0.2826 (best passing value from `--sweep-all`).",
+      "expected": "near-contact classes (e.g. 9x6) and overall `near_contact_accuracy`/`contact_accuracy` improve (0.736\u21920.778, 0.864\u21920.877) with `exact_match` rising 0.497\u21920.500 and no class regressing; the 6x6/6x7/6x8 pair-selection issue remains unresolved and unaffected.",
+      "gate": "exact_match 0.497 -> 0.500",
+      "spent_usd": 0.691,
+      "train": {
+        "exact_match": 0.49999999999999994,
+        "exact_match_ci95": [
+          0.4340909090909091,
+          0.5643939393939393
+        ],
+        "exact_match_unordered": 0.49999999999999994,
+        "contact_accuracy": 0.8765432098765432,
+        "false_unknown_rate": 0.04678362573099415,
+        "negative_rejection_accuracy": 0.3669064748201439,
+        "near_contact_accuracy": 0.7777777777777777,
+        "n_samples": 483,
+        "n_holds": 220,
+        "per_class": {
+          "10x10": 0.3333333333333333,
+          "10x6": 1.0,
+          "10x7": 1.0,
+          "10x8": 0.8333333333333334,
+          "10x9": 0.8888888888888888,
+          "6x10": 0.5,
+          "6x6": 0.6666666666666666,
+          "6x7": 0.3333333333333333,
+          "6x8": 0.4444444444444444,
+          "6x9": 0.25,
+          "7x10": 1.0,
+          "7x6": 0.5,
+          "7x7": 0.625,
+          "7x8": 0.6666666666666666,
+          "7x9": 1.0,
+          "8x10": 1.0,
+          "8x6": 1.0,
+          "8x7": 1.0,
+          "8x8": 1.0,
+          "8x9": 0.6666666666666666,
+          "9x10": 0.8888888888888888,
+          "9x6": 1.0,
+          "9x7": 1.0,
+          "9x8": 0.8333333333333334,
+          "9x9": 1.0,
+          "near:10x10": 0.0,
+          "near:10x8": 0.5,
+          "near:6x10": 0.6666666666666666,
+          "near:6x6": 0.6666666666666666,
+          "near:7x7": 1.0,
+          "near:7x9": 1.0,
+          "near:8x7": 0.6666666666666666,
+          "near:8x8": 1.0,
+          "near:9x10": 0.3333333333333333,
+          "near:9x6": 0.3333333333333333,
+          "out_of_frame": 0.6756756756756757,
+          "partial_hand": 1.0,
+          "rest": 1.0,
+          "transition": 0.25903614457831325
+        },
+        "per_slice": {
+          "angle=front": {
+            "exact_match": 0.48344370860927155,
+            "false_unknown_rate": 0.07407407407407407,
+            "n_samples": 329,
+            "n_holds": 151
+          },
+          "angle=side": {
+            "exact_match": 0.5294117647058824,
+            "false_unknown_rate": 0.0,
+            "n_samples": 153,
+            "n_holds": 68
+          },
+          "distance=far": {
+            "exact_match": 0.46064814814814814,
+            "false_unknown_rate": 0.0,
+            "n_samples": 154,
+            "n_holds": 72
+          },
+          "distance=near": {
+            "exact_match": 0.5191441441441441,
+            "false_unknown_rate": 0.06349206349206349,
+            "n_samples": 329,
+            "n_holds": 148
+          }
+        },
+        "scorers_sha256": "5fc3a6538d08192bf7f263fe4466b5f235d851b66d507ae97535324aa8bf4baa"
+      },
+      "heldout": null,
+      "diff": "diff --git a/classifier/rules.py b/classifier/rules.py\nindex b799053..c3fbacd 100644\n--- a/classifier/rules.py\n+++ b/classifier/rules.py\n@@ -14,13 +14,20 @@ Hypothesis log (one line per accepted patch, newest last):\n   frames (~0.50-0.52, e.g. s000500, s000513, s000560, s000561) slip past UNKNOWN_THRESHOLD and produce a\n   spurious pair on negative/transition samples. Raised UNKNOWN_THRESHOLD to 0.525 (best passing value from\n   --sweep-all), exact_match 0.492 -> 0.497, false_unknown_rate unchanged at 0.047.\n+- v3: re-measured the diagnosed 6x6/6x7/6x8 pair-selection failure directly (--class 6x7): it is real\n+  (index-index beats thumb-index in 3 of 4 failing samples) but --sweep-all confirms again no single\n+  constant reaches it, and v2 already found frame-voting regresses small classes. Sweep-all's best\n+  passing change is instead a near-contact boundary miscalibration one step down from v1's value:\n+  CONTACT_THRESHOLD 0.2975 -> 0.2826 fixes near-contact samples (e.g. class 9x6) sitting just above the\n+  old threshold, near_contact_accuracy 0.736 -> 0.778, exact_match 0.497 -> 0.500, false_unknown_rate\n+  unchanged at 0.047, no class regressed.\n \"\"\"\n from __future__ import annotations\n \n from classifier import features\n from classifier.schema import GestureState, Window\n \n-CONTACT_THRESHOLD = 0.2975  # fingertip distance, in units of mean hand scale\n+CONTACT_THRESHOLD = 0.2826  # fingertip distance, in units of mean hand scale\n UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer\n \n \n"
     }
   ],
   "blind": [],
   "rejected": [],
   "critic_commits": [
     {
-      "sha": "23a3711532ddba8f49afa09a74dca47c3ee9585e",
+      "sha": "04c7566d51b71500e4249b1088b5846aace8d5fe",
+      "date": "2026-09-13T07:22:32-07:00",
+      "subject": "critic v3: The most frequent failure is misclassifying 6x6, 6x7, and 6x8 as 7x7 or 7x8 due to incorrect nearest fingertip pair sele | patch: Lowered `CONTACT_THRESHOLD` from 0.2975 to 0.2826 (best passing value from `--sweep-all`). | expected: near-contact classes (e.g. 9x6) and overall `near_contact_accuracy`/`contact_accuracy` improve (0.736\u21920.778, 0.864\u21920.877"
+    },
+    {
+      "sha": "df8231fdf938c3d3cf6a1cadba3f625c01674034",
       "date": "2026-09-13T07:05:50-07:00",
       "subject": "critic v2: The most frequent failure is misclassifying 6x6, 6x7, and 6x8 gestures as higher values (e.g., 7x7, 7x8), with exact_mat | patch: Raised UNKNOWN_THRESHOLD from 0.5 to 0.525 (best passing value from `--sweep-all`), rejecting those low-confidence frame | expected: transition and near-contact classes improve (fewer spurious positive predictions on shaky detections) with exact_match 0"
     },
@@ -421,5 +527,6 @@
     }
   ],
   "knn_heldout": null,
-  "detection_ceiling": null
+  "detection_ceiling": null,
+  "retrospective_validation": null
 }

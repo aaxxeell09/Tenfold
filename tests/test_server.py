@@ -525,6 +525,161 @@ def test_a_second_tab_cannot_take_the_running_node_and_a_reload_can():
     run(scenario())
 
 
+def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node():
+    """The second tab is refused its node but keeps its keys, buttons and microphone.
+    Over the real socket, none of what it sends may reach the first tab's lesson."""
+    first_node = {"id": "check", "kind": "check", "pairs": [[6, 6]], "count": 1}
+    second_node = {"id": "u1-l2", "kind": "lesson", "pairs": [[6, 7]]}
+
+    async def scenario():
+        app = server.create_app(mock=True)
+        lesson = app[server.LESSON_KEY]
+        srv, client = await _client(app)
+        try:
+            first = await client.ws_connect("/ws")
+            await first.send_json({"type": "start_node", "tab": "one", "state": None,
+                                   "node": first_node})
+            # the mock never skips inside the check, so the pose latches and waits
+            await _await(first, lambda m: m.get("node") == "check"
+                         and m.get("state") == "correct_pose")
+
+            second = await client.ws_connect("/ws")
+            await second.send_json({"type": "start_node", "tab": "two", "state": None,
+                                    "node": second_node})
+            await _await(second, lambda m: m.get("tally") == server.ALREADY_PLAYING)
+            for command in ({"type": "hint"}, {"type": "repeat"},
+                            {"type": "check", "value": 36}, {"type": "next"},
+                            {"type": "quit"}):
+                await second.send_json(command)
+            await asyncio.sleep(0.3)
+            assert lesson.running and lesson.node["id"] == "check", "the node was taken"
+            assert lesson.engine.latched, "repeat reached the running node"
+            assert lesson.hint_level == 0, "hint reached the running node"
+            assert lesson.scheduler.outcomes == [], "check or next reached the running node"
+
+            await first.send_json({"type": "check", "value": 36})
+            ended = await _await(first, lambda m: m.get("type") == "node_end")
+            assert ended["node_id"] == "check" and ended["correct"] == 1
+            await first.close()
+            await second.close()
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_only_the_owner_changes_the_session_and_its_page_can_take_it_back():
+    lesson = _lesson()
+    owner, intruder = object(), object()
+    lesson.command({"type": "start_node", "tab": "one", "node": _node(count=2),
+                    "state": None}, client=owner)
+    lesson.command({"type": "start_node", "tab": "two", "node": _node("u1-l2"),
+                    "state": None}, client=intruder)
+    pick, learner = lesson.pick, lesson.learner
+    right = GestureState(method="6-10", left=pick.left, right=pick.right,
+                         contact=True, confidence=0.95)
+    lesson.observe(right, [], 2, 0.0)
+    lesson.observe(right, [], 2, 0.4)
+    assert lesson.engine.latched
+
+    def untouched() -> None:
+        assert lesson.running and lesson.node["id"] == "u1-l1"
+        assert lesson.pick is pick and lesson.engine.latched
+        assert lesson.hint_level == 0 and lesson.scheduler.outcomes == []
+        assert lesson.learner is learner, "a hello swapped the running learner"
+
+    for command in ({"type": "hint"}, {"type": "repeat"}, {"type": "hello", "state": None},
+                    {"type": "check", "value": pick.result}, {"type": "next"},
+                    {"type": "quit"}):
+        lesson.command(command, client=intruder)
+    untouched()
+
+    # the owner's socket drops: nobody commands an ownerless node, not even to quit it
+    lesson.release(owner)
+    assert lesson.owner is None
+    lesson.command({"type": "quit"}, client=intruder)
+    lesson.command({"type": "next"}, client=owner)
+    untouched()
+
+    # the page reconnects on a new socket and asks for its node again
+    reconnected = object()
+    lesson.command({"type": "start_node", "tab": "one", "node": _node(count=2),
+                    "state": None}, client=reconnected)
+    assert lesson.owner is reconnected
+    lesson.command({"type": "next"}, client=reconnected)
+    assert len(lesson.scheduler.outcomes) == 1, "the owner is obeyed again"
+
+
+def test_a_page_that_reconnects_before_its_old_socket_is_noticed_keeps_its_node():
+    """A dropped connection can stay open on the server for a heartbeat. The same page
+    on a new socket is the owner, not a second tab; another page still is not."""
+    lesson = _lesson()
+    old, new, other = object(), object(), object()
+    lesson.command({"type": "start_node", "tab": "one", "node": _node(count=2),
+                    "state": None}, client=old)
+
+    lesson.command({"type": "start_node", "tab": "two", "node": _node("u1-l2"),
+                    "state": None}, client=other)
+    assert lesson.owner is old and lesson.node["id"] == "u1-l1"
+    lesson.command({"type": "start_node", "node": _node("u1-l2"), "state": None},
+                   client=other)
+    assert lesson.owner is old, "no tab at all is not the owner's tab"
+
+    lesson.command({"type": "start_node", "tab": "one", "node": _node(count=2),
+                    "state": None}, client=new)
+    assert lesson.owner is new and lesson.node["id"] == "u1-l1"
+    lesson.command({"type": "next"}, client=old)
+    assert lesson.scheduler.outcomes == [], "the dead socket lost the node"
+    lesson.release(old)                     # noticed late, and it changes nothing
+    assert lesson.owner is new
+    lesson.command({"type": "next"}, client=new)
+    assert len(lesson.scheduler.outcomes) == 1
+
+
+def test_a_bare_client_owns_its_hello_session_and_can_take_it_back():
+    lesson = _lesson()
+    mine, other = object(), object()
+    lesson.command({"type": "hello", "state": None}, client=mine)
+    assert lesson.owner is mine
+    lesson.command({"type": "next"}, client=other)
+    assert lesson.scheduler.outcomes == []
+    lesson.release(mine)
+    again = object()
+    lesson.command({"type": "hello", "state": None}, client=again)
+    assert lesson.owner is again
+    lesson.command({"type": "next"}, client=again)
+    assert len(lesson.scheduler.outcomes) == 1
+
+
+def test_a_new_wrong_pose_is_named_on_the_page_not_the_first_one():
+    """8 x 7, held (8, 9) then (9, 7): Tally has to name the left finger once the new
+    pose settles, and the page gets the hint for the finger that is wrong now."""
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "node": _node(pairs=((8, 7),)), "state": None})
+    pick = lesson.pick
+    off = next(n for n in range(6, 11) if n not in (pick.left, pick.right))
+
+    def pose(left: int, right: int) -> GestureState:
+        return GestureState(method="6-10", left=left, right=right, contact=False,
+                            confidence=0.9)
+
+    for now in (0.0, 0.4):
+        lesson.observe(pose(pick.left, off), [], 2, now)
+    named = lesson.hub.message
+    assert named["hint"] == {"hand": "right", "move_from": off, "move_to": pick.right}
+
+    lesson.observe(pose(off, pick.right), [], 2, 1.0)
+    assert lesson.hub.message["hint"] == named["hint"], "one frame is not a new pose"
+    lesson.observe(pose(off, pick.right), [], 2, 1.4)
+    now_named = lesson.hub.message
+    assert now_named["hint"] == {"hand": "left", "move_from": off, "move_to": pick.left}
+    assert now_named["wrong"] == [{"hand": "left", "number": off}]
+    assert now_named["tally"] != named["tally"]
+    assert now_named["tally"] == server.PHRASE("wrong_left_finger", {
+        "hint": now_named["hint"], "answer": None, "exercise": now_named["exercise"]})
+    assert lesson.wrong_hand == "wrong_left_finger"
+
+
 async def _await(ws, wanted, timeout: float = 8.0):
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout

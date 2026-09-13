@@ -35,7 +35,9 @@ shows, so the overlay lines up without the page knowing anything about cameras.
 
 Messages from the browser: {"type": "check", "value": 56}, {"type": "next"},
 {"type": "hint"} when the child asks for help, {"type": "repeat"},
-{"type": "quit"}, {"type": "start_node", "node": {...}, "state": {...}},
+{"type": "quit"}, {"type": "start_node", "node": {...}, "state": {...},
+"tab": "..."} where tab names the page load so a reconnect can take its own
+node back,
 {"type": "tts", "speaking": true} and {"type": "tts", "speaking": false}
 around every line the page speaks, and {"type": "speech", "text": "..."} for
 anything the child says, which never submits an answer and is never stored.
@@ -1288,6 +1290,7 @@ class Lesson:
         self.finished = True
         self.running = False
         self.owner = None
+        self.owner_tab = None
         self.sitting_at = now_utc()
         self.early_stop = False
         self.early_stop_served = False
@@ -1309,6 +1312,7 @@ class Lesson:
         self.owner = client
         self.tutor.open(self.learner.learner_id, _carried_factors(raw))
         self.scheduler = self._new_scheduler()
+        self.owner = client
         self.finished = False
         self.running = True
         self.early_stop = False
