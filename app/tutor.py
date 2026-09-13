@@ -155,8 +155,14 @@ FRAME_PARAMS = ("pose_confirm_frames",)
 MS_PARAMS = ("pose_confirm_ms", "ack_delay_ms", "check_step_min_ms",
              "answer_first_number_ms")
 LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
+# The success beat, in milliseconds: how long the celebration itself runs, and
+# how long the silence after it lasts before the next exercise is announced.
+# They are the length of a piece of choreography the page plays, not the
+# patience of Tally, so like the latency keys no learner factor and no mode
+# factor ever scales them. Only the clamp applies.
+BEAT_PARAMS = ("success_beat_ms", "next_pause_ms")
 REQUIRED_PARAMS = ((("fps",) + DURATION_PARAMS + COUNT_PARAMS + FACTOR_PARAMS)
-                   + LATENCY_PARAMS)
+                   + LATENCY_PARAMS + BEAT_PARAMS)
 MS_PER_S = 1000.0
 
 LINE_KEYS = (
@@ -168,6 +174,29 @@ LINE_KEYS = (
 )
 # One line per wrong answer on the same exercise, the last one repeating.
 WRONG_ANSWER_KEYS = ("wrong_answer_1", "wrong_answer_2", "wrong_answer_3")
+# Lines the file may carry and does not have to. "next_one" closes the success
+# beat, and lesson/tally_lines.json does not have it yet: until it does the beat
+# hands the page no second line at all rather than a line nobody wrote.
+OPTIONAL_LINE_KEYS = ("next_one",)
+NEXT_LINE_KEY = "next_one"
+
+# The success beat. The page plays the parts in this order inside success_ms,
+# then keeps pause_ms of silence, then says next_line and fades the new
+# exercise in. The tutor calls it; the page draws it.
+BEAT_SUCCESS = "success"
+BEAT_PARTS = ("line", "halo", "stars", "counter")
+
+# A line the page could not speak, reported back from the page. The vocabulary
+# of why, as one machine token. Anything else the page sends is logged as
+# "unknown" with the raw text kept beside it: this is diagnostic data about
+# things going wrong, so it is never the moment to throw a report away.
+DROP_REPLACED = "replaced"
+DROP_QUEUE_FULL = "queue_full"
+DROP_INTERRUPTED = "interrupted"
+DROP_UNKNOWN = "unknown"
+DROP_REASONS = (DROP_REPLACED, DROP_QUEUE_FULL, DROP_INTERRUPTED, DROP_UNKNOWN)
+# How much of a malformed reason or line is kept in the log.
+DROP_TEXT_LIMIT = 120
 
 
 class ParamsError(ValueError):
@@ -267,13 +296,16 @@ def load_lines(path: Path | str = LINES_PATH) -> Mapping[str, str]:
     missing = [key for key in LINE_KEYS if key not in raw]
     if missing:
         raise ParamsError(f"{path}: missing lines: {', '.join(sorted(missing))}")
-    extra = [key for key in raw if key not in LINE_KEYS]
+    known = set(LINE_KEYS) | set(OPTIONAL_LINE_KEYS)
+    extra = [key for key in raw if key not in known]
     if extra:
         raise ParamsError(f"{path}: unknown lines: {', '.join(sorted(extra))}")
-    for key in LINE_KEYS:
+    present = tuple(LINE_KEYS) + tuple(key for key in OPTIONAL_LINE_KEYS
+                                       if key in raw)
+    for key in present:
         if not isinstance(raw[key], str) or not raw[key].strip():
             raise ParamsError(f"{path}: line {key} is empty")
-    return MappingProxyType({key: raw[key] for key in LINE_KEYS})
+    return MappingProxyType({key: raw[key] for key in present})
 
 
 # --- what goes in and what comes out ----------------------------------------
@@ -292,12 +324,19 @@ class Observation:
 
 @dataclass(frozen=True)
 class Decision:
-    """The nine fields of the state message, as of now.
+    """The ten fields of the state message, as of now.
 
     tutor_line_cuts is the ninth and the only one about delivery rather than
     pedagogy: true means this line may interrupt whatever is being spoken
     instead of queueing behind it. Only the acknowledgement of a confirmed pose
     ever sets it, so a page that ignores it still behaves as it did before.
+
+    tutor_beat is the tenth. It is null on every message but the one that
+    carries the success line, where it is the whole success beat the page has
+    to play: kind, the parts in the order they run, the two timings in
+    milliseconds and their sum, the line being said and the line that closes
+    the beat. The page owns the pixels and reads the numbers here rather than
+    inventing them; the tutor owns the decision and never skips it.
     """
 
     tutor_state: str = WORKING
@@ -309,6 +348,7 @@ class Decision:
     first_try: bool = True
     mode: str = NORMAL
     tutor_line_cuts: bool = False
+    tutor_beat: dict[str, Any] | None = None
 
     def as_fields(self) -> dict[str, Any]:
         return {
@@ -321,6 +361,7 @@ class Decision:
             "first_try": self.first_try,
             "mode": self.mode,
             "tutor_line_cuts": self.tutor_line_cuts,
+            "tutor_beat": dict(self.tutor_beat) if self.tutor_beat else None,
         }
 
 
@@ -511,6 +552,11 @@ class Tutor:
         """global[key] scaled, then clamped. The clamp is always the last step."""
         raw = float(self.params.values[key])
         low, high = self.params.bound(key)
+        if key in BEAT_PARAMS:
+            # The beat is the same length for every child and in every mode:
+            # no learner factor, no mode factor, and the clamp is still the
+            # last step. This is the path INDEPENDENT mode may not touch.
+            return float(_clamp(raw, low, high))
         if key == "fps" or key in FACTOR_PARAMS or key in LATENCY_PARAMS:
             return raw
         if key in COUNT_PARAMS:
@@ -568,6 +614,75 @@ class Tutor:
         self._engage()
         return self._decision()
 
+    def line_dropped(self, line: Any = None, reason: Any = None,
+                     at: Any = None, now: float | None = None) -> Decision:
+        """The page could not speak a line it was given, and says so.
+
+        One line of the page's queue that never reached the child: a newer line
+        of the same kind replaced it, the queue was full, or speech was cut off.
+        It changes nothing in the lesson, scores nothing and moves no timer of
+        its own; it is written to the log as a line_drop event so that the gap
+        between lines decided and lines heard can be measured.
+
+        Nothing here raises and nothing here is refused. A line that is not a
+        string, a reason outside the vocabulary and a timestamp that is not a
+        number are all logged as they came, because a malformed report about a
+        line going missing is itself the evidence.
+        """
+        self._tick(now)
+        text = line if isinstance(line, str) and line.strip() else None
+        if text is not None:
+            text = text.strip()[:DROP_TEXT_LIMIT]
+        token = reason if isinstance(reason, str) else None
+        if token is not None:
+            token = token.strip().lower()
+        known = token if token in DROP_REASONS else DROP_UNKNOWN
+        raw = None if token in DROP_REASONS else self._reported(reason)
+        reported_at: float | None = None
+        if isinstance(at, (int, float)) and not isinstance(at, bool):
+            reported_at = round(float(at), 3) if math.isfinite(float(at)) else None
+        self._write({
+            "kind": "line_drop",
+            "ts": _iso(self._utc()),
+            "learner_id": self.learner_id,
+            "exercise": self._title,
+            "line": text,
+            "line_key": self._key_for_line(text),
+            "reason": known,
+            "reported_reason": raw,
+            "reported_at": reported_at,
+            "state": self._state,
+            "intervention": self._level,
+            "mode": self._mode,
+        })
+        return self._decision()
+
+    @staticmethod
+    def _reported(reason: Any) -> str | None:
+        """A reason the vocabulary does not know, kept as the page sent it."""
+        if reason is None:
+            return None
+        try:
+            text = reason if isinstance(reason, str) else repr(reason)
+        except Exception:
+            return None
+        text = text.strip()[:DROP_TEXT_LIMIT]
+        return text or None
+
+    def _key_for_line(self, text: str | None) -> str | None:
+        """Which of Tally's lines this was, when it was one of them verbatim.
+
+        Only the lines with nothing to fill in can be recognised this way, and
+        the acknowledgement of a confirmed pose is one of them, which is the
+        whole point: how many acknowledgements never reached the child.
+        """
+        if text is None:
+            return None
+        for key, template in self.lines.items():
+            if template == text:
+                return key
+        return None
+
     def hint_requested(self, now: float | None = None) -> Decision:
         """The child asked for help. The only help that costs first try."""
         moment = self._tick(now)
@@ -610,6 +725,11 @@ class Tutor:
                                 total=self._result)
             self._set_state(SUCCESS, moment, REASON_ANSWER_GIVEN)
             self._say(line, moment)
+            # Never gated and never skipped: the beat is called here, on the
+            # same path as the success line, outside _offer and _blocked, so
+            # min_verbal_gap, the unsolicited budget and the mode leave it
+            # alone. A correct answer always gets its beat.
+            self._beat = self._success_beat(line)
         else:
             self._math_errors += 1
             self._set_state(ANSWER_RETRY, moment, REASON_ANSWER_WRONG,
@@ -1500,6 +1620,32 @@ class Tutor:
         except (KeyError, IndexError, ValueError):
             return None
 
+    # -- the success beat ----------------------------------------------------
+
+    def _beat_ms(self, key: str) -> int:
+        """One beat timing, in whole milliseconds, inside its bounds."""
+        return int(round(self.effective(key)))
+
+    def _success_beat(self, line: str | None) -> dict[str, Any]:
+        """The beat between a correct answer and the next exercise.
+
+        The tutor decides that it runs and how long each half lasts; the page
+        decides what green and a star burst look like. next_line is None while
+        lesson/tally_lines.json has no line for it, and the page then closes the
+        beat in silence rather than on words the tutor made up.
+        """
+        success_ms = self._beat_ms("success_beat_ms")
+        pause_ms = self._beat_ms("next_pause_ms")
+        return {
+            "kind": BEAT_SUCCESS,
+            "parts": list(BEAT_PARTS),
+            "success_ms": success_ms,
+            "pause_ms": pause_ms,
+            "total_ms": success_ms + pause_ms,
+            "line": line,
+            "next_line": self._render(NEXT_LINE_KEY),
+        }
+
     # -- bookkeeping ---------------------------------------------------------
 
     def _reset_exercise(self, moment: float, a: int, b: int, title: str) -> None:
@@ -1530,6 +1676,7 @@ class Tutor:
         self._pending_cuts = False
         self._ack_line: str | None = None
         self._ack_due = 0.0
+        self._beat: dict[str, Any] | None = None
         self._answered = False
         self._answer_correct = False
         self._correct_pose_seen = False
@@ -1554,6 +1701,10 @@ class Tutor:
         self._gone_since = None
 
     def _decision(self, line: str | None = None, cuts: bool = False) -> Decision:
+        # The beat rides exactly one decision, the one that carries the success
+        # line, and is cleared as it is read: a page that replayed it on every
+        # message would loop the celebration forever.
+        beat, self._beat = self._beat, None
         return Decision(
             tutor_state=self._state,
             intervention_level=self._level,
@@ -1564,8 +1715,9 @@ class Tutor:
             first_try=self.first_try,
             mode=self._mode,
             tutor_line_cuts=cuts and line is not None,
+            tutor_beat=beat,
         )
 
     def state_fields(self) -> dict[str, Any]:
-        """The nine new fields of the state message, as of now."""
+        """The ten new fields of the state message, as of now."""
         return self._decision().as_fields()
