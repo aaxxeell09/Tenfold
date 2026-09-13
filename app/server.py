@@ -166,9 +166,9 @@ SITTING_GAP_S = 20 * 60
 # What the page is told when perception is gone. These ride on the tally line of
 # the state message, which the page already renders, so no new message type is
 # needed for the child or the operator to learn what happened.
-CAMERA_NONE = "I cannot open the camera. Check its permission, then start me again."
-CAMERA_LOST = "I have lost the camera. Start me again once it is back."
-ALREADY_PLAYING = "Tenfold is already open in another tab. Close it to play here."
+CAMERA_NONE = tally.LINES.get("camera_none", "")
+CAMERA_LOST = tally.LINES.get("camera_lost", "")
+ALREADY_PLAYING = tally.LINES.get("already_playing", "")
 # How long a child may struggle before Tally offers the next level of help, on
 # the clock of the current exercise: a word at five seconds, the ghost finger the
 # page draws from hint_level 2 at ten, the whole gesture at twenty. Each level

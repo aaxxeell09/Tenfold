@@ -1836,7 +1836,7 @@ def test_a_refused_tab_cannot_quit_answer_skip_hint_or_repeat_the_running_node()
             assert lesson.hint_level == 0, "hint reached the running node"
             assert lesson.scheduler.outcomes == [], "check or next reached the running node"
 
-            await first.send_json({"type": "check", "value": 36})
+            await first.send_json({"type": "check", "value": lesson.pick.result})
             ended = await _await(first, lambda m: m.get("type") == "node_end")
             assert ended["node_id"] == "check" and ended["correct"] == 1
             await first.close()

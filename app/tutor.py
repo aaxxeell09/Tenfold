@@ -215,6 +215,10 @@ HANDS_PROMPT_KEY = "hands_come_here"
 # gate. They live in the same file because Tally has one voice, and the server
 # hands them to the page rather than the page writing them out again.
 PAGE_LINE_KEYS = ("gate_ready",)
+# Lines the server says when perception is gone or the tab is not the one
+# playing. They are Tally's voice too, so they live in the line file and not in
+# app/server.py, where two of them used to be typed out.
+SERVER_LINE_KEYS = ("camera_none", "camera_lost", "already_playing")
 # The lines of the older lesson path, lesson/tally.py, which keeps no text of
 # its own. They live in the same file because Tally has one voice and one place
 # to keep it; the live tutor never says them and never has to have them.
@@ -233,7 +237,8 @@ LESSON_LINE_KEYS = (
 # beat, and lesson/tally_lines.json does not have it yet: until it does the beat
 # hands the page no second line at all rather than a line nobody wrote.
 OPTIONAL_LINE_KEYS = (("next_one", ACK_LINE_KEY, RECOVERY_LINE_KEY,
-                       HANDS_PROMPT_KEY) + PAGE_LINE_KEYS + LESSON_LINE_KEYS)
+                       HANDS_PROMPT_KEY) + PAGE_LINE_KEYS + SERVER_LINE_KEYS
+                      + LESSON_LINE_KEYS)
 NEXT_LINE_KEY = "next_one"
 
 # The success beat. The page plays the parts in this order inside success_ms,
