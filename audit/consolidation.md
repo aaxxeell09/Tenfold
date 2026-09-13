@@ -120,9 +120,15 @@ symptom.
 - Lines: `lesson/tally_lines.json:71` `gate_pose` is "Touch your 6 with your 6."
   and line 73 `gate_banner` is "That is a 6 and a 6."
 - Server: `app/server.py` passes those pairs to `start_session`.
-- Scheduler: `set_scope` (`lesson/scheduler.py:620-631`) records `self.allowed`,
-  its docstring says **"Neither one steers the draw"**, and `_choose` never reads
-  it. The only reader in the repo is `app/server.py:947`, inside `_mastered_pick`.
+- Scheduler: `set_scope` records `self.allowed`, its docstring says **"Neither
+  one steers the draw"**, and `_choose` never reads it. The only reader in the
+  repo is `_mastered_pick` in `app/server.py`.
+
+> **Do not be fooled by the grep**, as I was on the last pass. `_choose` and
+> `_draw` do call `self._allowed(key, repeat_ok=...)`, but that underscore method
+> is the never-the-same-fact-twice and never-the-same-table-twice rule. It has
+> nothing to do with `self.allowed`, the node's set of pairs. Two names one
+> character apart, one of them dead, in the function where it matters.
 
 The gate's pose step passes on `posed(m)` (`app.js:544`), which is
 `m.state === "correct_pose"`, and that is the engine's verdict on **whatever
@@ -854,6 +860,10 @@ side *should* do.
 
 Ordered by cost if nobody touches it.
 
+0. **Name `Scheduler.allowed` something else, whatever else is decided** (2.1).
+   It sits one underscore away from `_allowed`, which is live and unrelated, in
+   the same two functions. It cost me a wrong reading on one pass and it will
+   cost the next person the same.
 1. **The gate's pose step and F10** (2.1). Exempt `kind == "check"` from the
    uniform draw, or take the gate off the scheduler. Today the gate says "Touch
    your 6 with your 6" while the engine is on another fact, so a child who obeys
