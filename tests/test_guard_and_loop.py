@@ -13,14 +13,31 @@ FAKE = REPO / "tests" / "fake_claude.py"
 PY = sys.executable
 
 
+def copy_sources(dst: Path, rels: list[str], src: Path = REPO) -> None:
+    """Copy these folders of src as git sees them: tracked files and new ones, never what .gitignore keeps out.
+    A clone that runs the loop holds loop/watch-state.json, logs, metrics and transcripts; copied into a test repo
+    they make the watcher resume that clone's budget and refuse to push. Outside a git checkout, copy everything
+    but caches and results."""
+    listed = subprocess.run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *rels],
+                            cwd=src, capture_output=True, text=True)
+    if listed.returncode != 0:
+        for rel in rels:
+            shutil.copytree(src / rel, dst / rel, ignore=shutil.ignore_patterns("__pycache__", "results", "transcripts"))
+        return
+    for rel in filter(None, listed.stdout.split("\0")):
+        if not (src / rel).is_file():  # tracked but deleted in the working tree
+            continue
+        (dst / rel).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src / rel, dst / rel)
+
+
 def make_repo(tmp_path: Path, hard: bool = True) -> Path:
     """A throwaway copy of the repo with synthetic train/heldout data and one baseline commit.
     hard=True (default) uses the real-camera failure modes, where tightening the contact threshold is a strict
     improvement, so the strict metric gate has something to accept."""
     from loop import synth
     dst = tmp_path / "tenfold"
-    for rel in ["classifier", "eval", "loop", "lesson", "tests", "tenfold"]:
-        shutil.copytree(REPO / rel, dst / rel, ignore=shutil.ignore_patterns("__pycache__", "results", "transcripts"))
+    copy_sources(dst, ["classifier", "eval", "loop", "lesson", "tests", "tenfold"])
     # the live rules.py is whatever the critic last accepted; the loop tests always start from V0
     shutil.copy(REPO / "tests" / "rules_v0.py", dst / "classifier" / "rules.py")
     (dst / "data").mkdir()
@@ -61,13 +78,38 @@ def guard(worktree: Path, transcript: Path | None = None) -> tuple[int, str]:
 @pytest.fixture
 def worktree(tmp_path):
     wt = tmp_path / "wt"
-    for rel in ["classifier", "loop"]:
-        shutil.copytree(REPO / rel, wt / rel, ignore=shutil.ignore_patterns("__pycache__", "transcripts"))
+    copy_sources(wt, ["classifier", "loop"])
     shutil.copy(REPO / "tests" / "rules_v0.py", wt / "classifier" / "rules.py")
     subprocess.run(["git", "init", "-q"], cwd=wt, check=True)
     subprocess.run(["git", "add", "-A"], cwd=wt, check=True)
     subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"], cwd=wt, check=True)
     return wt
+
+
+def test_repo_copies_leave_the_runners_ignored_state_behind(tmp_path):
+    """A clone that runs the loop is full of ignored state; a test repo copied from it must not inherit any."""
+    src = tmp_path / "runner"
+    (src / "loop").mkdir(parents=True)
+    (src / ".gitignore").write_text("loop/watch-state.json\n*.log\n__pycache__/\n")
+    (src / "loop" / "kept.py").write_text("x = 1\n")
+    (src / "loop" / "gone.py").write_text("y = 2\n")
+    subprocess.run(["git", "init", "-q"], cwd=src, check=True)
+    subprocess.run(["git", "add", "-A"], cwd=src, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"], cwd=src, check=True)
+    (src / "loop" / "gone.py").unlink()  # tracked, deleted in the working tree
+    (src / "loop" / "new.py").write_text("z = 3\n")  # new work, not committed yet and not ignored
+    (src / "loop" / "watch-state.json").write_text('{"spent_usd": 3.44, "stopped": true}')
+    (src / "loop" / "watch.log").write_text("cycle 12: STOP, $3.44 spent of $5.00\n")
+    (src / "loop" / "__pycache__").mkdir()
+    (src / "loop" / "__pycache__" / "kept.cpython-311.pyc").write_bytes(b"\0")
+    copy_sources(tmp_path / "copy", ["loop"], src=src)
+    assert sorted(p.name for p in (tmp_path / "copy" / "loop").iterdir()) == ["kept.py", "new.py"]
+    # outside a git checkout there is no .gitignore to ask: everything but caches
+    plain = tmp_path / "plain"
+    shutil.copytree(src, plain, ignore=shutil.ignore_patterns(".git"))
+    copy_sources(tmp_path / "copy-plain", ["loop"], src=plain)
+    assert (tmp_path / "copy-plain" / "loop" / "kept.py").exists()
+    assert not (tmp_path / "copy-plain" / "loop" / "__pycache__").exists()
 
 
 def test_guard_accepts_a_clean_threshold_change(worktree):
