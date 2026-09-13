@@ -1422,7 +1422,8 @@ def encode_jpeg(frame: Any) -> bytes:
     return buffer.tobytes() if ok else b""
 
 
-def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None) -> None:
+def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None,
+                camera_name: str | None = None) -> None:
     """Camera, landmarks, normalize, classifier, engine. One frame at a time.
 
     Every step is inside the one try, including loading the classifier and
@@ -1442,7 +1443,10 @@ def camera_loop(lesson: Lesson, stop: threading.Event, camera_index: int | None)
         from classifier.loader import load_classifier
 
         try:
-            camera, _ = open_camera(camera_index)
+            # The name preference only travels when one was asked for, so the
+            # ordinary path stays the single argument call it has always been.
+            wanted = {"name": camera_name} if camera_name else {}
+            camera, _ = open_camera(camera_index, **wanted)
         except CameraError as error:
             # The likeliest failure of the whole demo: another app holds the
             # webcam, or the permission was never granted. Say it on the page,
@@ -1733,7 +1737,7 @@ def make_scheduler(demo: bool = False) -> Scheduler:
 
 
 def create_app(mock: bool = False, camera: int | None = None,
-               demo: bool = False) -> web.Application:
+               demo: bool = False, camera_name: str | None = None) -> web.Application:
     """Wire the hub, the lesson and the worker thread into one aiohttp app.
 
     Split out of main so the tests can drive the whole thing in mock mode without
@@ -1757,7 +1761,7 @@ def create_app(mock: bool = False, camera: int | None = None,
     stop = threading.Event()
     worker = threading.Thread(
         target=mock_loop if mock else camera_loop,
-        args=(lesson, stop) if mock else (lesson, stop, camera),
+        args=(lesson, stop) if mock else (lesson, stop, camera, camera_name),
         daemon=True,
         name="tenfold-capture",
     )
@@ -1788,7 +1792,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--camera", type=int, default=None,
-                        help="camera index, probed over 0 to 3 when not given")
+                        help="camera index, probed over 0 to 3 when not given. "
+                             "Wins over --camera-name when both are given")
+    parser.add_argument("--camera-name", default=None,
+                        help="use the camera whose name contains this, case "
+                             "insensitively. Without it the built in camera is "
+                             "preferred and an iPhone is never picked")
     parser.add_argument("--mock", action="store_true",
                         help="no camera, cycle the three states every 2 s")
     parser.add_argument("--demo", action="store_true",
@@ -1800,7 +1809,8 @@ def main(argv: list[str] | None = None) -> int:
     load_env()
     enable_tutor()
 
-    app = create_app(mock=args.mock, camera=args.camera, demo=args.demo)
+    app = create_app(mock=args.mock, camera=args.camera, demo=args.demo,
+                     camera_name=args.camera_name)
 
     url = f"http://localhost:{args.port}"
     labels = [name for name, on in (("mock", args.mock), ("demo", args.demo)) if on]
