@@ -21,3 +21,6 @@ data/BEST_VERSION
 loop/blind-rules.py
 loop/*.out
 loop/watch-state.json
+
+# agent worktrees, never committed
+.claude/worktrees/
