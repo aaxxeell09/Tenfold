@@ -170,7 +170,7 @@ without a special case.
 
 ### 1.3 tutor_visual
 
-`null`, or an object whose `kind` is one of six values. `kind` is always present. No other kinds exist.
+`null`, or an object whose `kind` is one of **seven** values. `kind` is always present.
 
 ```json
 {"kind": "pulse_finger", "hand": "right", "finger": 7}
@@ -179,7 +179,17 @@ without a special case.
 {"kind": "rescue_card", "tens": 5, "units": 6, "total": 56}
 {"kind": "placement_zones"}
 {"kind": "finger_numbers"}
+{"kind": "closing_in", "...": "the two fingertips the child is bringing together"}
 ```
+
+`closing_in` is the seventh, added at dd3ae9e with the pose reading table of `app/tutor.py`. It means the two
+fingertips the exercise asks for are within twice `contact_ratio` of each other: the child has found the right two
+and is closing the gap, so the aid is a green dot on each and nothing is said.
+
+> **The page does not know it yet** (`grep -c closing_in web/course/app.js` is 0), and that is survivable by
+> design rather than by luck: `marked(tag)` in `drawFingers` lights a tip whenever `tutor_visual` is non null and
+> the engine already put that tip in `match`, so the two tips do go green. What is lost is the payload, so the
+> child gets the ordinary match marking rather than the dot this kind describes.
 
 - `hand` and `wrong_hand` are `"left"` or `"right"`, the child's own hands, which is also screen left and screen
   right in the mirrored image. `finger`, `expected_finger`, `from` and `to` are finger numbers 6 to 10.

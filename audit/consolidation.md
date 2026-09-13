@@ -330,6 +330,39 @@ voice. The contract says the tutor, so the server ladder should stop producing
 `reaction` lines and keep only what `Outcome.hint_level` records.
 
 
+### 2.5b CLEANUP. A seventh `tutor_visual` kind the page has never heard of
+
+Landed at dd3ae9e with the pose reading table. `app/tutor.py` now defines seven
+visual kinds where the contract fixes six:
+
+```python
+VIS_PULSE_FINGER, VIS_CORRECTION, VIS_GHOST, VIS_RESCUE_CARD,
+VIS_PLACEMENT_ZONES, VIS_FINGER_NUMBERS, VIS_CLOSING_IN
+```
+
+`grep -c closing_in web/course/app.js` is 0. `drawFingers` branches on
+`pulse_finger`, `correction`, `ghost`, `placement_zones` and `finger_numbers`,
+and `renderBand` on `rescue_card`. The seventh falls through all of them.
+
+**To be fair, this one was designed to.** The comment in `app/tutor.py` says so
+in advance:
+
+```
+# A page that does not know the kind still draws the two expected tips green,
+# because any non null tutor_visual lights the tips the engine already marks.
+```
+
+Checked, and it is true: `marked(tag)` in `drawFingers` includes
+`visual !== null && match.has(tag)`, so a `closing_in` visual does light the two
+tips. That is a genuinely careful piece of forward compatibility and it is the
+right way to add a kind across an ownership line.
+
+What is still worth saying: the payload `closing_in` carries, the two fingertips
+the child is bringing together, is discarded, so the green dot on each that the
+table describes is not what the child sees; they get the ordinary match marking
+they would have got anyway. And `docs/tutor_contract.md` 1.3 said "one of six
+values. No other kinds exist", which is now false. Fixed there.
+
 ### 2.6 BUG. `tutor_line_cuts` is dead, and a parallel mechanism does its job
 
 `app/tutor.py` computes `tutor_line_cuts` and documents it as "the ninth field…
@@ -410,7 +443,7 @@ vocabulary does not line up is worse than no channel.
 
 ### 2.8 BUG. `_motion` returns two different units depending on how many fingertips are visible
 
-`app/tutor.py:1639-1643`:
+`app/tutor.py:2026-2030` at dd3ae9e:
 
 ```python
         moves.sort()
@@ -451,7 +484,7 @@ divergence between two branches of one function, and a one-character fix.
 
 and `load_tutor_params` swallows `OSError` and `ValueError` for the same reason.
 
-But `app/server.py:1780`:
+But `app/server.py:1783`:
 
 ```python
     lesson = Lesson(Engine(params=load_tutor_params().get("global", {})), hub, make_scheduler)
@@ -467,20 +500,50 @@ Two files reached opposite conclusions about the same failure and the stricter
 one runs first. **DECISION NEEDED**, though the cheap answer is to wrap that one
 construction.
 
-### 2.10 CLEANUP. `pose_confirm_ms` is required by the tutor and used only by the engine
+### 2.10 BUG. The engine and the tutor read amendment F8 in opposite directions
 
-`app/tutor.py:177` lists `pose_confirm_ms` in `MS_PARAMS`, so `load_params`
-requires it in both `global` and `bounds` and refuses to start without it. The
-tutor's own logic never reads it. (`pose_confirm_frames` **is** now read, at
-`app/tutor.py:1731` and `1813`, for the contact ratio check; that half of the
-finding is fixed on 554dc0d.)
+F8 is explicit: "The correct pose is confirmed in `pose_confirm_frames` frames or
+`pose_confirm_ms`, **whichever comes first**... Validation has to feel instant:
+the child is already right while the old clock was still counting."
 
-The only consumer of `pose_confirm_ms` is `lesson/engine.py`, which is amendment
-F8's home. The consequence is a real one: F8 says validation has to feel
-instant, and the engine honours it by latching after 3 frames or 250 ms. The
-tutor's own acknowledgement rides `pose_stable` (0.8 s) instead
-(`app/tutor.py:1475`, `1491`), so the two halves of the system confirm the same
-pose 550 ms apart, and the child hears yes on the slower of the two clocks.
+`lesson/engine.py:291-293` implements exactly that:
+
+```python
+        if condition == COND_CORRECT:
+            return (self._pending_frames >= self.pose_confirm_frames
+                    or held >= self.pose_confirm_ms / 1000.0)
+```
+
+`app/tutor.py:2200-2202` does not:
+
+```python
+        frames = int(self.effective("pose_confirm_frames"))
+        if (moment - self._raw_since >= self.effective("pose_stable")
+                and self._raw_frames >= frames):
+```
+
+Three differences in three lines. The tutor uses **and** where F8 says **or**;
+it measures against **`pose_stable`** (0.8 s) where F8 names `pose_confirm_ms`
+(250 ms); and `pose_confirm_ms` is therefore read by nobody but the engine, while
+`app/tutor.py:216` still lists it in `MS_PARAMS` and refuses to start without it
+in `global` and `bounds`.
+
+The comment in `app/tutor.py` is careful about why frames and time are both
+required, "a camera that drops frames cannot have a pose judged on two of them",
+and that is a good reason. It is also a different rule from the one written into
+SPEC section 19, decided in a different file, with no note that it disagrees.
+
+The effect the child feels: the engine goes green at about 250 ms, the tutor
+says yes at 800 ms. The morning's acknowledgement pass narrowed the gap at the
+other end, splitting `pose_ack` (immediate, may cut) from the canonical cue
+(`pose_ready_delay_ms` later), so the yes is prompt **once the tutor has decided**.
+It still decides on the slower clock, and F8 exists precisely to say that clock
+is too slow.
+
+**DECISION NEEDED**, and it is a one line decision: either the tutor adopts F8's
+`or`, or F8 is amended to say the tutor's confirmation is a different, slower
+thing from the engine's latch and `pose_confirm_ms` belongs to the engine alone.
+
 
 ### 2.11 CLEANUP. Fields on the state message nobody renders
 
@@ -581,9 +644,11 @@ mine; nothing in `app/`, `lesson/`, `web/course/` or `tests/` was touched).
 
 SPEC.md is not mine to edit, so these are reported, not fixed.
 
-- **F8 is half honoured.** `lesson/engine.py` implements it exactly
-  (`pose_confirm_frames` or `pose_confirm_ms`, whichever first). `app/tutor.py`
-  does not: its acknowledgement waits `pose_stable` = 0.8 s. See 2.10.
+- **F8 is implemented twice, once per file, with different logic.**
+  `lesson/engine.py` has the amendment as written, `or`. `app/tutor.py` has
+  `pose_stable` **and** `pose_confirm_frames`, which is a different rule and a
+  slower one. Full detail in 2.10; this is the one where SPEC and the code
+  disagree outright rather than drifting.
 - **F10 broke the start check.** The amendment is clear and the code obeys it;
   the casualty is 2.1. F10 deserves a sentence saying the check node is the one
   exception, or the check has to stop going through the scheduler.
@@ -669,10 +734,26 @@ the two ends were tested separately and the join was not tested at all. A field
 on the state message is not covered by a test that it is sent; it is covered by a
 test that something reads it.
 
-The cheapest guard, and it would have caught all three: one test that asserts
+The cheapest guard, and it would have caught all four: one test that asserts
 every key in `TUTOR_FIELDS` appears somewhere in `web/course/app.js`. That is
 crude, and it is exactly the check nobody was in a position to write, because it
 spans two owners' files.
+
+**And the counter example, which is the pattern done right.** The `closing_in`
+visual of 2.5b crosses the same ownership line and does not break anything,
+because its author wrote down what happens on a page that has never heard of it
+and then made sure that fallback was real. The difference is not care taken over
+one's own half. It is one sentence about the other half, written as a claim
+somebody can check, rather than as an intention:
+
+```
+# A page that does not know the kind still draws the two expected tips green,
+# because any non null tutor_visual lights the tips the engine already marks.
+```
+
+Every one of the four failures above has a comment in the same position saying
+what the other side will do. The difference is that those four say what the other
+side *should* do.
 
 ---
 
@@ -703,12 +784,21 @@ Ordered by cost if nobody touches it.
 7. **The line-drop vocabulary** (2.7). One list, in one place. Two of the three
    reasons the page sends are logged as `unknown`, and `interrupted` is
    unreachable. Ilan owns the tutor's end.
-8. **Params-file strictness** (2.9). `build_tutor` decided a bad params file must
+8. **F8, `or` or `and`** (2.10). The engine and the tutor implement the same
+   amendment differently, and the tutor's is the slower of the two by 550 ms on
+   the one event F8 was written to make instant. Either the tutor adopts the
+   `or`, or F8 is amended to say the two confirmations are different things.
+   Axel and Ilan, and it needs SPEC.md edited either way.
+9. **Params-file strictness** (2.9). `build_tutor` decided a bad params file must
    not stop the lesson; `Engine.__init__` raises on one, and runs first.
-9. **The two orphan gate parameters** (2.3). `gate_step_pause_ms` that nothing
-   reads, `gate_ready_button_s` that the page reads and the file has not got.
-   Small, and it will rot quietly because the fallback is graceful.
+10. **The orphan gate parameter** (2.3). `gate_ready_button_s`: the page reads
+    it, the params file has not got it, so how long a child with a dead
+    microphone waits for a way forward is a constant in the page rather than a
+    bounded policy number. Small, and it will rot quietly because the fallback
+    is graceful.
 
 And one that is nobody's feature but everybody's problem: **a test that a field
-is sent is not a test that anything reads it** (4b). The three blockers above all
-survived a green suite that way.
+is sent is not a test that anything reads it** (4b). Four of the findings above
+survived a green suite that way, and the one cross-file feature that did not,
+`closing_in`, is the one whose author wrote down what the other side would do
+and made that fallback real.
