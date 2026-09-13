@@ -305,3 +305,147 @@ def test_the_same_number_twice_in_a_row_is_one_answer(page):
     tab.evaluate("() => { window.__say('eleven', true); window.__say('eleven', true); }")
     tab.wait_for_timeout(400)
     assert tab.evaluate("window.__sent") == 1
+
+
+# A fake speechSynthesis: records every utterance, ends each one on the next tick so
+# the queue advances the way a real engine would, and takes a voice list from the test.
+FAKE_SYNTH = """
+window.__spoken = []; window.__cancelled = 0;
+window.__voices = (window.__voiceList || []).map((v) => Object.assign({ localService: true, default: false, voiceURI: v.name }, v));
+function SpeechSynthesisUtterance(text) { this.text = text; this.voice = null; this.rate = 1; this.pitch = 1; this.lang = ""; }
+window.SpeechSynthesisUtterance = SpeechSynthesisUtterance;
+// the real property has no setter: a plain assignment is silently ignored
+Object.defineProperty(window, 'speechSynthesis', { configurable: true, value: {
+  getVoices: () => window.__voices,
+  cancel: () => { window.__cancelled += 1; },
+  speak: (u) => {
+    window.__spoken.push({ text: u.text, voice: u.voice && u.voice.name, rate: u.rate, pitch: u.pitch, lang: u.lang });
+    if (u.onstart) u.onstart();
+    setTimeout(() => { if (u.onend && window.__spoken.length <= (window.__endUpTo ?? Infinity)) u.onend(); }, 0);
+  },
+  addEventListener: (name, fn) => { (window.__onvoices = window.__onvoices || []).push(fn); },
+} });
+window.__loadVoices = (list) => {
+  window.__voices = list.map((v) => Object.assign({ localService: true, default: false, voiceURI: v.name }, v));
+  (window.__onvoices || []).splice(0).forEach((fn) => fn());
+};
+"""
+
+
+def voices(names_and_langs):
+    return "window.__voiceList = " + str([{"name": n, "lang": l} for n, l in names_and_langs]).replace("'", '"') + ";"
+
+
+def test_tally_picks_the_best_english_voice(page):
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(voices([("Karen", "en-AU"), ("Daniel", "en-GB"), ("Samantha", "en-US"), ("Ava (Premium)", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    assert tab.evaluate("Tenfold.pickVoice().name") == "Ava (Premium)"
+
+    tab = context.new_page()
+    tab.add_init_script(voices([("Daniel", "en-GB"), ("Google US English", "en-US"), ("Microsoft Zira", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    # no preferred name: an en-US voice that reads as female, before any other en-US one
+    assert tab.evaluate("Tenfold.pickVoice().name") == "Microsoft Zira"
+
+    tab = context.new_page()
+    tab.add_init_script(voices([("Daniel", "en-GB"), ("Google US English", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    assert tab.evaluate("Tenfold.pickVoice().name") == "Google US English"
+
+    tab = context.new_page()
+    tab.add_init_script(voices([]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    assert tab.evaluate("Tenfold.pickVoice()") is None
+
+
+def test_tally_speaks_short_sentences_one_at_a_time(page):
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    assert tab.evaluate("Tenfold.sentencesOf('Lovely work.  Tomorrow we try 7 x 7! Ready?')") == ["Lovely work.", "Tomorrow we try 7 x 7!", "Ready?"]
+    tab.evaluate("() => Tenfold.speak('Lovely work. Tomorrow we try 7 x 7.')")
+    tab.wait_for_timeout(100)
+    spoken = tab.evaluate("window.__spoken")
+    assert [s["text"] for s in spoken] == ["Lovely work.", "Tomorrow we try 7 x 7."]
+    assert all(s["voice"] == "Samantha" and s["rate"] == 0.92 and s["pitch"] == 1.05 and s["lang"] == "en-US" for s in spoken)
+    assert tab.evaluate("window.__cancelled") == 1
+
+
+def test_a_new_sentence_cancels_the_one_still_queued(page):
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH + "window.__endUpTo = 0;")
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    # the engine never ends the first utterance: the second sentence waits in the queue
+    tab.evaluate("() => Tenfold.speak('First one. Second one.')")
+    tab.wait_for_timeout(50)
+    assert [s["text"] for s in tab.evaluate("window.__spoken")] == ["First one."]
+    tab.evaluate("() => { window.__endUpTo = Infinity; Tenfold.speak('Something else.'); }")
+    tab.wait_for_timeout(100)
+    assert [s["text"] for s in tab.evaluate("window.__spoken")] == ["First one.", "Something else."]
+    assert tab.evaluate("window.__cancelled") == 2
+
+
+def test_the_first_sentence_waits_for_the_voices_and_the_pick_is_logged_once(page):
+    context, url = page
+    tab = context.new_page()
+    logs = []
+    tab.on("console", lambda m: logs.append(m.text))
+    tab.add_init_script(voices([]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    tab.evaluate("() => Tenfold.speak('Show me both hands.')")
+    tab.wait_for_timeout(100)
+    assert tab.evaluate("window.__spoken") == []
+    tab.evaluate("() => window.__loadVoices([{ name: 'Daniel', lang: 'en-GB' }, { name: 'Samantha', lang: 'en-US' }])")
+    tab.wait_for_timeout(100)
+    assert [(u["text"], u["voice"]) for u in tab.evaluate("window.__spoken")] == [("Show me both hands.", "Samantha")]
+    tab.evaluate("() => Tenfold.speak('There they are.')")
+    tab.wait_for_timeout(100)
+    assert [m for m in logs if m.startswith("Tally voice:")] == ["Tally voice: Samantha"]
+
+
+def test_the_mute_switch_silences_tally_and_is_remembered(page):
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    assert tab.is_visible("#mute") and tab.evaluate("Tenfold.muted") is False
+    tab.click("#mute")
+    assert tab.evaluate("Tenfold.muted") is True
+    assert "is-muted" in tab.get_attribute("#mute", "class")
+    tab.evaluate("() => Tenfold.speak('Say the answer.')")
+    tab.wait_for_timeout(100)
+    assert tab.evaluate("window.__spoken") == []
+    tab.reload(wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    assert tab.evaluate("Tenfold.muted") is True
+    tab.click("#mute")
+    tab.evaluate("() => Tenfold.speak('Say the answer.')")
+    tab.wait_for_timeout(100)
+    assert [u["text"] for u in tab.evaluate("window.__spoken")] == ["Say the answer."]
+
+
+def test_every_check_sentence_is_spoken(page):
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    tab.click("a.door[href='#check']")
+    # step 3 shows "Say the answer." together with the mic pill, a moment after the match
+    tab.wait_for_selector("#check-mic", state="visible", timeout=30000)
+    tab.wait_for_timeout(300)
+    spoken = [u["text"] for u in tab.evaluate("window.__spoken")]
+    for line in ["Show me both hands.", "There they are.", "Touch your 6 with your 6.", "Six and six, touching.", "Say the answer."]:
+        assert line in spoken, f"{line!r} was shown but not spoken: {spoken}"

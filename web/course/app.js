@@ -15,6 +15,7 @@
   const KEY = "tenfold.levels.v1";
   const KEY_NAME = "tenfold.name";
   const KEY_LEARNER = "tenfold.learner";
+  const KEY_MUTED = "tenfold.muted";
   const params = new URLSearchParams(location.search);
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.prototype.slice.call((root || document).querySelectorAll(sel));
@@ -54,6 +55,20 @@
 
   let progress = load();
   let unitAt = null;
+  let muted = read(KEY_MUTED, false) === true;
+  function setMuted(on) {
+    muted = Boolean(on);
+    write(KEY_MUTED, muted);
+    if (muted) { speech.serial += 1; speech.queue = []; speech.pending = null; try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } hush(); }
+    markMute();
+  }
+  function markMute() {
+    const b = $("#mute");
+    if (!b) return;
+    b.classList.toggle("is-muted", muted);
+    b.setAttribute("aria-pressed", String(muted));
+    b.setAttribute("aria-label", muted ? "Unmute Tally" : "Mute Tally");
+  }
   let lesson = null;
   let justUnlocked = null;
   let checkRun = null;
@@ -208,9 +223,11 @@
     $("#u-desc").textContent = unit.subtitle;
     $("#u-count").textContent = `${done} / ${scored.length}`;
     $("#u-bar").style.width = `${scored.length ? (done / scored.length) * 100 : 0}%`;
-    $("#u-say").textContent = here
+    const line = here
       ? (cur.kind === "chest" ? "A chest! Open it." : cur.kind === "boss" ? "The boss. Eight questions, three hearts." : `Next up: ${cur.title}.`)
       : done === scored.length ? "All done here. Replay for three stars." : "Finish the unit before this one first.";
+    $("#u-say").textContent = line;
+    if (line !== speech.lastLine) { speech.lastLine = line; speak(line, $("#u-tally")); }
     setTally($("#u-tally"), here ? "ready" : "happy");
     $("#unit-switch").innerHTML = L.UNITS.map((u, i) => `<button type="button" class="${i === ui ? "on" : ""}" data-action="unit" data-u="${i}">Unit ${i + 1}</button>`).join("");
     const pts = nodes.map((n, i) => SPOTS[i % SPOTS.length]);
@@ -244,11 +261,15 @@
     root.className = "checkview view";
     root.dataset.step = "1";
     $("#check-mic").hidden = true;
-    $("#check-say").textContent = "Show me both hands.";
+    checkSay("Show me both hands.");
     setTally($("#check-tally"), "ready");
     setStepDots(1);
     connect(() => sendLesson({ type: "start_node", state: learner(), node: { id: "check", kind: "check", pairs: [[6, 6]], count: 1 } }));
     decorate(root);
+  }
+  function checkSay(text) {
+    $("#check-say").textContent = text;
+    speak(text, $("#check-tally"));
   }
   function stopCheck() {
     if (!checkRun) return;
@@ -270,7 +291,7 @@
     if (run.step === 1) {
       if (hands === 2 && !root.classList.contains("detected")) {
         root.classList.add("detected");
-        $("#check-say").textContent = "There they are.";
+        checkSay("There they are.");
         // the numbers light up one by one, ten down to six
         [10, 9, 8, 7, 6].forEach((n, i) => later(400 + i * 300, () => {
           $$("#check .practice-overlay [data-number]").forEach((el) => { if (Number(el.dataset.number) <= 10 && Number(el.dataset.number) >= n) el.classList.add("lit"); });
@@ -279,7 +300,7 @@
         later(2300, () => { root.classList.add("check"); setTally($("#check-tally"), "happy"); });
         later(3300, () => {
           run.step = 2; root.dataset.step = "2"; root.classList.remove("check"); setStepDots(2);
-          $("#check-say").textContent = "Touch your 6 with your 6.";
+          checkSay("Touch your 6 with your 6.");
           setTally($("#check-tally"), "thinking");
         });
       }
@@ -290,18 +311,18 @@
       if (m.state === "correct_pose" || m.state === "waiting_answer") {
         run.step = 3; root.dataset.step = "3"; root.classList.add("matched", "banner", "check");
         $("#check-banner").textContent = "That is a 6 and a 6.";
-        $("#check-say").textContent = "Six and six, touching.";
+        checkSay("Six and six, touching.");
         setTally($("#check-tally"), "happy");
         later(1600, () => {
           root.classList.remove("check", "banner"); setStepDots(3);
-          $("#check-say").textContent = "Say the answer.";
+          checkSay("Say the answer.");
           $("#check-mic").hidden = false;
           $("#check-miclabel").textContent = micLabel();
           setTally($("#check-tally"), "ready");
           listenWhile("correct_pose");
         });
       } else if (m.state === "wrong_pose" && m.tally) {
-        $("#check-say").textContent = m.tally;
+        checkSay(m.tally);
         setTally($("#check-tally"), "almost");
       }
       return;
@@ -310,19 +331,19 @@
       root.classList.add("heard", "result", "check");
       $("#check-result").textContent = m.answer;
       $("#check-miclabel").textContent = "Thirty six";
-      $("#check-say").textContent = "Thirty six. Exactly.";
+      checkSay("Thirty six. Exactly.");
       setTally($("#check-tally"), "happy");
       run.done = true;
       gateVoice(false);
     } else if (run.step === 3 && m.state === "answer_wrong" && m.tally) {
-      $("#check-say").textContent = m.tally;
+      checkSay(m.tally);
       setTally($("#check-tally"), "almost");
     }
   }
   function checkEnd() {
     const run = checkRun;
     if (!run) return;
-    $("#check-say").textContent = "Your path is open.";
+    checkSay("Your path is open.");
     later(1400, () => {
       checkRun.timers.forEach(clearTimeout);
       checkRun = null;
@@ -332,20 +353,91 @@
   }
 
   // ---------- Tally speaks ----------
+  // Tally's voice: the best English voice this browser has, in a fixed preference order,
+  // then any en-US voice that reads as female, then any English one. Voices arrive late
+  // in Chrome, so the pick is redone on voiceschanged.
+  const VOICE_PREFERENCE = ["Ava (Premium)", "Zoe (Premium)", "Samantha", "Karen"];
+  const FEMALE_HINT = /ava|zoe|samantha|karen|allison|susan|nicky|zira|aria|jenny|michelle|emma|ana|joanna|kendra|salli|ivy|female|woman/i;
+  const tallyVoice = { picked: null, done: false };
+  function pickVoice() {
+    if (!("speechSynthesis" in window)) return null;
+    const voices = window.speechSynthesis.getVoices() || [];
+    if (!voices.length) return null;
+    const byName = (name) => voices.find((v) => v.name === name) || voices.find((v) => v.name.startsWith(name));
+    let found = null;
+    for (const name of VOICE_PREFERENCE) { found = byName(name); if (found) break; }
+    const us = voices.filter((v) => /^en[-_]US/i.test(v.lang));
+    if (!found) found = us.find((v) => FEMALE_HINT.test(v.name)) || null;
+    if (!found) found = us[0] || voices.find((v) => /^en/i.test(v.lang)) || null;
+    tallyVoice.picked = found; tallyVoice.done = true;
+    logVoice(found ? found.name : "browser default");
+    return found;
+  }
+  function logVoice(name) {
+    if (tallyVoice.logged) return;
+    tallyVoice.logged = true;
+    console.log(`Tally voice: ${name}`);
+  }
+  if ("speechSynthesis" in window && window.speechSynthesis.addEventListener) {
+    window.speechSynthesis.addEventListener("voiceschanged", () => { tallyVoice.done = false; });
+  }
+  // short sentences, one utterance at a time; a new call drops whatever was still queued
+  function sentencesOf(text) {
+    return String(text || "").replace(/\s+/g, " ").trim().split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  }
+  const speech = { queue: [], host: null, serial: 0, pending: null, waiting: false, lastLine: null };
+  // Chrome hands the voice list over asynchronously: the first sentence waits for
+  // voiceschanged (or a short timeout for browsers that never fire it) rather than
+  // going out in the wrong voice.
+  function voicesReady() {
+    return tallyVoice.timedOut || (window.speechSynthesis.getVoices() || []).length > 0;
+  }
+  function waitForVoices() {
+    if (speech.waiting) return;
+    speech.waiting = true;
+    const go = () => {
+      if (!(window.speechSynthesis.getVoices() || []).length) tallyVoice.timedOut = true;
+      const p = speech.pending; speech.pending = null;
+      if (p) speak(p.text, p.host);
+    };
+    if (window.speechSynthesis.addEventListener) window.speechSynthesis.addEventListener("voiceschanged", go, { once: true });
+    setTimeout(go, 1500);
+  }
+  function hush() {
+    $$(".is-talking").forEach((el) => el.classList.remove("is-talking"));
+    voice.spokeUntil = 0;
+  }
   function speak(text, host) {
     if (!("speechSynthesis" in window) || !text) return;
     try {
       window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = "en-US"; u.rate = 0.95; u.pitch = 1.15;
+      speech.serial += 1;
+      speech.queue = [];
+      hush();
+      if (muted) return;
       voice.said = numbersIn(text);
-      const talk = (on) => {
-        if (host) host.classList.toggle("is-talking", on);
-        voice.spokeUntil = on ? Infinity : Date.now() + 800;
-      };
-      u.onstart = () => talk(true); u.onend = () => talk(false); u.onerror = () => talk(false);
-      window.speechSynthesis.speak(u);
+      if (!voicesReady()) { speech.pending = { text, host: host || null }; waitForVoices(); return; }
+      speech.queue = sentencesOf(text);
+      speech.host = host || null;
+      speakNext(speech.serial);
     } catch (e) { /* the sentence is on screen anyway */ }
+  }
+  function speakNext(serial) {
+    if (serial !== speech.serial) return;
+    const talk = (on) => {
+      if (speech.host) speech.host.classList.toggle("is-talking", on);
+      voice.spokeUntil = on ? Infinity : Date.now() + 800;
+    };
+    const sentence = speech.queue.shift();
+    if (!sentence) { talk(false); return; }
+    const u = new SpeechSynthesisUtterance(sentence);
+    u.lang = "en-US"; u.rate = 0.92; u.pitch = 1.05;
+    const chosen = tallyVoice.done ? tallyVoice.picked : pickVoice();
+    if (chosen) u.voice = chosen; else if (tallyVoice.timedOut) logVoice("browser default");
+    u.onstart = () => { if (serial === speech.serial) talk(true); };
+    u.onend = () => speakNext(serial);
+    u.onerror = () => speakNext(serial);
+    window.speechSynthesis.speak(u);
   }
 
   // ---------- voice answers ----------
@@ -773,6 +865,7 @@
     else if (action === "chest") openChest(id);
     else if (action === "unit") { unitAt = Number(el.dataset.u); renderCourse(); }
     else if (action === "profile") { leaveLesson(); go("profile"); }
+    else if (action === "mute") setMuted(!muted);
     else if (action === "mic") { if (voice.denied) return; if (voice.wanted) stopVoice(); else { voice.wanted = true; startVoice(); } markMic(); }
     else if (action === "quit" || action === "home") backToMap();
     else if (action === "retry") startLesson(id);
@@ -818,8 +911,9 @@
     probe.alt = ""; probe.src = "/video";
   }
   if (params.get("dev") === "1") $$(".dev-reset").forEach((el) => { el.hidden = false; });
-  window.Tenfold = { parseNumber, numbersIn, voice, fitOverlay, get lesson() { return lesson; }, get xp() { return xp(); } };
+  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, setMuted, voice, fitOverlay, get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); } };
   route();
+  markMute();
   watchCamera();
   decorate(document);
   // the demo flag arrives on the socket; connect early so the showcase seeds before the map is opened

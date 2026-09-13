@@ -87,6 +87,14 @@
       <path d="M 11 23 a 13 13 0 0 0 26 0" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round"></path>
       <rect x="21" y="36" width="6" height="9" rx="3" fill="currentColor"></rect>
     </symbol>
+    <symbol id="icon-sound" viewBox="0 0 48 48">
+      <path d="M 8 18 H 16 L 26 9 V 39 L 16 30 H 8 Z" fill="currentColor"></path>
+      <path d="M 32 17 a 9 9 0 0 1 0 14 M 36 11 a 16 16 0 0 1 0 26" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"></path>
+    </symbol>
+    <symbol id="icon-muted" viewBox="0 0 48 48">
+      <path d="M 8 18 H 16 L 26 9 V 39 L 16 30 H 8 Z" fill="currentColor"></path>
+      <path d="M 31 18 L 43 30 M 43 18 L 31 30" fill="none" stroke="currentColor" stroke-width="4" stroke-linecap="round"></path>
+    </symbol>
     <symbol id="icon-close" viewBox="0 0 48 48">
       <path d="M 11 11 L 37 37 M 37 11 L 11 37" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"></path>
     </symbol>

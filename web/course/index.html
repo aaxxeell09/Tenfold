@@ -8,7 +8,7 @@
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body class="tablet" data-view="welcome">
 <div class="frame" id="frame">
@@ -155,11 +155,15 @@
   <section class="lesson camera-lesson" id="lesson" hidden aria-live="polite"></section>
   <section class="finish" id="finish" hidden></section>
   <div class="toast" id="toast" role="status"></div>
+  <button class="mute" id="mute" type="button" data-action="mute" aria-label="Mute Tally" aria-pressed="false">
+    <svg class="on" viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-sound"></use></svg>
+    <svg class="off" viewBox="0 0 48 48" aria-hidden="true"><use href="#icon-muted"></use></svg>
+  </button>
 
 </div>
 
-<script src="levels.js?v=5"></script>
-<script src="tally.js?v=5"></script>
-<script src="app.js?v=5"></script>
+<script src="levels.js?v=6"></script>
+<script src="tally.js?v=6"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

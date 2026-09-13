@@ -1013,3 +1013,20 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 /* the showcase keeps the shell map; its right column is the level card only */
 #learn .right .levelcard { display: flex; flex-direction: column; gap: 12px; }
 #learn .right .levelcard .tally { width: 120px; align-self: center; }
+
+/* ---------- the mute switch, one corner, every screen ---------- */
+.mute {
+  position: absolute; right: 22px; bottom: 20px; z-index: 90; width: 44px; height: 44px; padding: 0;
+  display: grid; place-items: center; border: 2px solid var(--swan); border-radius: 14px; background: var(--snow); color: var(--wolf); cursor: pointer;
+}
+.mute svg { width: 24px; height: 24px; grid-area: 1 / 1; }
+.mute .off, .mute.is-muted .on { display: none; }
+.mute.is-muted .off { display: block; }
+.mute.is-muted { color: var(--hare); border-style: dashed; }
+/* the lesson and the check keep their bottom corners for the answer: the switch moves up */
+body[data-view="lesson"] .mute { bottom: auto; top: 18px; }
+body[data-view="check"] .mute { bottom: auto; top: 18px; right: 84px; border-color: transparent; background: rgba(250, 247, 242, .12); color: #f4f0e8; }
+body[data-view="check"] .stepnum { right: 148px; }
+/* home keeps its doors clear: the switch sits under the level box */
+body[data-view="home"] .mute { bottom: auto; top: 102px; right: 28px; }
+body[data-view="check"] .mute.is-muted { color: rgba(250, 247, 242, .5); }
