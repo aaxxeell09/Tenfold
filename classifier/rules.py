@@ -57,6 +57,16 @@ Hypothesis log (one line per accepted patch, newest last):
   either regresses a class or gives no improvement, so this is the same leniency v7 named, one notch
   further. Lowered PAIR_DRIFT_THRESHOLD 0.0475 -> 0.0451 (best passing value from --sweep-all):
   exact_match 0.541 -> 0.543, false_unknown_rate unchanged at 0.064, no class regressed.
+- v9: re-measured the diagnosis's pair_separation_trend leniency claim on the actual worst transition
+  failures (--class transition) and it does not hold: s000004 and s000030 sit far below
+  PAIR_DRIFT_THRESHOLD=0.0451 (trend ~0.01-0.004, not "just under"), and --sweep-all confirms no
+  constant reaches them. What they share instead is a closest-pair distance of 0.66-0.9, far past any
+  real contact or near-contact hold, held flat or drifting either way: hands simply apart, not mid-hold.
+  Added FAR_APART_THRESHOLD=0.45: reject as unknown when the classified pair's distance exceeds it,
+  except when either finger is the thumb (6) or pinky (10), whose natural reach legitimately spans past
+  0.45 in real near-contact holds (near:6x10 samples reach 0.88-1.1) and would otherwise regress that
+  class. exact_match 0.543 -> 0.559, false_unknown_rate 0.064 -> 0.070 (within the 2-point budget), no
+  class regressed beyond the gate's limit.
 """
 from __future__ import annotations
 
@@ -72,6 +82,7 @@ MOTION_THRESHOLD = 0.1  # mean per-frame wrist displacement, in mean-scale units
 TIP_MOTION_THRESHOLD = 0.2  # mean per-frame fingertip displacement, in mean-scale units, above which fingers are still moving into shape
 TIP_MOTION_CONF_GATE = 0.75  # only trust tip_motion above this confidence: low-confidence tracking jitter looks like motion but isn't
 PAIR_DRIFT_THRESHOLD = 0.0451  # mean per-step increase of the closest-pair distance, in mean-scale units, above which the hands are still separating
+FAR_APART_THRESHOLD = 0.45  # mean-scale closest-pair distance above which no 6-10 configuration applies: hands are simply apart, not near-contact
 
 
 def wrist_motion(window: Window) -> float:
@@ -193,6 +204,8 @@ def classify(window: Window) -> GestureState:
     if confidence > TIP_MOTION_CONF_GATE and pair_separation_trend(window) > PAIR_DRIFT_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     lf, rf, dist = averaged_pair(window, frame)
+    if lf not in (6, 10) and rf not in (6, 10) and dist > FAR_APART_THRESHOLD:
+        return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     return GestureState(
         method="6-10",
         left=lf,
