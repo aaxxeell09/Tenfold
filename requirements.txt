@@ -9,3 +9,5 @@ mediapipe>=0.10
 opencv-python>=4.9
 Pillow>=10
 marimo>=0.9
+altair>=5.4  # reactive charts in dashboard/loop_dashboard.py (mo.ui.altair_chart)
+pandas>=2.0  # the dataframe behind mo.ui.altair_chart selections in the dashboard
