@@ -162,6 +162,13 @@ def test_snapshot_carries_the_retrospective_validation_under_its_own_name(tmp_pa
     assert all(v["heldout"] is None for v in snap["informed"])  # never folded into the held-out fields
 
 
+def test_dashboard_page_text_is_english():
+    source = NOTEBOOK.read_text()
+    assert "retrospective validation, participants not identified" in source
+    for french in ("rétrospective", "identifiés", "données", "règle"):
+        assert french not in source, french
+
+
 @pytest.mark.parametrize("case", ["committed", "full", "partial", "empty"])
 def test_dashboard_runs_on_every_kind_of_snapshot(tmp_path, case):
     if case == "committed":

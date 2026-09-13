@@ -10,7 +10,8 @@ one committed on GitHub main. The footer names the one loaded and the top of the
 
 Presentation path: the result (what the scores measure, holds, gains in points), 01 hands before and after,
 02 how a change is accepted or refused, 03 every version and attempt, 04 the effect across the practice set,
-05 the limits of the evidence (validation rétrospective, participants non identifiés, with its intervals).
+05 the limits of the evidence (retrospective validation, participants not identified, with its intervals).
+Every visible word is English, including labels that the snapshot stores in French.
 Two scores are compared only when their data and scorers are identified and equal; otherwise the page says
 "not verified". The explorables are precomputed and never change the tutor in production.
 """
@@ -121,7 +122,7 @@ def _(Path, json, mo, os, urllib):
 
 @app.cell
 def _(datetime, icon, mo, re):
-    RETRO_LABEL = "validation rétrospective, participants non identifiés"
+    RETRO_LABEL = "retrospective validation, participants not identified"  # the page is English; the snapshot keeps its own label
 
     def em(m):
         return None if not m else m.get("exact_match")
@@ -833,7 +834,7 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, icon, informed, math, mo
     _pair = f"Original → {_name_of((_retro.get('b') or {}).get('commit'))}" if _retro else ""
     _method = ((f'<div class="tf-kicker-note" style="margin-top:10px">These {_retro.get("holds")} gesture holds were set aside after '
                 'earlier development had used the full dataset. Participants are not reliably identified. Evaluation on new users '
-                f'is still needed. <span class="tf-tag">{_retro.get("label", RETRO_LABEL)}</span></div>') if _retro else "")
+                f'is still needed. <span class="tf-tag">{RETRO_LABEL}</span></div>') if _retro else "")
     _rungs = [
         _rung("done" if _verified else "next", f"Training gains {pill('done', 'good') if _verified else pill('not verified', 'warn')}",
               (f"All {pct(_a.get('exact_match'))} → {pct(_b.get('exact_match'))} · almost touching "
