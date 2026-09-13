@@ -148,11 +148,20 @@ def wrong_pose_harness(params: object | None = None) -> Harness:
 # --------------------------------------------------------------------------
 
 
+# Keys of the product that live in the same file without being tutor timings.
+# The tutor never reads them, so they are allowed here and nowhere else.
+NON_TUTOR_PARAMS = frozenset({"live_sample_windows"})
+
+
 def test_params_file_has_exactly_the_contract_keys() -> None:
     raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
     assert list(raw) == ["global", "bounds", "invariants"]
-    assert set(raw["global"]) == set(REQUIRED_PARAMS)
-    assert set(raw["bounds"]) == set(REQUIRED_PARAMS)
+    # Strict about the tutor's own keys, so a typo in one of them still fails.
+    assert set(REQUIRED_PARAMS) <= set(raw["global"])
+    assert set(REQUIRED_PARAMS) <= set(raw["bounds"])
+    assert set(raw["global"]) - set(REQUIRED_PARAMS) <= NON_TUTOR_PARAMS
+    assert set(raw["bounds"]) - set(REQUIRED_PARAMS) <= NON_TUTOR_PARAMS
+    assert set(raw["global"]) == set(raw["bounds"])
     assert len(raw["invariants"]) == 6
 
 
@@ -427,6 +436,174 @@ def test_a_requested_hint_climbs_one_step_and_never_counts_as_nagging() -> None:
     line = harness.kind("exercise")[0]
     assert line["unsolicited_interventions"] == 0
     assert line["first_try"] is False
+
+
+# --- the second wrong answer, the third trigger of L4 ----------------------
+
+RESCUE_LINE = json.loads(LINES_FILE.read_text(encoding="utf-8"))["rescue"].format(
+    tens=5, tens_value=50, u1=2, u2=3, units=6, total=56)
+
+
+def answering_harness(params: object | None = None) -> Harness:
+    """8 x 7 with the pose already made, so only the number is left to find."""
+    harness = wrong_pose_harness(params)
+    harness.feed(1.5, gesture=pose(8, 7, True))
+    return harness
+
+
+def wait(harness: Harness, seconds: float = 5.0) -> None:
+    """Time passes with no frame and no line, so min_verbal_gap is satisfied."""
+    harness.clock.tick(seconds)
+
+
+def test_the_second_wrong_answer_reaches_the_rescue() -> None:
+    harness = answering_harness()
+    wait(harness)
+    first = harness.tutor.answer(54, correct=False, now=harness.clock.t)
+    assert first.tutor_line == "Keep the pose. Count the tens again."
+    assert first.intervention_level < 4
+
+    wait(harness)
+    second = harness.tutor.answer(55, correct=False, now=harness.clock.t)
+    # The canonical rescue line of lesson/tally_lines.json, numbers filled in.
+    assert second.tutor_line == RESCUE_LINE
+    assert second.tutor_line == "5 tens make 50. 2 times 3 makes 6. That gives 56."
+    assert second.intervention_level == 4
+    assert second.tutor_visual == {"kind": "rescue_card", "tens": 5,
+                                   "units": 6, "total": 56}
+    # The exercise then waits for the child to say the answer.
+    assert second.tutor_state == ANSWER_RETRY
+    assert harness.tutor.answer(56, correct=True,
+                                now=harness.clock.t).tutor_state == SUCCESS
+    harness.tutor.end_exercise(reason="answered", now=harness.clock.t)
+    assert harness.kind("exercise")[0]["rescue_used"] is True
+
+
+def test_the_wrong_answer_rescue_is_not_gated_by_rescue_delay() -> None:
+    """Two wrong answers are the evidence, so the exercise clock never gates
+    them: this trigger reaches L4 well before rescue_delay has run."""
+    harness = answering_harness()
+    wait(harness)
+    harness.tutor.answer(54, correct=False, now=harness.clock.t)
+    wait(harness)
+    decision = harness.tutor.answer(55, correct=False, now=harness.clock.t)
+    assert harness.clock.t < harness.tutor.effective("rescue_delay")
+    assert decision.intervention_level == 4
+
+
+def test_the_wrong_answer_rescue_sits_outside_max_unsolicited_verbal() -> None:
+    """The cap is the budget of L1, L2 and L3 only, here spent to the last line
+    before the two wrong answers ask for the rescue."""
+    harness = wrong_pose_harness()
+    assert harness.tutor.effective("max_unsolicited_verbal") == 3
+    assert len(harness.feed(40.0, gesture=UNKNOWN, hands=2)) == 3
+    assert any(line["reason"] == "budget_spent" for line in harness.kind("decision"))
+
+    wait(harness)
+    harness.tutor.answer(54, correct=False, now=harness.clock.t)
+    wait(harness)
+    decision = harness.tutor.answer(55, correct=False, now=harness.clock.t)
+    assert decision.tutor_line == RESCUE_LINE
+    assert decision.intervention_level == 4
+
+
+def test_the_wrong_answer_rescue_obeys_min_verbal_gap() -> None:
+    """A second wrong answer inside the gap is still a wrong answer: the rescue
+    is dropped rather than queued, and the wrong answer keeps its own line."""
+    harness = answering_harness()
+    wait(harness)
+    harness.tutor.answer(54, correct=False, now=harness.clock.t)
+    harness.clock.tick(1.0)
+    decision = harness.tutor.answer(55, correct=False, now=harness.clock.t)
+    assert decision.tutor_line == "Let's do the tens first."
+    assert decision.intervention_level < 4
+    assert any(line["reason"] == "min_verbal_gap" for line in harness.kind("decision"))
+    harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+    assert harness.kind("exercise")[0]["rescue_used"] is False
+
+
+def test_an_utterance_that_does_not_parse_is_not_a_wrong_answer() -> None:
+    """Only the wrong final numbers that score a math error count towards the
+    two. Speech never submits, so it never brings the rescue closer."""
+    harness = answering_harness()
+    for text in ("uhh", "is it, um"):
+        wait(harness)
+        harness.tutor.speech(text, number=None, now=harness.clock.t)
+    wait(harness)
+    decision = harness.tutor.answer(54, correct=False, now=harness.clock.t)
+    assert decision.tutor_line == "Keep the pose. Count the tens again."
+    assert decision.intervention_level < 4
+    harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+    line = harness.kind("exercise")[0]
+    assert line["rescue_used"] is False
+    assert line["scored_math_errors"] == 1
+
+
+def test_the_wrong_answer_count_resets_on_a_new_exercise() -> None:
+    harness = answering_harness()
+    wait(harness)
+    harness.tutor.answer(54, correct=False, now=harness.clock.t)
+    wait(harness)
+    harness.tutor.new_exercise(8, 7, node="u2-l3", now=harness.clock.t)
+    harness.feed(1.5, gesture=pose(8, 7, True))
+
+    wait(harness)
+    first = harness.tutor.answer(54, correct=False, now=harness.clock.t)
+    assert first.tutor_line == "Keep the pose. Count the tens again."
+    assert first.intervention_level < 4
+    wait(harness)
+    assert harness.tutor.answer(55, correct=False,
+                                now=harness.clock.t).intervention_level == 4
+
+
+def test_the_wrong_answer_rescue_stays_one_per_exercise() -> None:
+    harness = answering_harness()
+    said = []
+    for value in (54, 55, 57, 58):
+        wait(harness)
+        said.append(harness.tutor.answer(value, correct=False,
+                                         now=harness.clock.t).tutor_line)
+    # The rescue takes the place of wrong_answer_2, and the sequence goes on
+    # from wrong_answer_3 for the wrong answers that follow it.
+    assert said == ["Keep the pose. Count the tens again.",
+                    RESCUE_LINE,
+                    "Now check the fingers above.",
+                    "Now check the fingers above."]
+    harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+    assert harness.levels().count(4) == 1
+    assert harness.kind("exercise")[0]["scored_math_errors"] == 4
+
+
+def test_a_rescue_already_walked_through_is_never_walked_through_twice() -> None:
+    """The clock got there first, so the two wrong answers find it spent."""
+    harness = wrong_pose_harness()
+    harness.feed(30.0, gesture=pose(8, 7, False))
+    assert harness.last.intervention_level == 4
+    said = []
+    for value in (54, 55):
+        wait(harness)
+        said.append(harness.tutor.answer(value, correct=False,
+                                         now=harness.clock.t).tutor_line)
+    assert said == ["Keep the pose. Count the tens again.",
+                    "Let's do the tens first."]
+    harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+    assert harness.levels().count(4) == 1
+
+
+def test_the_rescue_reached_by_the_clock_costs_first_try_and_scores_nothing() -> None:
+    """Unchanged behaviour, guarded here: the pose holds the right numbers and
+    is simply not touching, so nothing is ever scored, and the rescue on its
+    own is what ends first try."""
+    harness = wrong_pose_harness()
+    harness.feed(30.0, gesture=pose(8, 7, False))
+    assert harness.last.intervention_level == 4
+    assert harness.last.first_try is False
+    harness.tutor.end_exercise(reason="skipped", now=harness.clock.t)
+    line = harness.kind("exercise")[0]
+    assert line["rescue_used"] is True
+    assert line["first_try"] is False
+    assert line["scored_gesture_errors"] == 0
+    assert line["scored_math_errors"] == 0
 
 
 # --------------------------------------------------------------------------

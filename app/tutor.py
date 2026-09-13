@@ -77,6 +77,7 @@ FPS_EPSILON = 1e-6                  # a camera running at exactly fps keeps ever
 AUTONOMOUS_FOR_INDEPENDENT = 3
 HARD_FOR_SUPPORTIVE = 2
 RESCUE_LEVEL = 4                    # the top of the ladder, outside the nag budget
+WRONG_ANSWERS_FOR_RESCUE = 2        # wrong numbers on one exercise that reach it
 EARLY_STOP_MIN_EXERCISES = 3
 EARLY_STOP_CONSECUTIVE = 2
 EARLY_STOP_ERRORS = 2
@@ -591,14 +592,17 @@ class Tutor:
             line = self._render("success", a=self._a, b=self._b,
                                 total=self._result)
             self._set_state(SUCCESS, moment, REASON_ANSWER_GIVEN)
+            self._say(line, moment)
         else:
             self._math_errors += 1
-            key = WRONG_ANSWER_KEYS[min(self._math_errors,
-                                        len(WRONG_ANSWER_KEYS)) - 1]
-            line = self._render(key)
             self._set_state(ANSWER_RETRY, moment, REASON_ANSWER_WRONG,
                             scored="math")
-        self._say(line, moment)
+            line = self._answer_rescue(moment)
+            if line is None:
+                key = WRONG_ANSWER_KEYS[min(self._math_errors,
+                                            len(WRONG_ANSWER_KEYS)) - 1]
+                line = self._render(key)
+                self._say(line, moment)
         return self._decision(line=line)
 
     def new_exercise(self, a: int, b: int, title: str | None = None,
@@ -896,6 +900,22 @@ class Tutor:
                            rescue=target >= RESCUE_LEVEL)
         return said
 
+    def _answer_rescue(self, moment: float) -> str | None:
+        """The second wrong number on one exercise walks the whole thing through.
+
+        One of the three triggers of L4, and the only one that reads no clock:
+        two wrong answers are the evidence, so rescue_delay does not gate them.
+        It stays outside max_unsolicited_verbal, which remains the budget of L1,
+        L2 and L3, it stays one per exercise, and it still obeys min_verbal_gap,
+        which drops it rather than queueing it. Dropped or already spent, the
+        wrong answer keeps its own line and the ladder stays where it was.
+        """
+        if self._math_errors < WRONG_ANSWERS_FOR_RESCUE or self._rescue_used:
+            return None
+        return self._offer(moment, RESCUE_LEVEL, self._ladder_line(RESCUE_LEVEL),
+                           None, REASON_ANSWER_WRONG, ("min_verbal_gap",),
+                           rescue=True)
+
     def _gate_level(self, target: int) -> int:
         """L3 and L4 are barred until their own clock on the exercise has run."""
         elapsed = self._ped - self._ex_start_ped
@@ -905,9 +925,9 @@ class Tutor:
             target = 2
         return max(target, self._level)
 
-    def _offer(self, moment: float, level: int, line: str | None, problem: str,
-               reason: str, keys: Sequence[str], visibility: bool = False,
-               rescue: bool = False) -> str | None:
+    def _offer(self, moment: float, level: int, line: str | None,
+               problem: str | None, reason: str, keys: Sequence[str],
+               visibility: bool = False, rescue: bool = False) -> str | None:
         """Apply the anti nag limits, then deliver or drop. Never queue."""
         if line is None:
             return None
