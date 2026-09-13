@@ -831,6 +831,7 @@
     "same_hand_twice", "recount_tens", "recount_units", "no_contact"];
   function lineKind(m) {
     if (ACK_STATES.includes(m.state)) return "ack";
+    if (m.state === "exercise_shown") return "earned";
     if (CORRECTION_MOMENTS.includes(m.reaction) || m.state === "wrong_pose" || m.state === "answer_wrong") return "correction";
     return "nudge";
   }
@@ -850,17 +851,23 @@
   }
   // A newer line takes the place of an older unspoken one of its own kind, and the
   // queue is never deeper than one waiting line: past that, the line that goes is the
-  // one the child can most afford to lose, never an acknowledgement and never a
-  // correction while anything else is there to go instead.
+  // one the child can most afford to lose, never an acknowledgement, never the line
+  // that opens an exercise, and never a correction while anything else is there to go
+  // instead. "earned" is that opening line: the child is owed it, so it is never
+  // dropped, but it does not cut, because the line it would cut is the success of the
+  // answer they have just given.
   const REPLACEABLE = ["nudge", "correction"];
+  const KEPT = ["ack", "earned"];
   function enqueue(item) {
     if (REPLACEABLE.includes(item.kind)) {
       speech.queue.filter((q) => q.kind === item.kind)
         .forEach((q) => dropLine(q, "replaced_by_newer_of_same_kind"));
     }
     speech.queue.push(item);
-    while (speech.queue.length > MAX_PENDING) {
-      const droppable = speech.queue.filter((q) => q.kind !== "ack");
+    // the depth is counted in lines that may go: a line the child is owed waits its
+    // turn without costing another line its place, because it will be spoken anyway
+    while (speech.queue.filter((q) => KEPT.indexOf(q.kind) === -1).length > MAX_PENDING) {
+      const droppable = speech.queue.filter((q) => KEPT.indexOf(q.kind) === -1);
       const victim = droppable.find((q) => q.kind !== "correction") || droppable[0];
       if (!victim) break;
       dropLine(victim, "queue_full");
@@ -895,7 +902,7 @@
   function stale(item) {
     if (item.bubble && (!item.bubble.isConnected || item.bubble.closest("[hidden]"))) return true;
     // the child earned this one: it reaches them however much has happened since
-    if (item.kind === "ack") return false;
+    if (KEPT.indexOf(item.kind) !== -1) return false;
     return Boolean(item.still) && !item.still();
   }
   function closeItem(item) {
@@ -974,7 +981,10 @@
     speech.serial += 1;          // the engine may still report the end of a line that is over
     const line = speech.line;
     speech.line = null;
-    if (line) { talking(line, false); ttsPair(false); }
+    // A line the child was hearing and did not hear to the end is a drop like any
+    // other, and the record is what measures what the cutting policy costs. A line
+    // that ended by itself goes through endLine and is not reported.
+    if (line) { talking(line, false); ttsPair(false); reportDrop(line, "interrupted"); }
     if (hasVoice()) { try { window.speechSynthesis.cancel(); } catch (e) { /* no engine */ } }
     closeItem(line);
   }
@@ -987,7 +997,10 @@
     const dropped = speech.queue.splice(0);
     const line = speech.line;
     speech.line = null;
-    if (line) { talking(line, false); ttsPair(false); }
+    // the screen the child was on has gone, so the line they were hearing was cut: it
+    // is reported the way any other drop is, and the ones still waiting were never
+    // started and are simply closed
+    if (line) { talking(line, false); ttsPair(false); reportDrop(line, "interrupted"); }
     // An engine with nothing of ours in it is left alone: cancelling an idle voice is
     // not a cut. Every view change comes through here, and most of them arrive in
     // silence; only a screen that really was talking touches the engine.
@@ -1133,8 +1146,10 @@
     s.beat = null;
     if (!closing) return;
     const turn = s.turn;
+    // the beat is the child's: its closing line is earned like the exercise line behind
+    // it, so the queue keeps both and neither cuts the success they follow
     say(closing, $("#lesson .say"), lessonTally(),
-        { kind: "instruction", key: "next_one", still: () => Boolean(lesson) && lesson.turn === turn });
+        { kind: "earned", key: "next_one", still: () => Boolean(lesson) && lesson.turn === turn });
   }
   // The pill carries one number for one exercise and no longer. The success beat is
   // where it goes: the moment the beat starts the pill drops the number and is listening
