@@ -143,6 +143,18 @@ class BudgetExhausted(RuntimeError):
     """What is left under --max-cost cannot pay for the next agent call: the arm stops cleanly."""
 
 
+def smoke_requirements(repo: Path, rules: Path) -> list[str]:
+    """The SMOKE_FAIL lines of loop/smoke.py on the running rules, in a subprocess with an empty environment. The guard
+    runs the same test on every candidate, so each line is something the next patch has to fix before any version
+    can be accepted. Empty when the rules pass, or when the smoke test itself could not run (the guard still checks)."""
+    try:
+        p = subprocess.run([sys.executable, str(repo / "loop" / "smoke.py"), "--rules", str(rules)], cwd=repo,
+                           env={"PATH": os.defpath}, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, OSError):
+        return []
+    return [l[len("SMOKE_FAIL "):] for l in p.stdout.splitlines() if l.startswith("SMOKE_FAIL ")]
+
+
 def data_fingerprint(path: Path) -> dict:
     """Which dataset a version was measured on: short sha256 of the samples file and its sample count."""
     import hashlib
@@ -581,6 +593,12 @@ class Critic:
             self.reset_worktree()
             diagnosis = self.diagnose(it)
             log("diagnosis: " + diagnosis.split("\n")[0][:200], self.logfile)
+            required = smoke_requirements(self.repo, self.rules_src)
+            if required:
+                # on the diagnosis, so the patch agent aims at it and the guard agent accepts a patch that fixes it
+                diagnosis += ("\nREQUIRED: the running rules.py already fails the guard's smoke test, so no patch is "
+                              "accepted until it passes: " + " || ".join(required))
+                log("required before any patch is accepted: " + " || ".join(r[:160] for r in required), self.logfile)
             feedback = ""
             outcome = "failed"
             for attempt in range(1, 3):
