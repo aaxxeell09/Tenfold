@@ -9,6 +9,11 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="styles.css?v=6">
+<!-- Nunito is a nicety, not a dependency: loaded for print first so it can never
+     block the first paint, then promoted once it is there. With no network the
+     page paints at once on the fallback stack in styles.css. -->
+<link rel="stylesheet" media="print" onload="this.media='all'; this.onload=null"
+      href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&amp;display=swap">
 </head>
 <body class="tablet" data-view="welcome">
 <div class="frame" id="frame">
@@ -108,7 +113,8 @@
   <!-- check: three steps, driven by the camera, no buttons -->
   <section class="checkview view" id="check" hidden data-step="1">
     <div class="cam cam-full" id="check-cam">
-      <img class="practice-video" src="/video" alt="">
+      <!-- src is set by app.js while the check is on screen, and only then -->
+      <img class="practice-video" alt="">
       <svg class="practice-overlay" viewBox="0 0 1.333 1" preserveAspectRatio="none"></svg>
       <span class="camtag">camera</span>
       <div class="stepnum"><i class="on"></i><i></i><i></i></div>

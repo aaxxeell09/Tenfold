@@ -111,6 +111,19 @@
     return ACCESSORIES[level] || null;
   }
 
+  // Every accessory won between two levels, the level left behind excluded. A single
+  // node can cross two levels at once (a perfect boss is 220 XP), and the accessory
+  // of the level passed through has to be announced as well.
+  function earnedBetween(before, after) {
+    const from = Math.floor(Number(before) || 0), to = Math.floor(Number(after) || 0);
+    const out = [];
+    for (let level = from + 1; level <= to; level++) {
+      const accessory = earnedAt(level);
+      if (accessory) out.push(accessory);
+    }
+    return out;
+  }
+
   // ---------- nodes and progress ----------
   function allNodes() {
     const out = [];
@@ -207,7 +220,7 @@
   return {
     UNITS, LESSON_QUESTIONS, BOSS_QUESTIONS,
     XP_CORRECT, XP_FIRST_TRY, XP_LESSON, XP_BOSS, LEVELS, ACCESSORIES, ACCESSORY_NAMES,
-    xpForNode, levelFor, levelInfo, accessoriesFor, earnedAt,
+    xpForNode, levelFor, levelInfo, accessoriesFor, earnedAt, earnedBetween,
     allNodes, findNode, emptyProgress, nodeState, currentNode, starsFor, recordLesson, claimChest,
     totals, tensOf, onesOf,
   };

@@ -157,6 +157,27 @@ test("accessories arrive at levels 2, 4, 6, 8 and 10 and stack up", () => {
   assert.strictEqual(L.ACCESSORY_NAMES.hat, "wizard hat");
 });
 
+test("every accessory crossed is named, not only the one on the level landed on", () => {
+  assert.deepStrictEqual(L.earnedBetween(1, 1), [], "no level up, nothing new");
+  assert.deepStrictEqual(L.earnedBetween(1, 2), ["glasses"]);
+  assert.deepStrictEqual(L.earnedBetween(1, 3), ["glasses"], "level 3 wears nothing of its own");
+  assert.deepStrictEqual(L.earnedBetween(1, 4), ["glasses", "headband"]);
+  assert.deepStrictEqual(L.earnedBetween(3, 6), ["headband", "hat"]);
+  assert.deepStrictEqual(L.earnedBetween(1, 10), ["glasses", "headband", "hat", "cape", "crown"]);
+  assert.deepStrictEqual(L.earnedBetween(6, 4), [], "a level is never lost");
+  assert.deepStrictEqual(L.earnedBetween(), []);
+});
+
+test("a perfect boss can cross two levels at once", () => {
+  const before = L.levelInfo(30);
+  const after = L.levelInfo(30 + L.xpForNode("boss", 8, 8, true));
+  assert.strictEqual(before.level, 1);
+  assert.strictEqual(after.level, 3, "220 XP from 30 goes past 100 and 250");
+  assert.strictEqual(L.earnedAt(after.level), null, "the level landed on has no accessory");
+  assert.deepStrictEqual(L.earnedBetween(before.level, after.level), ["glasses"],
+    "the glasses of the level passed through still have to be announced");
+});
+
 test("the reasoning arithmetic matches the fingers", () => {
   for (let a = 6; a <= 10; a++) for (let b = 6; b <= 10; b++) assert.strictEqual(L.tensOf(a, b) * 10 + L.onesOf(a, b), a * b, `${a}x${b}`);
 });

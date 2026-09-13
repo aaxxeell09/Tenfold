@@ -2,7 +2,9 @@
    palette (styles.css tokens), Nunito, a 1194 x 834 landscape tablet box scaled
    down to fit. The warm names used by the start check, the castle and the
    profile components are aliases onto the green palette. No em dashes anywhere. */
-@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');
+/* Nunito is loaded from index.html with a non blocking link: an @import here is
+   render blocking, and this app is otherwise entirely local. The fallback stack
+   in --font is what paints when there is no network. */
 
 :root {
   --green: #58cc02;

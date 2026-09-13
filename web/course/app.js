@@ -102,6 +102,9 @@
   const VIEWS = ["welcome", "home", "learn", "practice", "check", "profile"];
   let view = "welcome";
   function show(name) {
+    // the Back button is a way out of a running lesson too: without this the node
+    // keeps running on the server and Tally talks over the next screen
+    if (lesson) leaveLesson();
     view = name;
     VIEWS.forEach((v) => { const el = document.getElementById(v); if (el) el.hidden = v !== name; });
     document.body.dataset.view = name;
@@ -257,13 +260,14 @@
   function startCheck() {
     if (checkRun) return;
     const root = $("#check");
-    checkRun = { step: 1, lit: 0, timers: [], done: false };
+    checkRun = { step: 1, lit: 0, timers: [], done: false, typed: "" };
     root.className = "checkview view";
     root.dataset.step = "1";
     $("#check-mic").hidden = true;
     checkSay("Show me both hands.");
     setTally($("#check-tally"), "ready");
     setStepDots(1);
+    videoOn($("#check-cam .practice-video"));
     connect(() => sendLesson({ type: "start_node", state: learner(), node: { id: "check", kind: "check", pairs: [[6, 6]], count: 1 } }));
     decorate(root);
   }
@@ -276,6 +280,8 @@
     checkRun.timers.forEach(clearTimeout);
     checkRun = null;
     gateVoice(false);
+    videoOff($("#check-cam .practice-video"));
+    link.start = null; link.waiting = [];
     sendLesson({ type: "quit" });
   }
   function setStepDots(n) {
@@ -315,7 +321,9 @@
         setTally($("#check-tally"), "happy");
         later(1600, () => {
           root.classList.remove("check", "banner"); setStepDots(3);
-          checkSay("Say the answer.");
+          // no microphone in this browser, or one that was refused: say so and
+          // show the digits in the pill, which is the only answer field here
+          checkSay(canHear() ? "Say the answer." : "Type the answer.");
           $("#check-mic").hidden = false;
           $("#check-miclabel").textContent = micLabel();
           setTally($("#check-tally"), "ready");
@@ -503,7 +511,11 @@
     voice.wanted = true;
     startVoice();
   }
-  function micLabel() { return voice.denied ? "Type it" : voice.running ? "Listening" : "Mic off"; }
+  // a browser with no recognition and a refused microphone are the same thing for
+  // the child: the keyboard is the way in, and the label has to say so
+  function hasSpeech() { return Boolean(window.SpeechRecognition || window.webkitSpeechRecognition); }
+  function canHear() { return hasSpeech() && !voice.denied; }
+  function micLabel() { return canHear() ? (voice.running ? "Listening" : "Mic off") : "Type it"; }
   // the live listening state, on the lesson's mic and on the check's pill
   function markMic() {
     const mic = $(".mic");
@@ -538,20 +550,79 @@
   }
 
   // ---------- socket ----------
+  // One socket for the page. A handshake that never completes is given up on, a
+  // closed socket is reopened with a growing wait, and whatever asked for the last
+  // connection is replayed once it is back. A lesson that cannot reach the server
+  // says so instead of sitting on "Getting ready" for ever.
+  const LINK_SAY = "I cannot reach the camera. Trying again.";
+  const LINK_TIMEOUT_MS = 4000;
+  const LINK_MAX_WAIT_MS = 8000;
   let socket = null, socketReady = false;
+  const link = { start: null, waiting: [], tries: 0, timer: null, guard: null, trouble: false };
   function connect(onOpen) {
-    if (socket && socketReady) { onOpen(); return; }
-    if (socket) { socket.addEventListener("open", onOpen, { once: true }); return; }
-    socket = new WebSocket(`ws://${location.host}/ws`);
-    socket.onopen = () => { socketReady = true; onOpen(); };
+    if (onOpen) {
+      link.start = onOpen;
+      // several callers can ask while one socket is opening: they all run, in order
+      if (!(socket && socketReady)) link.waiting.push(onOpen);
+    }
+    if (socket && socketReady) { if (onOpen) onOpen(); return; }
+    if (socket) return;
+    openSocket();
+  }
+  function openSocket() {
+    clearTimeout(link.timer); link.timer = null;
+    try { socket = new WebSocket(`ws://${location.host}/ws`); }
+    catch (e) { socket = null; retryLink(); return; }
+    link.guard = setTimeout(() => { if (socket && !socketReady) { try { socket.close(); } catch (err) { /* already gone */ } } }, LINK_TIMEOUT_MS);
+    socket.onopen = () => {
+      socketReady = true;
+      link.tries = 0;
+      clearTimeout(link.guard); link.guard = null;
+      linkTrouble(false);
+      // the server may have restarted behind a frozen last frame
+      videoRefresh();
+      const waiting = link.waiting.splice(0);
+      if (waiting.length) waiting.forEach((fn) => fn());
+      else if (link.start) link.start();   // a reconnect: replay the last start
+    };
     socket.onmessage = (e) => onServerMessage(JSON.parse(e.data));
-    socket.onclose = () => { socketReady = false; socket = null; };
+    socket.onclose = () => {
+      socketReady = false; socket = null;
+      clearTimeout(link.guard); link.guard = null;
+      retryLink();
+    };
     socket.onerror = () => { socketReady = false; };
+  }
+  function retryLink() {
+    if (link.timer) return;
+    link.tries += 1;
+    if (link.tries >= 2) linkTrouble(true);
+    const wait = Math.min(LINK_MAX_WAIT_MS, 500 * Math.pow(2, link.tries - 1));
+    link.timer = setTimeout(() => { link.timer = null; openSocket(); }, wait);
+  }
+  function linkTrouble(on) {
+    if (Boolean(on) === link.trouble) return;
+    link.trouble = Boolean(on);
+    if (!link.trouble) return;
+    if (lesson) {
+      const say = $("#lesson .tally-say"), sub = $("#lesson .speech-sub");
+      if (say) say.textContent = LINK_SAY;
+      if (sub) sub.textContent = "Trying again";
+      speak(LINK_SAY, $("#lesson .tally"));
+    } else if (checkRun) {
+      checkSay(LINK_SAY);
+    }
+    toast(LINK_SAY);
   }
   function sendLesson(payload) { if (socket && socketReady) socket.send(JSON.stringify(payload)); }
   function onServerMessage(m) {
     if (m.demo && !demoSeeded) seedShowcase();
     if (m.type === "node_end") {
+      // an abandoned session on the server must never write over this page's record:
+      // the message is filtered against what is actually running here first
+      const forCheck = Boolean(checkRun && m.node_id === "check");
+      const forLesson = Boolean(lesson && (!m.node_id || m.node_id === lesson.node.id));
+      if (!forCheck && !forLesson) return;
       // the server hands the learner back; xp and the name are the page's, keep the higher xp
       if (m.state) {
         const mine = learner() || {};
@@ -559,8 +630,7 @@
         if (!m.state.display_name && mine.display_name) m.state.display_name = mine.display_name;
         saveLearner(m.state);
       }
-      if (checkRun && m.node_id === "check") return checkEnd();
-      if (!lesson || (m.node_id && m.node_id !== lesson.node.id)) return;
+      if (forCheck) return checkEnd();
       lesson.serverCorrect = m.correct; lesson.total = m.total || lesson.total; lesson.endTally = m.tally;
       return finish(false);
     }
@@ -568,9 +638,18 @@
     if (checkRun && m.node === "check") return checkMessage(m);
     if (!lesson || m.node !== lesson.node.id) return;
     const fresh = m.state !== lesson.last;
-    // a new fact: a clean first try again
-    if (fresh && m.fact && m.fact !== lesson.fact) { lesson.fact = m.fact; lesson.done += 1; lesson.slipped = false; }
-    if (m.hint_level > 0 || (fresh && m.state === "wrong_pose")) lesson.slipped = true;
+    // A new exercise, not a new fact: a node can serve the same fact five times over
+    // (u1-l2 is 6x7 both ways), and only the engine's rearm to exercise_shown moves
+    // once per question. That is the counter and the clean first try again.
+    if (fresh && m.state === "exercise_shown") { lesson.done += 1; lesson.slipped = false; }
+    if (m.fact) lesson.fact = m.fact;
+    // A fixed finger is how the input works, not a mistake: the server counts that
+    // answer for the stars, so it keeps the first try XP too. Only a wrong pose still
+    // held after the server's grace is a slip, and the server is the one with the
+    // clock: it says so with pose_slip. A hint costs the bonus when the child asked
+    // for it, never when the server raised it on its own (hint_auto). An older server
+    // sends neither field, and a missing field counts as false.
+    if (m.pose_slip === true || (m.hint_level > 0 && m.hint_auto !== true)) lesson.slipped = true;
     if (fresh && m.state === "answer_wrong") {
       lesson.slipped = true;
       if (lesson.hearts !== null) {
@@ -603,7 +682,7 @@
     const node = L.findNode(id);
     const total = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
     lesson = { node, total, correct: 0, firstTry: 0, slipped: false, serverCorrect: null, done: 0, fact: null, last: null, said: null,
-      hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", t0: Date.now() };
+      hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", paid: false, t0: Date.now() };
     stopCheck();
     VIEWS.forEach((v) => { $("#" + v).hidden = true; });
     $("#finish").hidden = true;
@@ -611,7 +690,30 @@
     document.body.dataset.view = "lesson";
     setupVoice();
     shellPractice();
-    connect(() => sendLesson({ type: "start_node", state: learner(), node: { id: node.id, kind: node.kind, pairs: node.pairs, count: total } }));
+    connect(() => {
+      // replayed after a dropped socket: the server starts the node again, so the
+      // page banks what was already earned and counts this node from zero too
+      restartCounters();
+      sendLesson({ type: "start_node", state: learner(), node: { id: node.id, kind: node.kind, pairs: node.pairs, count: total } });
+    });
+  }
+  function restartCounters() {
+    const s = lesson;
+    if (!s) return;
+    payLesson();
+    s.paid = false;
+    s.done = 0; s.slipped = false; s.serverCorrect = null; s.fact = null; s.last = null; s.said = null;
+    s.hearts = s.node.kind === "boss" ? 3 : null; s.hit = false; s.typed = "";
+  }
+  // XP is never lost: every answer already right is paid, whatever happens next
+  function payLesson() {
+    const s = lesson;
+    if (!s || s.paid) return 0;
+    s.paid = true;
+    const gain = L.xpForNode(s.node.kind, s.correct, s.firstTry, false);
+    s.correct = 0; s.firstTry = 0;
+    if (gain > 0) addXp(gain);
+    return gain;
   }
   function shellPractice() {
     const s = lesson;
@@ -626,7 +728,7 @@
         <p class="cl-exercise practice-exercise">Getting ready</p>
         <div class="cam cl-cam">
           <div class="practice-stage" data-state="">
-            <img class="practice-video" src="/video" alt="">
+            <img class="practice-video" alt="">
             <svg class="practice-overlay" viewBox="0 0 1.333 1" preserveAspectRatio="none"></svg>
           </div>
           <span class="cam-tag">${use("icon-camera")}camera</span>
@@ -646,7 +748,42 @@
         </div>
       </div>`;
     decorate($("#lesson"));
+    videoOn($(".practice-video", $("#lesson")));
     markMic();
+  }
+  // ---------- the camera stream ----------
+  // /video is a response that never ends, so an <img> streams for exactly as long as
+  // it has a src: it is set when the check or the lesson is on screen and cleared on
+  // the way out. A stream that fails is retried, and a restarted server is picked up
+  // when the socket comes back, instead of leaving a frozen last frame on screen.
+  const stream = { tries: 0, timer: null };
+  function videoSrc() { return `/video?t=${Date.now()}`; }
+  function videoOn(img) {
+    if (!img) return;
+    clearTimeout(stream.timer); stream.timer = null;
+    img.onload = () => { stream.tries = 0; };
+    img.onerror = () => videoRetry(img);
+    img.src = videoSrc();
+  }
+  function videoOff(img) {
+    if (!img) return;
+    clearTimeout(stream.timer); stream.timer = null;
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute("src");
+  }
+  function videoRetry(img) {
+    if (stream.timer) return;
+    stream.tries += 1;
+    const wait = Math.min(4000, 500 * stream.tries);
+    stream.timer = setTimeout(() => {
+      stream.timer = null;
+      if (img.isConnected && img.onerror) img.src = videoSrc();
+    }, wait);
+  }
+  function videoRefresh() {
+    if (checkRun) videoOn($("#check-cam .practice-video"));
+    if (lesson && !$("#lesson").hidden) videoOn($(".practice-video", $("#lesson")));
   }
   // the overlay covers exactly the rendered video box: the img's own box, corrected for what
   // object-fit did with it (contain letterboxes, cover crops). Landmarks are frame fractions,
@@ -724,6 +861,13 @@
     if (!lesson && !checkRun) return;
     if (lesson) lesson.typed = value;
     const el = $(".typed"); if (el) el.textContent = value;
+    if (checkRun && !lesson) {
+      // the check has no answer field of its own: the pill carries the digits, and
+      // it has to follow a Backspace back down to the label
+      checkRun.typed = value;
+      const label = $("#check-miclabel");
+      if (label && !checkRun.done) label.textContent = value || micLabel();
+    }
   }
 
   // ---------- finish ----------
@@ -738,8 +882,11 @@
     const gain = L.xpForNode(s.node.kind, correct, s.firstTry, !outOfHearts);
     const before = L.levelInfo(xp());
     addXp(gain);
+    s.paid = true;
     const after = L.levelInfo(xp());
-    const earned = after.level > before.level ? L.earnedAt(after.level) : null;
+    // a perfect boss is 220 XP, which can cross two levels at once: every accessory
+    // between the two levels is announced, not just the one at the level landed on
+    const earned = L.earnedBetween(before.level, after.level);
     const fail = outOfHearts || res.stars === 0;
     const title = outOfHearts ? "Out of hearts" : fail ? "Almost there" : s.node.kind === "boss" ? "Boss defeated!" : res.stars === 3 ? "Perfect lesson!" : "Lesson complete!";
     const need = Math.ceil(total * 0.6);
@@ -765,13 +912,14 @@
         <div class="tally" data-tally="happy" data-accessories="${after.accessories}"></div>
         <div class="newlevel">Level ${after.level}</div>
         <h1>${after.name}</h1>
-        ${earned ? `<p class="earned">Tally got a <b>${L.ACCESSORY_NAMES[earned]}</b></p>` : `<p class="sub">Tally is proud of you.</p>`}
+        ${earned.length ? `<p class="earned">Tally got ${earned.map(accessoryText).join(" and ")}</p>` : `<p class="sub">Tally is proud of you.</p>`}
         <div class="fn-lvl">
           <div class="fn-lvlhead"><b>${after.name}</b><span>${levelLabel(after)}</span></div>
           <div class="fn-track"><i id="fn-f2" style="width:0%"></i></div>
         </div>
         <div class="btn-row"><button class="btn2" data-action="home">Continue</button><button class="btn2 ghost" data-action="profile">See Tally</button></div>
       </div>`;
+    videoOff($(".practice-video", $("#lesson")));
     $("#lesson").hidden = true;
     $("#finish").hidden = false;
     document.body.dataset.view = "finish";
@@ -802,6 +950,11 @@
     setTimeout(() => { const f = $("#fn-f2"); if (f) f.style.width = `${L.levelInfo(xp()).percent}%`; }, 500);
     speak(`Level up! ${$("#fn-2 h1").textContent}.`, $("#fn-2 .tally"));
   }
+  // glasses are the one plural: "Tally got glasses", "Tally got a wizard hat"
+  function accessoryText(key) {
+    const label = L.ACCESSORY_NAMES[key];
+    return key === "glasses" ? `<b>${label}</b>` : `a <b>${label}</b>`;
+  }
   function confetti() {
     const colors = ["#3f7d2a", "#2f6f6a", "#d9a227", "#c06214", "#8a6fb3"];
     let out = `<div class="confetti" aria-hidden="true">`;
@@ -818,7 +971,14 @@
     toast.timer = setTimeout(() => t.classList.remove("is-on"), 2600);
   }
   function leaveLesson() {
-    if (lesson) sendLesson({ type: "quit" });
+    if (lesson) {
+      sendLesson({ type: "quit" });
+      // SPEC: XP is never lost. Every answer already right is earned, quit or not.
+      const gain = payLesson();
+      if (gain > 0) toast(`${use("icon-xp")}+${gain} XP kept`);
+    }
+    link.start = null; link.waiting = [];
+    videoOff($(".practice-video", $("#lesson")));
     gateVoice(false);
     if ("speechSynthesis" in window) window.speechSynthesis.cancel();
     lesson = null;
@@ -866,7 +1026,13 @@
     else if (action === "unit") { unitAt = Number(el.dataset.u); renderCourse(); }
     else if (action === "profile") { leaveLesson(); go("profile"); }
     else if (action === "mute") setMuted(!muted);
-    else if (action === "mic") { if (voice.denied) return; if (voice.wanted) stopVoice(); else { voice.wanted = true; startVoice(); } markMic(); }
+    // a refusal is not final: an explicit tap on the mic asks the browser again
+    else if (action === "mic") {
+      if (voice.denied) { voice.denied = false; voice.wanted = true; startVoice(); }
+      else if (voice.wanted) stopVoice();
+      else { voice.wanted = true; startVoice(); }
+      markMic();
+    }
     else if (action === "quit" || action === "home") backToMap();
     else if (action === "retry") startLesson(id);
     else if (action === "reset") { progress = L.emptyProgress(); unitAt = null; save(); try { localStorage.removeItem(KEY_LEARNER); } catch (err) { /* fine */ } renderCourse(); toast("Progress reset"); }
@@ -887,9 +1053,9 @@
     }
     if (inField) return;
     const typed = lesson ? lesson.typed : (checkRun.typed || "");
-    if (e.key >= "0" && e.key <= "9") { if (typed.length < 3) { const v = typed + e.key; if (checkRun && !lesson) checkRun.typed = v; setTyped(v); if (checkRun && !lesson) $("#check-miclabel").textContent = v; } }
-    else if (e.key === "Backspace") { const v = typed.slice(0, -1); if (checkRun && !lesson) checkRun.typed = v; setTyped(v); }
-    else if (e.key === "Enter") { e.preventDefault(); if (!typed.length) return; sendLesson({ type: "check", value: Number(typed) }); if (checkRun && !lesson) checkRun.typed = ""; setTyped(""); }
+    if (e.key >= "0" && e.key <= "9") { if (typed.length < 3) setTyped(typed + e.key); }
+    else if (e.key === "Backspace") setTyped(typed.slice(0, -1));
+    else if (e.key === "Enter") { e.preventDefault(); if (!typed.length) return; sendLesson({ type: "check", value: Number(typed) }); setTyped(""); }
     else if (e.key === "n" && lesson) { setTyped(""); sendLesson({ type: "next" }); }
     else if (e.key === "Escape") backToMap();
   });
@@ -916,6 +1082,7 @@
   markMute();
   watchCamera();
   decorate(document);
-  // the demo flag arrives on the socket; connect early so the showcase seeds before the map is opened
-  connect(() => {});
+  // the demo flag arrives on the socket; connect early so the showcase seeds before the
+  // map is opened. No callback: whatever the first view asked for is what runs on open.
+  connect();
 })();
