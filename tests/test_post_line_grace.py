@@ -124,7 +124,7 @@ def spoken_harness(**overrides: float) -> tuple[Harness, float]:
 def test_the_grace_key_is_known_with_its_bounds() -> None:
     raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
     params = load_params(PARAMS_FILE)
-    assert raw["global"]["post_line_grace_ms"] == 2500
+    assert raw["global"]["post_line_grace_ms"] == 3000
     assert raw["bounds"]["post_line_grace_ms"] == [1500, 5000]
     assert params.bound("post_line_grace_ms") == (1500.0, 5000.0)
     with pytest.raises(ParamsError) as excinfo:

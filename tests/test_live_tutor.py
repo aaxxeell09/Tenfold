@@ -352,7 +352,8 @@ def test_prompting_holds_until_tts_ends() -> None:
 
 def test_working_becomes_wrong_pose_once_the_grace_has_run() -> None:
     harness = wrong_pose_harness()
-    harness.feed(2.0, gesture=pose(8, 9, False), hint=HINT)
+    grace = harness.tutor.effective("wrong_pose_prompt")
+    harness.feed(grace, gesture=pose(8, 9, False), hint=HINT)
     assert harness.last.tutor_state == WORKING
     harness.feed(1.5, gesture=pose(8, 9, False), hint=HINT)
     assert harness.last.tutor_state == WRONG_POSE
@@ -466,6 +467,46 @@ def test_l4_is_barred_before_rescue_delay() -> None:
     assert harness.last.intervention_level == 3
     harness.feed(4.0, gesture=pose(8, 9, False), hint=HINT)
     assert harness.last.intervention_level == 4
+
+
+def test_the_ladder_climbs_on_the_clocks_of_the_params_file() -> None:
+    """A wrong pose held from the first frame, timed against the file.
+
+    Nothing before initial_silence. L1 once the pose has been held
+    wrong_pose_prompt, or at the end of the silence, whichever is later. L2 one
+    wrong_pose_prompt after L1. L3, the first spoken line, at hint_2_delay on
+    the ladder clock and never sooner than wrong_pose_prompt after L2. L4 at
+    rescue_delay. No two spoken lines closer than post_line_grace_ms.
+    """
+    harness = wrong_pose_harness()
+    reached: dict[int, float] = {}
+    spoken: list[float] = []
+    level = 0
+    while harness.clock.t < 20.0:
+        harness.feed(1.0 / FPS, gesture=pose(8, 9, False), hint=HINT)
+        if harness.last.intervention_level != level:
+            level = harness.last.intervention_level
+            reached[level] = harness.clock.t
+        if harness.last.tutor_line:
+            spoken.append(harness.clock.t)
+    slack = 0.3
+    silence = GLOBALS["initial_silence"]
+    prompt = GLOBALS["wrong_pose_prompt"]
+    first_step = max(silence, prompt)
+    assert sorted(reached) == [1, 2, 3, 4]
+    assert first_step <= reached[1] <= first_step + slack
+    assert reached[1] >= silence, "nothing inside the thinking silence"
+    assert reached[1] + prompt <= reached[2] <= reached[1] + prompt + slack
+    third = max(reached[2] + prompt, GLOBALS["hint_2_delay"])
+    assert third <= reached[3] <= third + slack
+    rescue = GLOBALS["rescue_delay"]
+    assert rescue <= reached[4] <= rescue + slack
+    assert spoken and spoken[0] == reached[3], "L3 is the first word"
+    assert len(spoken) >= 2
+    grace = GLOBALS["post_line_grace_ms"] / 1000.0
+    gaps = [after - before for before, after in zip(spoken, spoken[1:])]
+    assert min(gaps) >= grace
+    assert min(gaps) >= GLOBALS["min_verbal_gap"]
 
 
 def test_the_level_resets_on_a_new_exercise() -> None:
@@ -748,7 +789,8 @@ def test_help_factor_raises_the_budget_and_never_a_duration() -> None:
                                "tutor_observations": 50})
     assert harness.tutor.effective("max_unsolicited_verbal") == 4
     assert harness.tutor.effective("max_visibility_reminders") == 3
-    assert harness.tutor.effective("wrong_pose_prompt") == 2.0
+    written = load_params(PARAMS_FILE).values["wrong_pose_prompt"]
+    assert harness.tutor.effective("wrong_pose_prompt") == written
 
 
 def test_max_visibility_reminders_caps_the_visibility_help() -> None:

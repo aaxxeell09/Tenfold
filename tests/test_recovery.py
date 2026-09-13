@@ -38,9 +38,10 @@ ACK = LINES["pose_ack"]
 
 FPS = 15
 STEP = 1.0 / FPS
-GRACE_S = 3.0
-INITIAL_SILENCE = 4.0
-WRONG_POSE_PROMPT = 2.0
+GLOBALS = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))["global"]
+GRACE_S = GLOBALS["recovery_grace_ms"] / 1000.0
+INITIAL_SILENCE = GLOBALS["initial_silence"]
+WRONG_POSE_PROMPT = GLOBALS["wrong_pose_prompt"]
 
 
 def pose(left: int, right: int, contact: bool = True) -> GestureState:
