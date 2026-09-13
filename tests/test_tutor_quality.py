@@ -109,4 +109,16 @@ def test_the_file_holds_no_key_and_only_the_fields_the_trace_records(monkeypatch
     text = json.dumps(data)
     assert "secret-should-never-appear" not in text and "WANDB" not in text
     assert set(data["live"]["rows"][0]) == {"id", "started_at", "origin", "state", "event", "exercise", "hint", "answer", "model",
-                                            "text", "latency_ms", "exception", "rules_version", "checks", "delivery", "url"}
+                                            "text", "text_redacted", "latency_ms", "exception", "rules_version", "checks", "delivery", "url"}
+
+
+def test_a_name_the_model_may_say_back_is_hidden_before_the_file_is_written():
+    assert tq.redact_names("Great job, Leo!") == ("Great job, [name]!", True)
+    assert tq.redact_names("Mia, move your right finger from 9 to 8.") == ("[name], move your right finger from 9 to 8.", True)
+    assert tq.redact_names("That's it, Sam. Count the tens, then the ones.") == ("That's it, [name]. Count the tens, then the ones.", True)
+    for kept in ("Almost. Your left hand is good. Move your right finger from 9 to 8.", "Tally says: Here's a new one: 8 times 6. Ready?",
+                 "Yes! Show me both hands, palms facing me.", "That's right! Count the tens, then the ones."):
+        assert tq.redact_names(kept) == (kept, False)
+    row = tq.intervention_row(record("n", 5, [score(non_empty="pass")]) | {"output": {"text": "Well done, Zoe!", "latency_ms": 300}},
+                              NOW - timedelta(minutes=60), NOW)
+    assert row["text"] == "Well done, [name]!" and row["text_redacted"] is True

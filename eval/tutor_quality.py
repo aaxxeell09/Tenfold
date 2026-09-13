@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import statistics
 import sys
 from collections import Counter
@@ -44,6 +45,35 @@ CANCELLED = frozenset({"moment_ended_unserved", "dropped_late", "late_held"})
 PENDING_MINUTES = 10                        # an unscored line younger than this may still be in the scoring queue
 MAX_ROWS = 25
 MAX_CALLS = 300
+
+
+# The model is given the child's name (lesson/tutor.py build_messages) and may say it back. The trace does not record
+# the name, so it cannot be matched: a capitalised word that does not open a sentence, or that opens one as a call
+# ("Mia, move..."), is hidden. It can hide a word it should not; it never adds one.
+KEEP_CAPITALIZED = frozenset({"Tally", "Nimble", "I", "OK"})
+SENTENCE_OPENERS = frozenset("""Yes No Great Good Nice Well Wow Almost Perfect Awesome Excellent Oops Hmm Okay Ok Hi Hello
+    Hey Right Correct Super Brilliant Amazing Fantastic Cool Yay Sure Ready Look Now Then So Oh Alright Hooray Bravo
+    Careful Remember Try Again Close Keep Go Done""".split())
+_CAPITALIZED = re.compile(r"\b[A-Z][a-zà-ÿ]+(?:['’-][A-Za-zà-ÿ]+)*\b")
+
+
+def redact_names(text: Any) -> tuple[Any, bool]:
+    """The line with possible names replaced by [name], and whether anything was hidden."""
+    if not isinstance(text, str) or not text:
+        return text, False
+    parts, last, changed = [], 0, False
+    for m in _CAPITALIZED.finditer(text):
+        word = m.group(0)
+        if word in KEEP_CAPITALIZED:
+            continue
+        before = text[:m.start()].rstrip(" \"'“‘(")
+        opens_sentence = not before or before[-1] in ".!?:"
+        called = text[m.end():m.end() + 1] in (",", "!")
+        if opens_sentence and (word in SENTENCE_OPENERS or not called):
+            continue
+        parts += [text[last:m.start()], "[name]"]
+        last, changed = m.end(), True
+    return "".join(parts) + text[last:], changed
 
 
 def plain(value: Any) -> Any:
@@ -177,9 +207,11 @@ def intervention_row(record: dict, first_scored_at: Optional[datetime], now: dat
     context = inputs.get("context") if isinstance(inputs.get("context"), dict) else {}
     hint = context.get("hint") if isinstance(context.get("hint"), dict) else None
     out = record.get("output") or {}
+    text, redacted = redact_names(out.get("text"))
     return {"id": record["id"], "started_at": record.get("started_at"), "origin": origin_of(record), "state": state,
             "event": inputs.get("event"), "exercise": context.get("exercise"), "hint": hint,
-            "answer": context.get("answer"), "model": out.get("model") or inputs.get("model"), "text": out.get("text"),
+            "answer": context.get("answer"), "model": out.get("model") or inputs.get("model"), "text": text,
+            "text_redacted": redacted,
             "latency_ms": out.get("latency_ms"), "exception": bool(record.get("exception")),
             "rules_version": version_of(output.get("scorer_version") or scores[-1]["type"]) if scores else None,
             "checks": checks, "delivery": [n["payload"].get("status") for n in notes if n["payload"].get("status")],

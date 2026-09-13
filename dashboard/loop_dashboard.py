@@ -915,9 +915,10 @@ def _(mo, pill, section, tq, tq_problem, tq_source, when):
         pill(step, "good" if k == 3 else "neutral") for k, step in
         enumerate(("Prepared teaching moments", "Model evaluation", "Line in a lesson", "Score on the Weave trace"))) + "</div>")
     _error = tq.get("last_refresh_error") or {}
+    _failed = f"The last refresh failed at {when(_error.get('at'))} UTC ({_error.get('error')})" if _error else ""
     _fresh = ((f"Updated {when(tq['generated_at'])} UTC from Weave" if tq.get("generated_at") else "Not updated yet")
-              + (f". The last refresh failed at {when(_error.get('at'))} UTC ({_error.get('error')}), so this is the previous data"
-                 if _error else "")
+              + (f". {_failed}, so this is the previous data" if _error and tq.get("generated_at") else
+                 f". {_failed}, and there is no earlier data" if _error else "")
               + ". Not real time: run <code>make tutor-quality</code>, then reload this page.")
     mo.vstack([
         mo.Html('<div class="tf tf-part">Part 2 · The tutor</div>'),
@@ -926,7 +927,8 @@ def _(mo, pill, section, tq, tq_problem, tq_source, when):
         mo.Html(f'<div class="tf">{_flow}<div class="tf-measure" style="margin-top:0"><span>These checks measure the quality of '
                 "the tutor's lines, not children's learning. Scoring measures the lines; it does not change the model or its "
                 f'prompt.</span></div><div class="tf-quiet" style="margin-top:6px">{_fresh} Source: {tq_source}.</div></div>'),
-        mo.callout(mo.md(tq_problem), kind="warn") if tq_problem else mo.md(""),
+        mo.Html(f'<div class="tf tf-limits"><span class="tf-label">Tutor data</span>{pill(tq_problem, "warn")}</div>')
+        if tq_problem else mo.md(""),
     ], gap=1)
     return
 
@@ -1030,13 +1032,18 @@ def _(RULE_LABELS, html, mo, pill, tq, when):
                         f'{_origins.get("synthetic_check", 0)} synthetic check{"s" if _origins.get("synthetic_check", 0) != 1 else ""}, '
                         f'{_origins.get("not_identified", 0)} whose trace does not say it came from a lesson. '
                         "None of them is counted as a lesson result.</div></div>")
+        def _lines(n, many, one):
+            return f"{n} {one if n == 1 else many}"
+
         _notes = []
         if _states.get("before_scoring"):
-            _notes.append(f"{_states['before_scoring']} older lines were traced before live scoring existed and have no score")
+            _notes.append(_lines(_states["before_scoring"], "older lines were", "older line was")
+                          + " traced before live scoring existed and " + ("has" if _states["before_scoring"] == 1 else "have") + " no score")
         if _states.get("pending"):
-            _notes.append(f"{_states['pending']} lines are waiting for their score")
+            _notes.append(_lines(_states["pending"], "lines are", "line is") + " waiting for a score")
         if _states.get("score_missing"):
-            _notes.append(f"{_states['score_missing']} lines have no score and are no longer expected to get one")
+            _notes.append(_lines(_states["score_missing"], "lines have no score and are", "line has no score and is")
+                          + " no longer expected to get one")
         if _live.get("read_limit_reached"):
             _notes.append(f"only the latest {_live.get('calls_read')} traced lines were read")
 
@@ -1066,7 +1073,8 @@ def _(RULE_LABELS, html, mo, pill, tq, when):
                 f'{pill(_origin, _origin_tone)}<span>{html.escape(str(_r.get("event") or "").replace("_", " "))}</span>'
                 f'<span class="tf-quiet">{html.escape(str(_r.get("exercise") or ""))}</span>'
                 f'<span class="tf-quiet">{_tally or "no checks yet"}</span><span class="tf-log-right">{_latency}</span></summary>'
-                f'<div class="tf-tq-body"><div class="tf-tq-line">Generated line: “{html.escape(str(_r.get("text") or ""))}”</div>'
+                f'<div class="tf-tq-body"><div class="tf-tq-line">Generated line: “{html.escape(str(_r.get("text") or ""))}”'
+                f'{" <span class=tf-quiet>(a possible name was hidden)</span>" if _r.get("text_redacted") else ""}</div>'
                 f'<div class="tf-quiet">Model {html.escape(str(_r.get("model") or "unknown"))}{html.escape(_expected)} · delivery: {html.escape(_delivery)}'
                 f'{" · rules " + html.escape(str(_r["rules_version"])) if _r.get("rules_version") else ""}</div>'
                 + (f'<table class="tf-tq-table">{"".join(_check_row(k, v) for k, v in _quality.items())}</table>' if _quality else "")
