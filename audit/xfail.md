@@ -46,6 +46,19 @@ garde vraiment, qu'aucune horloge inventee par la page ne retienne une
 etape, reste vrai : la seule attente est celle du fichier de politique.
 Rien ici n'est vu comme un defaut par l'enfant.
 
+## 4. tests/test_voice.py, la file de parole
+
+`test_an_acknowledgement_is_never_dropped_and_cuts_what_is_playing`, xfail non
+strict, sur sa derniere affirmation seulement.
+
+`exercise_shown` n'est plus un accuse de reception (consolidation 2.6) : la
+ligne qui ouvre l'exercice suivant coupait la ligne de succes que l'enfant
+venait de gagner. Elle attend maintenant son tour comme une instruction, et
+deux lignes demandees dans le meme souffle peuvent donc lui couter la file
+(`queue_full`). Le serveur retient le nouvel exercice jusqu'a la fin du beat,
+donc le produit ne les met jamais ensemble dans la file. Ce que le test garde
+d'abord, qu'un accuse de reception coupe et n'est jamais jete, reste vrai.
+
 ## Ce qui reste vert
 
 Tout le reste : `tests/test_server.py` (70), `tests/test_canonical_lines.py`
