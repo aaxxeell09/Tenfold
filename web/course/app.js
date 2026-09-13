@@ -453,6 +453,12 @@
   // it puts a Ready button up instead. lesson/tutor_params.json owns the value.
   const READY_BUTTON_KEY = "gate_ready_button_s";
   const READY_BUTTON_S = 6;
+  // How long a step of the gate stands before the next one may open, so a child sees
+  // each one rather than a screen that flickers past. lesson/tutor_params.json owns the
+  // value; with no value there the gate turns on the event and waits for nothing, which
+  // is what the page does today.
+  const GATE_PAUSE_KEY = "gate_step_pause_ms";
+  const GATE_PAUSE_MS = 0;
   // the key of the one line the gate asks for. lesson/tally_lines.json is written by
   // other hands: until the key is in it, the step opens without a line rather than with
   // a sentence invented here.
@@ -533,7 +539,8 @@
   // with no timer between the child being right and the screen saying so. The number
   // sweep keeps its own timers, it is decoration and not the step.
   function turnStep(run, fn) {
-    const wait = PARAMS.check_step_min_ms - (Date.now() - (run.stepAt || 0));
+    const least = Math.max(PARAMS.check_step_min_ms, timing(GATE_PAUSE_KEY, GATE_PAUSE_MS));
+    const wait = least - (Date.now() - (run.stepAt || 0));
     const turn = () => { if (checkRun !== run) return; run.stepAt = Date.now(); run.turning = false; fn(); };
     if (!(wait > 0)) { turn(); return; }
     run.turning = true;
@@ -595,13 +602,22 @@
         $$("#check .practice-overlay [data-number]").forEach((el) => { if (Number(el.dataset.number) <= 10 && Number(el.dataset.number) >= n) el.classList.add("lit"); });
         run.lit = n;
       }));
-      checkSay(line("gate_pose"), {
+      // The screen is the step, and it moves whether or not there is a line to say over
+      // it: a key the line file has not got yet costs this step its sentence and nothing
+      // else. The line moves the screen when there is one, so the two arrive together.
+      const showPose = () => {
+        frame.dataset.step = STEP_FRAME.pose; frame.classList.remove("check"); setStepDots(run);
+        setTally($("#check-tally"), "thinking");
+      };
+      const asked = line("gate_pose");
+      if (!asked) { showPose(); return; }
+      checkSay(asked, {
         kind: "instruction", key: "check_touch",
         still: () => checkRun === run && stepNow(run) === "pose" && !run.done,
-        onStart: () => {
-          frame.dataset.step = STEP_FRAME.pose; frame.classList.remove("check"); setStepDots(run);
-          setTally($("#check-tally"), "thinking");
-        },
+        onStart: showPose,
+        // a line the child has moved past is dropped, and the screen still has to be the
+        // step it is on: the drop runs this, the same as the start would have
+        after: () => { if (checkRun === run && stepNow(run) === "pose") showPose(); },
       });
       return;
     }
@@ -625,7 +641,9 @@
         still: () => checkRun === run && !run.done, onStart: open });
     };
     const ask = () => withLine(READY_LINE_KEY, start);
-    if (ack) checkSay(ack, Object.assign({ after: ask }, cheer));
+    // the acknowledgement hands over to the last step whether it is spoken or dropped,
+    // so a gate with no lines at all still reaches the word and the Ready button
+    if (ack) checkSay(ack, Object.assign({}, cheer, { after: ask }));
     else ask();
   }
   // A browser with no speech recognition, or a microphone that brings nothing back: the
@@ -2047,6 +2065,8 @@
     startLesson, runGate, addXp, setChild, roster,
     get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); },
     get gate() { return checkRun; }, get gateProved() { return gateProved(); },
+    // the dialogue as it stands, for a test that has to see why a line did not go out
+    get queue() { return { line: speech.line && speech.line.text, waiting: speech.queue.map((q) => q.text) }; },
     // the gate's step as a number, the way the export numbers its frames
     get checkStep() { return checkRun ? checkRun.at + 1 : 0; },
     get child() { return child(); }, get name() { return name(); } };
