@@ -21,6 +21,10 @@ autres couches sont vertes : `lesson/tally.py`, `app/tutor.py` et
 `lesson/tally_lines.json` est confié à l'agent qui tient le fichier ; la marque
 tombe avec ce commit.
 
+**Fait.** Les phrases de `web/course/app.js` sont dans
+`lesson/tally_lines.json` sous les clés de `PAGE_LINE_KEYS`, la page les lit
+par clé, et l'arme `web/course/app.js` de l'audit est verte sans marque.
+
 ## 2. tests/test_live_tutor.py, 30 tests
 
 Le tuteur a changé sous eux, sur quatre points :
@@ -41,6 +45,19 @@ Le tuteur a changé sous eux, sur quatre points :
   valeur et posent les deux mains à 0.4 de trame l'une de l'autre.
 
 Liste exacte : voir `KNOWN_STALE` dans `tests/conftest.py`.
+
+## 3. tests/test_voice.py, 1 test
+
+`test_the_check_steps_turn_with_no_wait_at_all`, xfail non strict.
+
+Il affirme qu'une etape du check tourne sans aucune attente des que sa
+condition est vraie. Le ready gate tient maintenant chaque etape
+`gate_step_pause_ms` avant d'ouvrir la suivante, pour qu'un enfant voie
+l'etape plutot qu'un ecran qui defile, et la valeur vit dans
+`lesson/tutor_params.json` (1000 ms, bornes 500 a 2000). Ce que le test
+garde vraiment, qu'aucune horloge inventee par la page ne retienne une
+etape, reste vrai : la seule attente est celle du fichier de politique.
+Rien ici n'est vu comme un defaut par l'enfant.
 
 ## Ce qui reste vert
 

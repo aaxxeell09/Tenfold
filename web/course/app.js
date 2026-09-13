@@ -803,12 +803,15 @@
   }
   function readMs(text) { return Math.min(6000, 700 + String(text).split(/\s+/).length * READ_MS_PER_WORD); }
   // What the queue does with a line depends on what kind of line it is, and there are
-  // three. An acknowledgement, which is the pose acknowledgement, the success line and
-  // the line that opens the next exercise: the child earned it, so it is never dropped
-  // and it cuts whatever is playing. A correction, which is always spoken to the end
-  // once it has started. Everything else is a nudge, and only the newest nudge is worth
-  // saying. The kind is read off the state message, or given by the caller.
-  const ACK_STATES = ["correct_pose", "waiting_answer", "answer_correct", "exercise_shown"];
+  // three. An acknowledgement, which is the pose acknowledgement and the success line:
+  // the child earned it, so it is never dropped and it cuts whatever is playing. A
+  // correction, which is always spoken to the end once it has started. Everything else
+  // is a nudge, and only the newest nudge is worth saying. The kind is read off the
+  // state message, or given by the caller.
+  // The line that opens the next exercise is not one of them any more: it used to cut
+  // the success line every time, which is the one line the child had just earned. It
+  // waits its turn like an instruction, behind the beat that belongs to the answer.
+  const ACK_STATES = ["correct_pose", "waiting_answer", "answer_correct"];
   const CORRECTION_MOMENTS = ["wrong_left_finger", "wrong_right_finger", "hands_swapped",
     "same_hand_twice", "recount_tens", "recount_units", "no_contact"];
   function lineKind(m) {
@@ -1076,6 +1079,48 @@
     lessonBars(true);
     heardTimer = setTimeout(() => { heardTimer = null; lessonBars(false); setTyped(""); }, HEARD_MS);
   }
+  // ---------- the success beat ----------
+  // The tutor calls the beat and hands the page its numbers; the page owns the pixels
+  // and reads the numbers rather than inventing them. The parts it names run for
+  // success_ms, then pause_ms of silence, and the line that closes it is said when the
+  // next exercise arrives, which the server holds back until the beat is over. A message
+  // without a beat changes nothing, so a server that does not send one plays as before.
+  let beatTimer = null;
+  function playBeat(beat) {
+    const s = lesson;
+    if (!s || !beat || beat.kind !== "success") return;
+    const root = $("#lesson"), frame = $("#lesson .frame");
+    if (!root || !frame) return;
+    // next_line closes the beat, and it is the tutor's line, not one the page writes
+    s.beat = beat;
+    const parts = beat.parts || [];
+    const ms = Math.max(0, Number(beat.success_ms) || 0);
+    clearTimeout(beatTimer);
+    root.dataset.beat = beat.kind;
+    // the parts by name: the halo on the hands, the stars of the export's badge and the
+    // counter. Each one is a class the design can hang on, and the badge pops today.
+    parts.forEach((part) => root.classList.add(`beat-${part}`));
+    if (parts.indexOf("stars") !== -1) { void frame.offsetWidth; frame.classList.add("is-cheer"); }
+    // the number heard belonged to the answer that earned the beat: it goes with it
+    clearHeard();
+    beatTimer = setTimeout(() => {
+      beatTimer = null;
+      root.dataset.beat = "";
+      parts.forEach((part) => root.classList.remove(`beat-${part}`));
+    }, ms);
+  }
+  // the new exercise has landed, so the beat is over: its closing line is said here, on
+  // the screen the child is looking at, and never over the success line it follows
+  function closeBeat() {
+    const s = lesson;
+    if (!s || !s.beat) return;
+    const closing = s.beat.next_line;
+    s.beat = null;
+    if (!closing) return;
+    const turn = s.turn;
+    say(closing, $("#lesson .say"), lessonTally(),
+        { kind: "instruction", key: "next_one", still: () => Boolean(lesson) && lesson.turn === turn });
+  }
   // The pill carries one number for one exercise and no longer. The success beat is
   // where it goes: the moment the beat starts the pill drops the number and is listening
   // again, and the next exercise is armed with it empty whatever the last one ended
@@ -1291,9 +1336,10 @@
     // once per question. That is the counter and the clean first try again.
     if (fresh && m.state === "exercise_shown") lesson.done += 1;
     // the success beat between two exercises, and the exercise it hands over to: the
-    // pill drops the number it was showing at the start of the beat, and the new
-    // exercise is armed with nothing of the last one left on screen
-    if (m.tutor_beat || (fresh && m.state === "exercise_shown")) clearHeard();
+    // beat plays on its own numbers, the pill drops the number it was showing at the
+    // start of it, and the new exercise is armed with nothing of the last one on screen
+    if (m.tutor_beat) playBeat(m.tutor_beat);
+    if (fresh && m.state === "exercise_shown") { clearHeard(); closeBeat(); }
     if (m.fact) lesson.fact = m.fact;
     if (fresh && m.state === "answer_wrong" && lesson.hearts !== null) {
       lesson.hearts -= 1; lesson.hit = true;
@@ -1339,7 +1385,7 @@
     const node = L.findNode(id);
     const total = node.kind === "boss" ? L.BOSS_QUESTIONS : L.LESSON_QUESTIONS;
     lesson = { node, total, correct: 0, firstTry: 0, serverCorrect: null, done: 0, fact: null, last: null, said: null, turn: 0,
-      hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", paid: false, t0: Date.now() };
+      beat: null, hearts: node.kind === "boss" ? 3 : null, hit: false, typed: "", paid: false, t0: Date.now() };
     stopCheck();
     VIEWS.forEach((v) => { $("#" + v).hidden = true; });
     $("#finish").hidden = true;
@@ -1396,6 +1442,10 @@
     $(".bar i", root).style.width = "0%";
     $(".say", root).textContent = "";
     clearTimeout(heardTimer); heardTimer = null;
+    // a beat belongs to the exercise that earned it: a node opening carries none
+    clearTimeout(beatTimer); beatTimer = null;
+    root.dataset.beat = "";
+    ["line", "halo", "stars", "counter"].forEach((part) => root.classList.remove(`beat-${part}`));
     lessonBars(false);
     setTyped("");
     showTranscript("");
