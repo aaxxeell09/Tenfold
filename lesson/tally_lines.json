@@ -8,6 +8,7 @@
   "wrong_right": "Your left hand is right. Find {b} on your right hand.",
   "wrong_left": "Your right hand is right. Find {a} on your left hand.",
   "wrong_both": "Check both fingers. Find {a} on the left and {b} on the right.",
+  "correction_neutral": "Almost. Look at the numbers on your fingers.",
   "not_touching": "You found the fingers. Touch them together.",
   "show": "Move this finger here.",
   "pose_ready": "Yes. Now count the fingers at the bottom, the two that touch and the ones below.",

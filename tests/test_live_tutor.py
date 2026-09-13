@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Callable
 
 import pytest
 
@@ -61,9 +62,11 @@ STEP = 1.0 / FPS
 UNKNOWN = GestureState.unknown(0.1)
 
 
-def pose(left: int, right: int, contact: bool = True) -> GestureState:
+def pose(left: int, right: int, contact: bool = True,
+         confidence: float = 0.9) -> GestureState:
+    """A 6-10 reading. confidence below 0.8 is a classifier that is not sure."""
     return GestureState(method="6-10", left=left, right=right, contact=contact,
-                        confidence=0.9)
+                        confidence=confidence)
 
 
 def fingers(dx: float = 0.0, hands: int = 2,
@@ -179,6 +182,24 @@ class Harness:
             if self.last.tutor_line:
                 marked.append((self.last.tutor_line, self.last.tutor_line_cuts))
         return marked
+
+    def feed_each(self, seconds: float,
+                  gesture_at: "Callable[[int], GestureState | None]",
+                  hands: int = 2, hint: dict[str, object] | None = None,
+                  ) -> list[tuple[int, str]]:
+        """Like feed, with the gesture chosen per frame; lines come back with
+        the index of the frame they were said on."""
+        said: list[tuple[int, str]] = []
+        for index in range(int(round(seconds * FPS))):
+            self.clock.tick()
+            gesture = gesture_at(index)
+            obs = Observation(gesture=gesture,
+                              fingers=fingers(0.0, hands, _touching(gesture)),
+                              hands_seen=hands, hint=hint)
+            self.last = self.tutor.observe(obs, self.clock.t)
+            if self.last.tutor_line:
+                said.append((index, self.last.tutor_line))
+        return said
 
     def kind(self, name: str) -> list[dict[str, object]]:
         return [line for line in self.log if line.get("kind") == name]
@@ -2053,3 +2074,101 @@ def test_the_correct_pose_is_confirmed_in_frames_or_ms_whichever_first() -> None
     said = harness.feed(confirm_ms + 3 * STEP, gesture=right)
     assert harness.last.tutor_state == "POSE_READY", "confirmed before pose_stable"
     assert said, "the acknowledgement rides the confirmation"
+
+
+# --------------------------------------------------------------------------
+# 19. praise only a sure hand
+# --------------------------------------------------------------------------
+
+# 8 x 7 with 9 held on the left: the right hand shows 7, the finger it wants.
+LEFT_HINT = {"hand": "left", "move_from": 9, "move_to": 8}
+PRAISING = "Your right hand is right. Find 8 on your left hand."
+
+
+def _lines() -> dict[str, str]:
+    return json.loads(LINES_FILE.read_text(encoding="utf-8"))
+
+
+def test_a_sure_hand_at_the_right_finger_is_praised() -> None:
+    harness = wrong_pose_harness()
+    said = harness.feed(16.0, gesture=pose(9, 7, False, confidence=0.9),
+                        hint=LEFT_HINT)
+    assert PRAISING in said
+    assert _lines()["correction_neutral"] not in said
+    praise = harness.kind("praise")
+    assert praise and praise[0]["praised"] is True
+    assert praise[0]["line_key"] == "wrong_left"
+
+
+def test_an_unsure_hand_is_never_called_good() -> None:
+    """The bug seen live: the right hand was called good on a reading nobody
+    would bet on. Below 0.8 the neutral correction is said instead."""
+    harness = wrong_pose_harness()
+    said = harness.feed(16.0, gesture=pose(9, 7, False, confidence=0.7),
+                        hint=LEFT_HINT)
+    assert PRAISING not in said
+    assert _lines()["correction_neutral"] in said
+    praise = harness.kind("praise")
+    assert praise and praise[0]["praised"] is False
+    assert praise[0]["line_key"] == "correction_neutral"
+    assert praise[0]["frames_matched"] == 0
+
+
+def test_a_hand_right_for_fewer_frames_than_pose_confirm_frames_is_not_praised() -> None:
+    frames = int(load_params(PARAMS_FILE).values["pose_confirm_frames"])
+    assert frames >= 2, "the test needs a streak that can fall short"
+    unsure = pose(9, 7, False, confidence=0.7)
+    sure = pose(9, 7, False, confidence=0.9)
+    # First run: find the frame on which the correction is chosen. Confidence
+    # changes nothing on the clocks, so the second run lands on the same frame.
+    probe = wrong_pose_harness()
+    chosen: list[int] = []
+
+    def watch(index: int) -> GestureState:
+        if len(probe.kind("praise")) > len(chosen):
+            chosen.append(index - 1)
+        return unsure
+
+    probe.feed_each(16.0, watch, hint=LEFT_HINT)
+    assert chosen, "no correction was chosen"
+    at = chosen[0]
+    # Second run: the right hand becomes sure frames - 1 observations before the
+    # choice, one short of what praise needs.
+    switch = at - (frames - 2)
+    harness = wrong_pose_harness()
+    said = harness.feed_each(16.0, lambda i: sure if i >= switch else unsure,
+                             hint=LEFT_HINT)
+    spoken = [line for _, line in said]
+    assert PRAISING not in spoken
+    assert _lines()["correction_neutral"] in spoken
+    event = harness.kind("praise")[0]
+    assert event["praised"] is False
+    assert 0 < int(event["frames_matched"]) < frames, event
+
+    # The same switch one frame earlier reaches the streak, and praise with it.
+    enough = wrong_pose_harness()
+    said = enough.feed_each(16.0, lambda i: sure if i >= switch - 1 else unsure,
+                            hint=LEFT_HINT)
+    assert PRAISING in [line for _, line in said]
+    assert enough.kind("praise")[0]["frames_matched"] == frames
+
+
+def test_the_praise_decision_is_logged_once_with_its_fields() -> None:
+    harness = wrong_pose_harness()
+    harness.feed(16.0, gesture=pose(9, 7, False, confidence=0.9), hint=LEFT_HINT)
+    praise = harness.kind("praise")
+    # One line per decision, not per frame: sixteen seconds at 15 fps is 240
+    # observations and the ladder chose the correction once.
+    assert len(praise) == 1
+    event = praise[0]
+    assert set(event) >= {"hand", "finger_read", "expected", "confidence",
+                          "frames_matched", "praised", "line_key", "ts",
+                          "exercise", "learner_id"}
+    assert event["hand"] == "right"
+    assert event["finger_read"] == 7
+    assert event["expected"] == 7
+    assert event["confidence"] == pytest.approx(0.9)
+    frames = int(harness.tutor.effective("pose_confirm_frames"))
+    assert int(event["frames_matched"]) >= frames
+    assert event["praised"] is True
+    assert event["line_key"] == "wrong_left"
