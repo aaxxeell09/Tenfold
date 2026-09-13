@@ -1624,6 +1624,86 @@ def test_only_a_scored_gesture_error_writes_a_hard_negative(tmp_path):
     assert len(_rows(path)) == 2
 
 
+def test_a_late_answer_still_writes_the_pose_the_engine_validated(tmp_path):
+    """Eight windows of the right pose, then the hands out of the frame for longer than the
+    writer's buffer holds: the answer still corroborates the pose the engine latched."""
+    from app.live_samples import BUFFER_MIN
+
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, windows=8)
+    _start(lesson)
+    pick = lesson.pick
+    _, right = _poses(lesson)
+    _hold(lesson, right, [index * 0.4 for index in range(8)])
+    assert lesson.correct_pose, "the engine latched the pose"
+    _hold(lesson, GestureState.unknown(0.1), [3.2 + index * 0.1 for index in range(BUFFER_MIN + 8)],
+          offset=10.0)
+    lesson.command({"type": "check", "value": pick.result})
+
+    written = _rows(path)
+    assert len(written) == 8, "the validated hold, not the empty frames after it"
+    for row in written:
+        assert row["label"] == {"method": "6-10", "left": pick.left, "right": pick.right,
+                                "contact": True}
+        assert row["confirmed_by_answer"] is True
+
+
+def test_a_new_exercise_never_confirms_with_the_windows_of_the_one_before(tmp_path):
+    """An exercise held and skipped, then the next one: whatever the writer still held from the
+    first may never be written under the second."""
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, windows=4)
+    _start(lesson, pairs=((8, 7), (6, 7)), count=2)
+    first = lesson.pick
+    first_title = lesson.engine.exercise.title
+    _, right = _poses(lesson)
+    _hold(lesson, right, (0.0, 0.4, 0.8, 1.2, 1.6, 2.0))
+    assert lesson.correct_pose
+    lesson.command({"type": "next"})
+    second_title = lesson.engine.exercise.title
+
+    # The first exercise's windows, asked for under the exercise now on screen: nothing.
+    assert lesson.live.confirm_correct(lesson.live_learner, second_title,
+                                       (first.left, first.right)) == 0
+    assert lesson.live.confirm_correct(lesson.live_learner, first_title,
+                                       (first.left, first.right)) == 0
+    assert not path.exists()
+    assert lesson.live.owner is not None and lesson.live.owner.exercise == second_title
+
+    second = lesson.pick
+    _confirmed(lesson, offset=5.0)
+    written = _rows(path)
+    assert written, "the second exercise's own hold is written"
+    for row in written:
+        assert row["exercise"] == second_title
+        assert {row["label"]["left"], row["label"]["right"]} == {second.left, second.right}
+    lesson.command({"type": "quit"})
+    assert lesson.live.owner is None, "nothing is collected once the child has left"
+
+
+def test_a_new_learner_never_gets_the_windows_of_the_child_before(tmp_path):
+    """Lea holds the pose and never answers; Noe starts the same node on the same fact."""
+    lesson = _lesson()
+    path = _live(lesson, tmp_path, windows=4)
+    _start(lesson, name="lea")
+    pick = lesson.pick
+    _, right = _poses(lesson)
+    _hold(lesson, right, (0.0, 0.4, 0.8, 1.2, 1.6, 2.0))
+    lea = lesson.live_learner
+
+    _start(lesson, name="noe")
+    noe = lesson.live_learner
+    title = lesson.engine.exercise.title
+    assert lesson.live.confirm_correct(noe, title, (pick.left, pick.right)) == 0
+    assert lesson.live.confirm_correct(lea, title, (pick.left, pick.right)) == 0
+    assert not path.exists(), "none of Lea's windows is written, under either name"
+    assert noe != lea and lesson.live.owner is not None and lesson.live.owner.learner == noe
+
+    _confirmed(lesson, offset=5.0)
+    written = _rows(path)
+    assert written and {row["learner_id"] for row in written} == {noe}
+
+
 def test_a_mock_run_and_a_demo_run_record_nothing():
     """Neither is a child in front of a camera, so neither is a sample."""
     for flags in ({"mock": True}, {"demo": True}, {"mock": True, "demo": True}):
@@ -1807,6 +1887,8 @@ def test_the_camera_thread_only_buffers_and_touches_no_file(tmp_path, monkeypatc
     """offer is on the frame path, so it may never do IO there."""
     lesson = _lesson()
     path = _live(lesson, tmp_path)
+    # Windows are only kept for an exercise on screen, which the server opens on every exercise.
+    lesson.live.begin("lea", "8 x 7")
     gesture = GestureState(method="6-10", left=8, right=7, contact=True, confidence=0.9)
     camera = _camera_run(lesson, monkeypatch, gesture)
 
