@@ -46,8 +46,19 @@ def test_build_message_carries_everything_the_page_renders():
     assert set(message) == {"type", "state", "exercise", "tally", "wrong", "match",
                             "answer", "reasoning", "fingers", "reason", "reaction",
                             "hint", "hint_level", "hint_auto", "pose_slip",
-                            "fact", "session", "node", "demo"}
+                            "fact", "session", "node", "demo",
+                            "tutor_state", "intervention_level", "tutor_line",
+                            "tutor_visual", "scored_gesture_error",
+                            "scored_math_error", "first_try", "mode"}
     assert message["pose_slip"] is False and message["hint_auto"] is False
+    # The eight tutor fields, with the defaults a page reads an absent one as.
+    assert message["tutor_state"] == "WORKING"
+    assert message["intervention_level"] == 0
+    assert message["tutor_line"] is None and message["tutor_visual"] is None
+    assert message["scored_gesture_error"] is False
+    assert message["scored_math_error"] is False
+    assert message["first_try"] is False
+    assert message["mode"] == "normal"
     assert message["state"] == "wrong_pose"
     assert message["exercise"] == "8 x 7"
     assert message["wrong"] == [{"hand": "right", "number": 9}]
@@ -533,8 +544,12 @@ async def _until(ready, timeout: float = 5.0) -> None:
 
 
 def _lesson(demo: bool = False) -> server.Lesson:
+    """The lesson with no tutor behind it, which is the server on its own."""
+    import types
+
     lesson = server.Lesson(Engine(), server.Hub(), server.make_scheduler)
     lesson.demo_available = demo
+    lesson.tutor = server.TutorLink(types.SimpleNamespace(), keep_log=False)
     lesson.start()
     return lesson
 
@@ -584,8 +599,9 @@ def test_a_finger_fixed_inside_the_grace_is_not_a_pose_error():
     wrong, right = _poses(lesson)
     for now in (0.0, 0.4, 1.0):
         lesson.observe(wrong, [], 2, now)
-    assert lesson.pose_error is False, "the child is still inside the grace"
+    assert lesson.scored_gesture_error is False, "the child is still inside the grace"
     assert lesson.hub.message["pose_slip"] is False
+    assert lesson.hub.message["scored_gesture_error"] is False
     for now in (1.5, 2.0):
         lesson.observe(right, [], 2, now)
     lesson.command({"type": "check", "value": pick.result})
@@ -606,10 +622,11 @@ def test_a_wrong_pose_held_past_the_grace_is_a_pose_error_on_the_right_hand():
     lesson.observe(wrong, [], 2, 0.0)
     lesson.observe(wrong, [], 2, 0.4)                    # Tally names the finger
     lesson.observe(wrong, [], 2, 0.4 + server.POSE_GRACE_SECONDS - 0.1)
-    assert lesson.pose_error is False, "the grace runs from the correction"
+    assert lesson.scored_gesture_error is False, "the grace runs from the correction"
     lesson.observe(wrong, [], 2, 0.4 + server.POSE_GRACE_SECONDS)
-    assert lesson.pose_error is True
+    assert lesson.scored_gesture_error is True
     assert lesson.hub.message["pose_slip"] is True, "the page reads the slip here"
+    assert lesson.hub.message["scored_gesture_error"] is True, "and its new name"
 
     for now in (10.0, 10.4):
         lesson.observe(right, [], 2, now)
@@ -759,3 +776,538 @@ def test_a_broken_demo_scenario_falls_back_to_the_live_scheduler(monkeypatch, tm
 
     scenario_path.unlink()
     assert type(server.make_scheduler(demo=True)) is Scheduler
+
+
+# --- the tutor, docs/tutor_contract.md ---------------------------------------
+
+
+class StubObservation:
+    """app/tutor.py's Observation, with the fields the seam fills in."""
+
+    def __init__(self, gesture=None, fingers=(), hands_seen=0, hint=None,
+                 motion=None) -> None:
+        self.gesture = gesture
+        self.fingers = list(fingers)
+        self.hands_seen = hands_seen
+        self.hint = hint
+        self.motion = motion
+
+
+class StubTutor:
+    """A tutor that records what the server feeds it and decides what a test asks.
+
+    The server calls app/tutor.py by name, through server.TUTOR_NAMES, and by
+    keyword. This stub is the pin on that vocabulary: rename a method or an
+    argument here and the seam has moved.
+    """
+
+    fps = 15.0
+
+    def __init__(self, params=None, lines=None, clock=None, log=None,
+                 learner_id: str = "", factors=None) -> None:
+        self.learner_id = learner_id
+        self.factors = dict(factors or {})
+        self.log = log
+        self.handed: list[float] = []
+        self.observations: list[tuple[str, float, float]] = []
+        self.events: list[tuple[str, object]] = []
+        self.decision: dict = {}
+        self.early_stop = False
+        self._taken_at: float | None = None
+
+    def observe(self, obs, now=None):
+        # Everything the server hands over, and then the tutor's own fps rule.
+        self.handed.append(now)
+        if self._taken_at is not None and now - self._taken_at < 1 / self.fps - 1e-6:
+            return self.decision
+        self._taken_at = now
+        self.observations.append((obs.gesture.method, obs.motion, now))
+        self.events.append(("hint", obs.hint) if obs.hint else ("observe", None))
+        return self.decision
+
+    def new_exercise(self, a, b, title=None, node=None, now=None):
+        self.events.append(("exercise", title))
+        return self.decision
+
+    def end_exercise(self, reason="answered", now=None):
+        self.events.append(("end", reason))
+
+    def start_check(self):
+        self.events.append(("check_start", None))
+
+    def end_check(self):
+        self.events.append(("check_end", None))
+        return 0.03
+
+    def answer(self, value, correct, now=None):
+        self.events.append(("answer", correct))
+
+    def hint_requested(self, now=None):
+        self.events.append(("hint_requested", None))
+
+    def tts_start(self, now=None):
+        self.events.append(("tts", True))
+
+    def tts_end(self, now=None):
+        self.events.append(("tts", False))
+
+    def speech(self, text, number=None, now=None):
+        self.events.append(("speech", text))
+
+    def state_fields(self) -> dict:
+        return dict(self.decision)
+
+    def learner_factors(self) -> dict:
+        return dict(self.factors)
+
+
+def _stub_module(tutor=StubTutor):
+    """A stand in for app/tutor.py, shaped like the module the seam imports."""
+    import types
+
+    return types.SimpleNamespace(
+        Tutor=tutor,
+        Observation=StubObservation,
+        load_params=lambda: {"global": {}},
+        load_lines=lambda: {},
+        jsonl_sink=lambda: (lambda record: None),
+    )
+
+
+def _tutored(demo: bool = False) -> server.Lesson:
+    """A lesson whose app/tutor.py is the stub above."""
+    lesson = _lesson(demo)
+    lesson.tutor = server.TutorLink(_stub_module(), keep_log=False)
+    return lesson
+
+
+def _spoke(lesson) -> list[tuple[str, object]]:
+    return lesson.tutor.tutor.events
+
+
+def test_the_two_new_page_messages_reach_the_tutor():
+    """tts around every spoken line, speech for anything the child says."""
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=3)})
+    lesson.command({"type": "tts", "speaking": True})
+    lesson.command({"type": "tts", "speaking": False})
+    lesson.command({"type": "tts", "speaking": False})   # two in a row are one
+    lesson.command({"type": "speech", "text": "  is it fifty six  "})
+    lesson.command({"type": "speech", "text": "   "})    # nothing was said
+    lesson.command({"type": "speech", "text": "x" * 400})
+
+    assert [said for kind, said in _spoke(lesson) if kind == "tts"] == [True, False, False]
+    heard = [text for kind, text in _spoke(lesson) if kind == "speech"]
+    assert heard[0] == "is it fifty six", "trimmed, and never stored"
+    assert len(heard) == 2 and len(heard[1]) == server.SPEECH_LIMIT
+
+    # speech never submits an answer, and the existing messages still work
+    assert lesson.hub.message["answer"] is None
+    lesson.command({"type": "next"})
+    assert lesson.running and lesson.pick is not None
+
+
+def test_the_tutor_decision_rides_the_state_message():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=2)})
+    lesson.tutor.tutor.decision = {
+        "tutor_state": "WRONG_POSE",
+        "intervention_level": 2,
+        "tutor_line": "Almost. Your right hand needs 7, not 9.",
+        "tutor_visual": {"kind": "correction", "wrong_hand": "right",
+                         "expected_finger": 7},
+        "scored_gesture_error": True,
+        "mode": "supportive",
+    }
+    pick = lesson.pick
+    wrong, right = _poses(lesson)
+    lesson.observe(wrong, [], 2, 0.0)
+    lesson.observe(wrong, [], 2, 0.4)
+
+    message = lesson.hub.message
+    assert message["tutor_state"] == "WRONG_POSE"
+    assert message["intervention_level"] == 2
+    assert message["tutor_visual"]["kind"] == "correction"
+    assert message["tutor_line"].startswith("Almost")
+    assert message["mode"] == "supportive"
+    assert message["scored_gesture_error"] is True
+    assert message["pose_slip"] is True, "the old name rides along for the page"
+    assert message["first_try"] is False
+    assert json.dumps(message), "the message has to be JSON serialisable"
+
+    for now in (1.0, 1.5):
+        lesson.observe(right, [], 2, now)
+    lesson.command({"type": "check", "value": pick.result})
+    outcome = lesson.scheduler.outcomes[0]
+    assert outcome.correct is False, "the outcome follows the tutor's scoring"
+    assert outcome.pose_error is True
+
+
+def test_with_a_tutor_the_old_grace_clock_no_longer_scores():
+    """The tutor's scoring replaces POSE_GRACE_SECONDS outright."""
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    wrong, _ = _poses(lesson)
+    for now in (0.0, 0.4, 5.0, 10.0, 20.0):
+        lesson.observe(wrong, [], 2, now)
+    assert lesson.scored_gesture_error is False, "the tutor scored nothing"
+    assert lesson.hub.message["scored_gesture_error"] is False
+
+
+def test_no_contact_and_a_swap_never_score_however_long_they_are_held():
+    """Both numbers are right in each: the pose is still being assembled."""
+    for left, right in ((6, 7), (7, 6)):
+        lesson = _lesson()
+        lesson.command({"type": "start_node", "state": None,
+                        "node": _node(pairs=((6, 7),), count=1)})
+        pose = GestureState(method="6-10", left=left, right=right,
+                            contact=False, confidence=0.9)
+        for now in (0.0, 0.4, 10.0, 20.0):
+            lesson.observe(pose, [], 2, now)
+        assert lesson.hub.message["state"] == "wrong_pose"
+        assert lesson.scored_gesture_error is False, (left, right)
+        assert lesson.wrong_since is None
+
+
+def test_a_commutative_pose_is_correct_and_counts_for_the_star_score():
+    """7 on the left and 6 on the right for 6 x 7 is a correct pose."""
+    lesson = _lesson()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 7),), count=1)})
+    pick = lesson.pick
+    assert (pick.left, pick.right) == (6, 7)
+    inverted = GestureState(method="6-10", left=pick.right, right=pick.left,
+                            contact=True, confidence=0.95)
+    lesson.observe(inverted, [], 2, 0.0)
+    lesson.observe(inverted, [], 2, 0.4)
+
+    message = lesson.hub.message
+    assert message["state"] == "correct_pose"
+    assert message["wrong"] == [], "nothing is wrong about it"
+    assert message["scored_gesture_error"] is False
+    said = _recorded(lesson)
+    lesson.command({"type": "check", "value": pick.result})
+    assert lesson.correct == 1, "it counts for the star score"
+    assert _answer_message(said)["first_try"] is True
+    assert lesson.scheduler.outcomes[0].correct is True
+
+
+def _answered_right(lesson, at: float = 0.0) -> dict:
+    """Reach the correct pose and answer it, on the lesson's own clock.
+
+    Returns the answer_correct message, which is where the page reads first_try
+    and the only place the contract lets it read it.
+    """
+    said = _recorded(lesson)
+    _, right = _poses(lesson)
+    lesson.observe(right, [], 2, at)
+    lesson.observe(right, [], 2, at + 0.4)
+    lesson.command({"type": "check", "value": lesson.pick.result})
+    return _answer_message(said)
+
+
+def _answer_message(said: list[dict]) -> dict:
+    found = [message for message in said if message["type"] == "state"
+             and message["state"] == "answer_correct"]
+    assert found, "the answer never landed"
+    return found[-1]
+
+
+def test_first_try_is_computed_on_the_server():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    assert lesson.hub.message["first_try"] is False, "nothing is won yet"
+    assert _answered_right(lesson)["first_try"] is True
+
+
+def test_first_try_is_lost_by_a_wrong_answer_and_by_asked_for_help():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=2)})
+    said = _recorded(lesson)
+    _, right = _poses(lesson)
+    lesson.observe(right, [], 2, 0.0)
+    lesson.observe(right, [], 2, 0.4)
+    lesson.command({"type": "check", "value": 3})
+    assert lesson.hub.message["scored_math_error"] is True
+    assert lesson.hub.message["first_try"] is False
+    lesson.command({"type": "check", "value": lesson.pick.result})
+    assert _answer_message(said)["first_try"] is False, "a wrong answer costs it"
+
+    # the next exercise starts clean, and help the child asked for costs it too
+    lesson.command({"type": "hint"})
+    assert lesson.requested_hints == 1
+    assert ("hint_requested", None) in _spoke(lesson)
+    assert _answered_right(lesson)["first_try"] is False
+
+
+def test_automatic_help_never_costs_first_try():
+    """first_try and a busy tutor coexist: that pair is what Loop 2 reduces."""
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    wrong, _ = _poses(lesson)
+    lesson.started_at = 0.0
+    lesson.observe(wrong, [], 2, 0.0)
+    lesson.observe(wrong, [], 2, 0.4)
+    lesson.observe(wrong, [], 2, 5.0)
+    assert lesson.hint_level == 1 and lesson.hub.message["hint_auto"] is True
+    correct = _answered_right(lesson, at=5.5)
+    assert lesson.requested_hints == 0
+    assert correct["first_try"] is True
+
+
+def test_a_rescue_ends_first_try():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    lesson.tutor.tutor.decision = {"intervention_level": server.RESCUE_LEVEL}
+    lesson.observe(GestureState(method="unknown", confidence=0.2), [], 0, 0.0)
+    assert lesson.rescue_used is True
+    assert _answered_right(lesson, at=1.0)["first_try"] is False
+
+
+def test_the_tutor_factors_survive_the_round_trip_through_node_end():
+    lesson = _tutored()
+    record = {"learner_id": "9f31c0a7bd42",
+              "tutor": {"pace_factor": 1.2, "help_factor": 0.9,
+                        "tutor_observations": 7}}
+    said = _recorded(lesson)
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": record})
+    assert lesson.tutor.tutor.factors == {"pace_factor": 1.2, "help_factor": 0.9,
+                                          "tutor_observations": 7}
+    # the tutor counts the exercise it just logged
+    lesson.tutor.tutor.factors["tutor_observations"] = 8
+    lesson.command({"type": "next"})
+
+    end = [message for message in said if message["type"] == "node_end"][-1]
+    assert end["state"]["learner_id"] == "9f31c0a7bd42"
+    assert end["state"]["tutor"] == {"pace_factor": 1.2, "help_factor": 0.9,
+                                     "tutor_observations": 8}
+
+
+def test_a_record_with_no_tutor_block_round_trips_the_defaults():
+    lesson = _lesson()
+    said = _recorded(lesson)
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    lesson.command({"type": "next"})
+    end = [message for message in said if message["type"] == "node_end"][-1]
+    assert end["state"]["tutor"] == {"pace_factor": 1.0, "help_factor": 1.0,
+                                     "tutor_observations": 0}
+
+
+def test_an_early_stop_serves_one_mastered_fact_and_then_closes():
+    from lesson.scheduler import Record
+
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=5)})
+    lesson.scheduler.state.math["7x7"] = Record(mastery=5)   # a fact she owns
+    lesson.tutor.tutor.early_stop = True
+    lesson.observe(GestureState(method="unknown", confidence=0.2), [], 0, 0.0)
+    assert lesson.early_stop is True, "the tutor decided, the server acts"
+
+    lesson.command({"type": "next"})
+    assert lesson.running, "one more exercise, and it is one she owns"
+    assert lesson.pick.fact == "7x7" and lesson.pick.reason == "confidence"
+
+    lesson.command({"type": "next"})
+    assert not lesson.running, "then the node closes, short of its five"
+    assert len(lesson.scheduler.outcomes) == 2
+
+
+def test_an_early_stop_with_nothing_mastered_closes_straight_away():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=5)})
+    lesson.tutor.tutor.early_stop = True
+    lesson.observe(GestureState(method="unknown", confidence=0.2), [], 0, 0.0)
+    lesson.command({"type": "next"})
+    assert not lesson.running
+
+
+def test_the_tutor_is_fed_at_the_camera_rate_and_drops_what_is_too_fast():
+    """Every window is handed over. The drop is the tutor's, and only the
+    tutor's: dropping here as well would halve the rate it actually sees."""
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None,
+                    "node": _node(pairs=((6, 6), (7, 7)), count=2)})
+    gesture = GestureState(method="unknown", confidence=0.2)
+    for step in range(101):                      # one second of a 100 Hz camera
+        lesson.observe(gesture, [], 0, step * 0.01)
+
+    stub = lesson.tutor.tutor
+    assert len(stub.handed) == 101, "the camera rate, not a filtered one"
+    assert len(stub.observations) == 15, f"15 fps inside the tutor: {len(stub.observations)}"
+    gaps = [after[2] - before[2] for before, after in zip(stub.observations,
+                                                         stub.observations[1:])]
+    assert min(gaps) >= 1 / stub.fps - 1e-6
+
+
+def _hands(shift: float = 0.0) -> list[dict]:
+    """Ten fingertips, both hands, moved sideways by shift."""
+    from classifier.schema import FINGER_NUMBERS
+
+    return [{"hand": hand, "number": number, "x": base + shift, "y": 0.5}
+            for hand, base in (("left", 0.3), ("right", 0.7))
+            for number in FINGER_NUMBERS]
+
+
+def test_the_motion_measure_is_a_median_move_in_palm_widths():
+    meter = server.MotionMeter()
+    assert meter.update(_hands(), 0.1, 0.0) == 0.0, "one sample cannot move"
+    assert meter.update(_hands(0.02), 0.1, 0.1) == pytest.approx(0.2, abs=1e-3)
+    # 0.4 s later the move has left the window and the hands are still again
+    assert meter.update(_hands(0.02), 0.1, 0.6) == 0.0
+    # the same move, twice as close to the camera, reads the same
+    near = server.MotionMeter()
+    near.update(_hands(), 0.2, 0.0)
+    assert near.update(_hands(0.04), 0.2, 0.1) == pytest.approx(0.2, abs=1e-3)
+
+
+def test_the_motion_measure_reaches_the_tutor():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    gesture = GestureState(method="unknown", confidence=0.2)
+    lesson.observe(gesture, _hands(), 2, 0.0, palm=0.1)
+    lesson.observe(gesture, _hands(0.02), 2, 0.1, palm=0.1)
+    assert lesson.tutor.tutor.observations[-1][1] == pytest.approx(0.2, abs=1e-3)
+
+
+def test_the_camera_check_is_where_the_jitter_is_measured():
+    """The measurement lives in app/tutor.py; the server says when it runs."""
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "state": None, "node": {
+        "id": "check", "kind": "check", "pairs": [[6, 6]], "count": 1}})
+    assert ("check_start", None) in _spoke(lesson)
+    gesture = GestureState(method="unknown", confidence=0.2)
+    for step in range(5):
+        lesson.observe(gesture, _hands(), 2, step / 15, palm=0.1)
+    lesson.command({"type": "next"})             # the check is one exercise
+    assert ("check_end", None) in _spoke(lesson)
+
+
+def test_a_lesson_never_starts_or_ends_the_measurement():
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    lesson.command({"type": "next"})
+    assert [kind for kind, _ in _spoke(lesson)
+            if kind in ("check_start", "check_end")] == []
+
+
+def test_the_engine_hint_rides_the_observation():
+    """It is what the tutor builds its correction and its ghost out of."""
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    wrong, _ = _poses(lesson)
+    lesson.observe(wrong, [], 2, 0.0)
+    lesson.observe(wrong, [], 2, 0.4)
+    hints = [payload for kind, payload in _spoke(lesson) if kind == "hint"]
+    assert hints and hints[-1]["hand"] and hints[-1]["move_to"]
+
+
+def test_the_seam_survives_a_tutor_that_is_missing_or_raises():
+    import types
+
+    class Broken:
+        def __init__(self, params=None, lines=None, clock=None, log=None,
+                     learner_id="", factors=None):
+            raise RuntimeError("half written")
+
+    class Silent:
+        """Every method of the contract missing, on purpose."""
+
+        def __init__(self, params=None, lines=None, clock=None, log=None,
+                     learner_id="", factors=None):
+            self.learner_id = learner_id
+
+    empty = types.SimpleNamespace()          # a module with nothing in it yet
+    for module in (empty, _stub_module(Broken), _stub_module(Silent)):
+        lesson = _lesson()
+        lesson.tutor = server.TutorLink(module, keep_log=False)
+        lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+        lesson.command({"type": "tts", "speaking": False})
+        lesson.observe(GestureState(method="unknown", confidence=0.2), [], 0, 0.0)
+        correct = _answered_right(lesson, at=1.0)
+        assert correct["tutor_state"] == "WORKING"
+        assert correct["intervention_level"] == 0
+        assert correct["mode"] == "normal"
+        assert correct["first_try"] is True
+
+
+def test_the_seam_is_aligned_with_app_tutor_as_it_stands():
+    """The stub above pins the vocabulary; this pins it to the real module."""
+    module = pytest.importorskip("app.tutor")
+
+    lesson = _lesson()
+    lesson.tutor = server.TutorLink(module, keep_log=False)
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    assert lesson.tutor.live, "app/tutor.py built with its params and its lines"
+
+    lesson.command({"type": "tts", "speaking": True})
+    lesson.command({"type": "tts", "speaking": False})
+    lesson.command({"type": "speech", "text": "is it thirty six"})
+    wrong, _ = _poses(lesson)
+    for now in (0.0, 0.4, 1.0):
+        lesson.observe(wrong, _hands(), 2, now, palm=0.1)
+
+    message = lesson.hub.message
+    assert message["tutor_state"] in set(getattr(module, "STATES", ()))
+    assert message["mode"] in ("supportive", "normal", "independent")
+    assert 0 <= message["intervention_level"] <= 4
+    assert json.dumps(message), "whatever it decided is JSON serialisable"
+
+    correct = _answered_right(lesson, at=2.0)
+    assert correct["first_try"] is True, "nothing was asked for and nothing scored"
+    assert lesson.hub.message["state"]["tutor"]["tutor_observations"] == 1
+
+
+# --- the design images -------------------------------------------------------
+
+
+def test_the_design_art_is_served_and_never_escapes_its_directory():
+    """The renders live in web/course/art and the page asks for art/<name>.png."""
+    if not server.ART_DIR.is_dir():
+        pytest.skip("the design pass has not made web/course/art yet")
+    images = sorted(server.ART_DIR.glob("*.png"))
+    if not images:
+        pytest.skip("the design pass has not copied any art in yet")
+    wanted = server.ART_DIR / "tally.png"
+    image = wanted if wanted.is_file() else images[0]
+
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            response = await client.get(f"/art/{image.name}")
+            assert response.status == 200, image.name
+            assert response.headers["Content-Type"] == "image/png"
+            assert await response.read() == image.read_bytes()
+
+            # nothing outside web/course/art, and no directory listing either
+            for escape in ("/art/%2e%2e%2fapp.js", "/art/..%2Fapp.js",
+                           "/art/%2Fetc%2Fpasswd", "/art/missing.png"):
+                refused = await client.get(escape)
+                assert refused.status == 404, escape
+            assert (await client.get("/art/")).status == 403
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
+
+
+def test_a_missing_art_directory_is_not_a_broken_server(tmp_path, monkeypatch):
+    """The design pass makes the directory when it is ready, not before."""
+    monkeypatch.setattr(server, "ART_DIR", tmp_path / "not-there-yet")
+
+    async def scenario():
+        app = server.create_app(mock=True)
+        srv, client = await _client(app)
+        try:
+            assert (await client.get("/art/tally.png")).status == 404
+            page = await client.get("/")
+            assert page.status == 200, "the rest of the app is untouched"
+        finally:
+            await client.close()
+            await srv.close()
+    run(scenario())
