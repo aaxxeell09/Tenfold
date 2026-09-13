@@ -2,8 +2,9 @@
 
 Every case here is a rule the writer has to keep whatever a lesson does: the schema of the frozen
 dataset, N windows and no more, nothing at all from the demo or the mock camera, never a byte into
-data/samples.jsonl, a learner id on every row, and silence instead of an exception when the disk
-says no.
+data/samples.jsonl, a learner id on every row, windows that belong to the learner and exercise they
+were collected for, a validated pose that survives a late answer, and silence instead of an
+exception when the disk says no.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from typing import Any
 import pytest
 
 from app.live_samples import (
+    BUFFER_MIN,
     DEDUPE_DISTANCE,
     DEFAULT_WINDOWS,
     LIVE_SAMPLES_PATH,
@@ -54,10 +56,13 @@ def pose(left: int, right: int, contact: bool = True) -> GestureState:
 
 
 def writer(tmp_path: Path, windows: int = DEFAULT_WINDOWS, enabled: bool = True,
-           log: Any = None) -> LiveSampleWriter:
-    return LiveSampleWriter(tmp_path / "live_samples.jsonl", windows, enabled,
+           log: Any = None, learner: str = "lea", exercise: str = "8 x 7") -> LiveSampleWriter:
+    """A writer with one exercise on screen, the way the server opens every exercise."""
+    live = LiveSampleWriter(tmp_path / "live_samples.jsonl", windows, enabled,
                             log or logging.getLogger("test.live_samples"),
                             session_ts="2026-09-13T18:00:00.000Z")
+    live.begin(learner, exercise, "s1")
+    return live
 
 
 def feed(live: LiveSampleWriter, count: int, state: Any, start: float = 0.0,
@@ -155,11 +160,120 @@ def test_n_is_read_from_the_tutor_params_when_the_key_is_there(tmp_path: Path) -
     assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 2
 
 
+# --- the validated pose and a late answer -----------------------------------
+
+
+def test_a_late_answer_still_writes_the_validated_pose(tmp_path: Path) -> None:
+    """Eight windows of the right pose, then the hands leave the frame for longer than the buffer
+    holds: the pose validated before is what the answer corroborates."""
+    unknown = GestureState.unknown(0.1)
+    late = writer(tmp_path, windows=8)
+    feed(late, 8, pose(8, 7))
+    assert late.pose_validated("lea", "8 x 7", (8, 7)) == 8
+    feed(late, BUFFER_MIN, unknown, start=5.0)
+    assert late.confirm_correct("lea", "8 x 7", (8, 7)) == 8
+
+    written = rows(tmp_path / "live_samples.jsonl")
+    assert len(written) == 8
+    assert all(row["label"] == {"method": "6-10", "left": 8, "right": 7, "contact": True}
+               for row in written)
+    assert all(row["confirmed_by_answer"] is True for row in written)
+
+    # The same lesson without the pose kept aside: the buffer has moved past it.
+    lost = LiveSampleWriter(tmp_path / "lost.jsonl", 8, True, logging.getLogger("test.live_samples"))
+    lost.begin("lea", "8 x 7")
+    feed(lost, 8, pose(8, 7))
+    feed(lost, BUFFER_MIN, unknown, start=5.0)
+    assert lost.confirm_correct("lea", "8 x 7", (8, 7)) == 0
+
+
+def test_the_validated_pose_follows_the_hold_until_the_answer(tmp_path: Path) -> None:
+    """Validated early, held a while longer: the last N windows of the hold are the ones kept."""
+    live = writer(tmp_path, windows=3)
+    feed(live, 2, pose(8, 7))
+    assert live.pose_validated("lea", "8 x 7", (8, 7)) == 2
+    feed(live, 4, pose(8, 7), start=1.0)
+    feed(live, BUFFER_MIN, GestureState.unknown(0.1), start=5.0)
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 3
+    tips = [row["window"][-1]["left"]["points"][4][0] for row in rows(tmp_path / "live_samples.jsonl")]
+    assert tips == pytest.approx([1.45, 1.50, 1.55])
+
+
+def test_the_validated_pose_is_freed_at_the_end_of_the_exercise(tmp_path: Path) -> None:
+    live = writer(tmp_path)
+    feed(live, 8, pose(8, 7))
+    assert live.pose_validated("lea", "8 x 7", (8, 7)) == 8
+    live.end()
+    assert live.owner is None
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0
+    live.begin("lea", "8 x 7", "s1")        # the same title again is another exercise
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0
+    assert not (tmp_path / "live_samples.jsonl").exists()
+
+
+# --- whose windows ----------------------------------------------------------
+
+
+def test_a_new_exercise_never_confirms_with_the_previous_exercises_windows(tmp_path: Path) -> None:
+    """8 x 7 held and never answered, then 7 x 8: the engine accepts the swapped pair, so the old
+    windows would match the new exercise if they were still there."""
+    live = writer(tmp_path, exercise="8 x 7")
+    feed(live, 8, pose(8, 7))
+    assert live.pose_validated("lea", "8 x 7", (8, 7)) == 8
+    live.begin("lea", "7 x 8", "s1")
+    assert live.confirm_correct("lea", "7 x 8", (7, 8)) == 0
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0, "the old exercise is not on screen"
+    assert not (tmp_path / "live_samples.jsonl").exists()
+
+    feed(live, 3, pose(7, 8), start=3.0)
+    assert live.confirm_correct("lea", "7 x 8", (7, 8)) == 3
+    assert {row["exercise"] for row in rows(tmp_path / "live_samples.jsonl")} == {"7 x 8"}
+
+
+def test_a_new_learner_never_gets_the_previous_learners_windows(tmp_path: Path) -> None:
+    live = writer(tmp_path, learner="lea")
+    feed(live, 8, pose(8, 7))
+    assert live.pose_validated("lea", "8 x 7", (8, 7)) == 8
+    feed(live, 4, pose(9, 7), start=2.0)
+    live.begin("noe", "8 x 7", "s2")
+    assert live.confirm_correct("noe", "8 x 7", (8, 7)) == 0
+    assert live.record_gesture_error("noe", "8 x 7", pose(9, 7), (8, 7)) == 0
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0
+    assert not (tmp_path / "live_samples.jsonl").exists()
+
+    feed(live, 2, pose(8, 7), start=4.0)
+    assert live.confirm_correct("noe", "8 x 7", (8, 7)) == 2
+    assert {row["learner_id"] for row in rows(tmp_path / "live_samples.jsonl")} == {"noe"}
+
+
+def test_an_event_for_someone_not_on_screen_writes_nothing_and_keeps_the_windows(tmp_path: Path) -> None:
+    live = writer(tmp_path, learner="lea", exercise="8 x 7")
+    feed(live, 4, pose(8, 7))
+    assert live.confirm_correct("noe", "8 x 7", (8, 7)) == 0
+    assert live.confirm_correct("lea", "9 x 9", (9, 9)) == 0
+    assert live.pose_validated("noe", "8 x 7", (8, 7)) == 0
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 4
+
+
+def test_nothing_is_collected_without_an_exercise_on_screen(tmp_path: Path) -> None:
+    live = LiveSampleWriter(tmp_path / "live_samples.jsonl", 4, True,
+                            logging.getLogger("test.live_samples"))
+    feed(live, 6, pose(8, 7))
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0
+    live.begin("lea", "8 x 7")
+    assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0, "windows before begin are not kept"
+    live.end()
+    feed(live, 6, pose(8, 7))
+    assert live.record_gesture_error("lea", "8 x 7", pose(8, 7), (8, 7)) == 0
+    assert not (tmp_path / "live_samples.jsonl").exists()
+
+
 # --- the demo and the mock camera -------------------------------------------
 
 def test_a_mock_or_demo_source_writes_nothing(tmp_path: Path) -> None:
     live = writer(tmp_path, enabled=False)
     feed(live, 10, pose(8, 7))
+    assert live.pose_validated("lea", "8 x 7", (8, 7)) == 0
     assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0
     assert live.record_gesture_error("lea", "8 x 7", pose(9, 7), (8, 7)) == 0
     assert not (tmp_path / "live_samples.jsonl").exists()
@@ -178,6 +292,7 @@ def test_the_frozen_dataset_is_refused_by_name(tmp_path: Path) -> None:
         live = LiveSampleWriter(tmp_path / name, 8, True,
                                 logging.getLogger("test.live_samples"))
         assert live.enabled is False
+        live.begin("lea", "8 x 7")
         feed(live, 3, pose(8, 7))
         assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0
         assert not (tmp_path / name).exists()
@@ -196,6 +311,7 @@ def test_samples_jsonl_is_never_opened_for_writing(tmp_path: Path, monkeypatch: 
     live = writer(tmp_path)
     feed(live, 4, pose(8, 7))
     live.confirm_correct("lea", "8 x 7", (8, 7))
+    feed(live, 4, pose(9, 7), start=1.0)
     live.record_gesture_error("lea", "8 x 7", pose(9, 7), (8, 7))
 
     assert opened, "the writer never opened anything, the spy is not wired"
@@ -279,7 +395,7 @@ def test_a_record_always_carries_a_non_empty_learner_id(tmp_path: Path) -> None:
     live = writer(tmp_path)
     feed(live, 4, pose(8, 7))
     assert live.confirm_correct("   ", "8 x 7", (8, 7)) == 0
-    assert live.confirm_correct(None, "8 x 7", (8, 7)) == 0
+    assert live.confirm_correct(None, "8 x 7", (8, 7)) == 0  # type: ignore[arg-type]
     assert not (tmp_path / "live_samples.jsonl").exists()
 
     assert live.confirm_correct("  Lea  ", "8 x 7", (8, 7)) == 4
@@ -290,12 +406,17 @@ def test_a_record_always_carries_a_non_empty_learner_id(tmp_path: Path) -> None:
         assert row["learner_id"].strip()
         assert row["person"] == "lea"
 
+    empty = writer(tmp_path, learner="   ")
+    feed(empty, 4, pose(8, 7), start=3.0)
+    assert empty.confirm_correct("   ", "8 x 7", (8, 7)) == 0, "no learner, no owner, no row"
+
 
 def test_two_learners_stay_separate_in_the_file(tmp_path: Path) -> None:
     live = writer(tmp_path, windows=2)
     feed(live, 2, pose(8, 7))
     assert live.confirm_correct("Lea", "8 x 7", (8, 7)) == 2
     # The same pose and the same windows, another child: nothing is deduped across learners.
+    live.begin("Noe", "8 x 7", "s2")
     feed(live, 2, pose(8, 7))
     assert live.confirm_correct("Noe", "8 x 7", (8, 7)) == 2
 
@@ -315,6 +436,7 @@ def test_an_unwritable_path_does_not_raise(tmp_path: Path) -> None:
     log = logging.getLogger("test.live_samples.unwritable")
     live = LiveSampleWriter(blocker / "live_samples.jsonl", 4, True, log,
                             session_ts="2026-09-13T18:00:00.000Z")
+    live.begin("lea", "8 x 7")
     feed(live, 4, pose(8, 7))
     assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 0
     assert live.record_gesture_error("lea", "8 x 7", pose(9, 7), (8, 7)) == 0
@@ -332,6 +454,7 @@ def test_ids_continue_from_the_existing_file(tmp_path: Path) -> None:
     path.write_text('{"id":"l000000"}\n{"id":"l000001"}\n', encoding="utf-8")
     live = LiveSampleWriter(path, 2, True, logging.getLogger("test.live_samples"),
                             session_ts="2026-09-13T18:00:00.000Z")
+    live.begin("lea", "8 x 7")
     feed(live, 2, pose(8, 7))
     assert live.confirm_correct("lea", "8 x 7", (8, 7)) == 2
     assert [row["id"] for row in rows(path)[2:]] == ["l000002", "l000003"]

@@ -124,6 +124,9 @@ def smoke_cases() -> dict[str, Window]:
         "five_valid_contact": contact_window(7, 8),
         "degenerate": degenerate_window(),
         "nan": nan_window(),
+        # fingers 7 and 8 held clearly apart, still and confident: the tutor needs "7 and 8, not touching" here to
+        # tell the child to bring them together (tests/test_features_rules.py asks the same of every version)
+        "apart_7x8": contact_window(7, 8, gap=0.8),
     }
 
 

@@ -67,6 +67,13 @@ Hypothesis log (one line per accepted patch, newest last):
   0.45 in real near-contact holds (near:6x10 samples reach 0.88-1.1) and would otherwise regress that
   class. exact_match 0.543 -> 0.559, false_unknown_rate 0.064 -> 0.070 (within the 2-point budget), no
   class regressed beyond the gate's limit.
+- v10: re-measured the diagnosis's out_of_frame claim directly (--class out_of_frame): the biggest
+  reachable failure there is v9's own FAR_APART exemption, which excuses any pair merely touching finger
+  6 or 10, so a lost-tracking frame reporting a degenerate same-finger pair like (6,6) at dist 0.45-1.47
+  (e.g. s000402, s000605, s000606) sails through unrejected. Narrowed the exemption to require the two
+  fingers be different (lf != rf), since every legitimate long-reach hold (near:6x10, near:10x8) pairs
+  two distinct fingers and no real class expects a hand's own finger touching its mirror at that
+  distance. exact_match 0.559 -> 0.588, false_unknown_rate unchanged at 0.070, no class regressed.
 """
 from __future__ import annotations
 
@@ -204,7 +211,8 @@ def classify(window: Window) -> GestureState:
     if confidence > TIP_MOTION_CONF_GATE and pair_separation_trend(window) > PAIR_DRIFT_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     lf, rf, dist = averaged_pair(window, frame)
-    if lf not in (6, 10) and rf not in (6, 10) and dist > FAR_APART_THRESHOLD:
+    extended_reach = lf != rf and (lf in (6, 10) or rf in (6, 10))
+    if not extended_reach and dist > FAR_APART_THRESHOLD:
         return GestureState.unknown(confidence=max(0.0, min(1.0, confidence)))
     return GestureState(
         method="6-10",

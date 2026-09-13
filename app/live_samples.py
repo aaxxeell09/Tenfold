@@ -21,13 +21,23 @@ and two more that make a hard negative usable as a pair:
 Two kinds of record:
 
     Confirmed pose. An exercise completes with a correct pose and a correct answer. The last N
-    stable windows before the validation are written with confirmed_by_answer true. The label is
+    stable windows of the validated pose are written with confirmed_by_answer true. The label is
     what the classifier read on each window, corroborated by the answer, never the raw target: if
     the child posed 7 on the left and 8 on the right for 8 x 7, the label says 7 and 8.
 
     Hard negative. A scored gesture error, meaning a wrong pose still held after a correction was
     given. The windows of that held pose are written with confirmed_by_answer false and both poses
     on the row, so the pair (what the classifier saw, what the child was asked for) is the negative.
+
+Whose windows. Every window is owned from the moment it is collected: by the learner, the session
+and the exercise on screen, which begin() sets. A new exercise, a new learner, a quit or the end of
+a node forgets everything collected before it, and an event is only ever written from windows its
+own learner produced on its own exercise. Without an exercise on screen nothing is collected.
+
+The validated pose. The engine latches a correct pose and the answer can come much later: the
+child's hands leave the frame, and a rolling buffer of a few seconds has long moved past the pose.
+pose_validated() keeps the stable run of that pose aside the moment it is latched, keeps it up to
+date while the child still holds it, and holds it until the answer or the end of the exercise.
 
 What this file is not: it is weakly labelled. A confirmed pose is only as good as the classifier
 that latched it, and a hard negative is only as good as the tutor's own scoring. It carries the
@@ -42,17 +52,21 @@ Honest gaps, stated rather than faked:
   reading without contact, "transition" when the reading is unknown. An unknown reading on a held
   wrong pose is the one place where kind is a guess; the row's label is unknown either way, and
   target_pose says what the pose should have been.
+  a window the camera thread captured just before begin() may be owned by the new exercise: one
+  frame at most, the same frame the engine itself scores against the new exercise.
 
-Wiring, in app/server.py (four lines):
+Wiring, in app/server.py:
 
     live = LiveSampleWriter(LIVE_SAMPLES_PATH, windows_from_params(params), enabled=not (mock or demo), log=log)
     live.offer(window, state)                                        # camera thread, every window
+    live.begin(learner_id, exercise, session)                        # an exercise is loaded
+    live.pose_validated(learner_id, exercise, target)                # the engine latched the pose
     live.confirm_correct(learner_id, exercise, target)               # answer correct on a correct pose
     live.record_gesture_error(learner_id, exercise, seen, target)    # scored gesture error
+    live.end()                                                       # quit, node end, gate
 
-N comes from lesson/tutor_params.json, key live_sample_windows, through windows_from_params. The key
-is not in that file today, so the default of 8 is what runs. This module never reads that file and
-never imports the tutor.
+N comes from lesson/tutor_params.json, key live_sample_windows, through windows_from_params. This
+module never reads that file and never imports the tutor.
 
 Nothing here may ever take a lesson down: every write is wrapped and every failure is swallowed and
 logged, the same discipline as the tutor log sink in docs/tutor_contract.md section 3.
@@ -64,6 +78,7 @@ import json
 import logging
 import math
 import sys
+import threading
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -88,7 +103,7 @@ LIVE_ANGLE: str = "unknown"
 LIVE_DISTANCE: str = "unknown"
 ID_PREFIX: str = "l"
 
-# The tutor params key and its fallback. The key is absent from lesson/tutor_params.json today.
+# The tutor params key and its fallback.
 PARAM_KEY: str = "live_sample_windows"
 DEFAULT_WINDOWS: int = 8
 
@@ -160,6 +175,10 @@ def _learner_key(learner_id: Any) -> str:
     if learner_id is None:
         return ""
     return str(learner_id).strip().lower()
+
+
+def _title(exercise: Any) -> str:
+    return str(exercise if exercise is not None else "").strip()
 
 
 @dataclass(frozen=True)
@@ -247,13 +266,28 @@ class Pose:
         return "unknown"
 
 
+@dataclass(frozen=True)
+class Owner:
+    """Whose windows these are: one learner, one session, one exercise, one epoch.
+
+    The epoch changes on every begin() and end(), so the same exercise title met twice, or the same
+    child coming back, is still a different owner from the one before it.
+    """
+
+    learner: str
+    exercise: str
+    session: str
+    epoch: int
+
+
 @dataclass
 class _Observation:
-    """One window as it arrived, with what the classifier made of it."""
+    """One window as it arrived, with what the classifier made of it and whose it is."""
 
     window: Window
     pose: Pose
     confidence: float
+    epoch: int
 
 
 def _confidence(state: Any) -> float:
@@ -324,6 +358,9 @@ class LiveSampleWriter:
     enabled   False for the demo scenario and the mock camera. Off by default: a caller that
               forgets the flag records nothing rather than filling the dataset with fake hands.
     log       where failures go. Anything with .warning, .error and .exception.
+
+    offer runs on the camera thread and everything else on the event loop, so one lock guards the
+    buffer, the owner and the validated pose.
     """
 
     def __init__(self, path: str | Path = LIVE_SAMPLES_PATH, windows: int = DEFAULT_WINDOWS,
@@ -338,10 +375,59 @@ class LiveSampleWriter:
             self.log.error("live_samples: refusing %s, that file is frozen by the contract",
                            self.path)
             self.enabled = False
+        self._lock = threading.Lock()
         self._buffer: Deque[_Observation] = deque(maxlen=max(BUFFER_MIN, self.windows * 4))
         self._recent: Deque[tuple[str, str, Signature]] = deque(maxlen=DEDUPE_MEMORY)
         self._next_index: Optional[int] = None
         self._events: int = 0
+        self._epoch: int = 0
+        self._owner: Optional[Owner] = None
+        # The validated pose, kept aside from the rolling buffer until the answer.
+        self._held: Deque[_Observation] = deque(maxlen=self.windows)
+        self._held_pose: Optional[Pose] = None
+        self._held_open: bool = False
+
+    # --- whose windows -----------------------------------------------------
+
+    @property
+    def owner(self) -> Optional[Owner]:
+        return self._owner
+
+    def begin(self, learner_id: Any, exercise: Any, session: Any = "") -> None:
+        """An exercise is on screen for this learner. Everything collected before it is forgotten.
+
+        Called on every exercise the server loads, which also covers a new node, a new learner and
+        a restart: none of them may ever reach back into the windows of the exercise before.
+        """
+        if not self.enabled:
+            return
+        with self._lock:
+            self._epoch += 1
+            self._owner = Owner(_learner_key(learner_id), _title(exercise),
+                                str(session if session is not None else ""), self._epoch)
+            self._forget()
+
+    def end(self) -> None:
+        """No exercise on screen any more: quit, node end, gate. Forget and stop collecting."""
+        with self._lock:
+            self._epoch += 1
+            self._owner = None
+            self._forget()
+
+    def reset(self) -> None:
+        """The older name of end(), kept for callers that still use it."""
+        self.end()
+
+    def _forget(self) -> None:
+        self._buffer.clear()
+        self._held.clear()
+        self._held_pose = None
+        self._held_open = False
+
+    def _owns(self, learner_id: Any, exercise: Any) -> bool:
+        owner = self._owner
+        return (owner is not None and bool(owner.learner)
+                and _learner_key(learner_id) == owner.learner and _title(exercise) == owner.exercise)
 
     # --- the camera thread -------------------------------------------------
 
@@ -349,40 +435,99 @@ class LiveSampleWriter:
         """Take one window and what the classifier made of it. Cheap: it only buffers.
 
         Called on every window, so no file is touched and no signature is computed here: the live
-        loop has 100 ms per frame and MediaPipe spends most of it.
+        loop has 100 ms per frame and MediaPipe spends most of it. Without an exercise on screen the
+        window is not kept at all.
         """
-        if not self.enabled:
+        if not self.enabled or self._owner is None:
             return
         try:
             if not hasattr(window, "left") or not hasattr(window, "right"):
                 raise TypeError(f"a Window was expected, got {type(window).__name__}")
-            self._buffer.append(_Observation(window, Pose.of(state), _confidence(state)))
+            pose = Pose.of(state)
+            with self._lock:
+                if self._owner is None:
+                    return
+                observation = _Observation(window, pose, _confidence(state), self._epoch)
+                self._buffer.append(observation)
+                self._follow_held(observation)
         except Exception:  # a malformed window must not take the lesson down
             self.log.exception("live_samples: a window could not be buffered")
 
-    def reset(self) -> None:
-        """Forget the buffered windows. Optional: call it when an exercise is abandoned."""
-        self._buffer.clear()
+    def _follow_held(self, observation: _Observation) -> None:
+        """Keep the validated pose's run current while the child still holds it.
 
-    # --- the two events ----------------------------------------------------
+        A window of the same pose extends it, a window of a different known pose closes it, and an
+        unknown reading (hands gone from the frame) does neither. The pose held again after being
+        closed starts a fresh run that replaces the old one: the latest hold of the validated pose
+        is the one the answer corroborates.
+        """
+        if self._held_pose is None:
+            return
+        if observation.pose.matches(self._held_pose, unordered=True):
+            if not self._held_open:
+                self._held.clear()
+                self._held_open = True
+            self._held.append(observation)
+        elif observation.pose.known:
+            self._held_open = False
 
-    def confirm_correct(self, learner_id: str, exercise: Any, target: Any = None) -> int:
-        """The exercise completed: a correct pose, confirmed by a correct answer.
+    # --- the events ----------------------------------------------------------
 
-        Writes the last N stable windows before the validation, confirmed_by_answer true. target is
-        the pose the exercise asked for, in any of the shapes Pose.of accepts; without it the most
-        recent pose the classifier read is used. Returns how many rows were written.
+    def pose_validated(self, learner_id: Any, exercise: Any, target: Any = None) -> int:
+        """The engine latched the pose. Keep its stable run aside until the answer.
+
+        target is the pose the exercise asked for; without it the most recent pose the classifier
+        read is used. Returns how many windows are kept.
         """
         if not self.enabled:
             return 0
         try:
-            reference = Pose.of(target)
-            if not reference.known:
-                reference = self._latest_known_pose()
-            if not reference.known:
-                return 0
-            run = self._stable_run(reference, unordered=True)
-            return self._write(learner_id, exercise, run, reference, confirmed=True)
+            with self._lock:
+                if not self._owns(learner_id, exercise):
+                    self.log.warning("live_samples: a validated pose for another learner or "
+                                     "exercise than the one on screen was ignored")
+                    return 0
+                reference = Pose.of(target)
+                if not reference.known:
+                    reference = self._latest_known_pose()
+                if not reference.known:
+                    return 0
+                run = self._stable_run(reference, unordered=True)
+                self._held.clear()
+                self._held.extend(run)
+                self._held_pose = reference
+                self._held_open = bool(run)
+                return len(self._held)
+        except Exception:
+            self.log.exception("live_samples: a validated pose could not be kept")
+            return 0
+
+    def confirm_correct(self, learner_id: str, exercise: Any, target: Any = None) -> int:
+        """The exercise completed: a correct pose, confirmed by a correct answer.
+
+        Writes the last N stable windows of the validated pose, confirmed_by_answer true: the run
+        pose_validated kept aside, or without one the last run still in the buffer. Only this
+        learner's windows on this exercise are ever used. Returns how many rows were written.
+        """
+        if not self.enabled:
+            return 0
+        try:
+            with self._lock:
+                if not self._owns(learner_id, exercise):
+                    self.log.warning("live_samples: a confirmed pose for another learner or "
+                                     "exercise than the one on screen was not written")
+                    return 0
+                reference = Pose.of(target)
+                if not reference.known:
+                    reference = self._held_pose or self._latest_known_pose()
+                if not reference.known:
+                    return 0
+                if (self._held and self._held_pose is not None
+                        and self._held_pose.matches(reference, unordered=True)):
+                    run = list(self._held)
+                else:
+                    run = self._stable_run(reference, unordered=True)
+                return self._write(learner_id, exercise, run, reference, confirmed=True)
         except Exception:
             self.log.exception("live_samples: a confirmed pose was dropped")
             return 0
@@ -393,24 +538,34 @@ class LiveSampleWriter:
 
         Writes the windows of that held pose, confirmed_by_answer false, with both the pose the
         classifier saw and the pose the exercise asked for, so the row is usable as a hard
-        negative. Returns how many rows were written.
+        negative. Only this learner's windows on this exercise are used. Returns how many rows were
+        written.
         """
         if not self.enabled:
             return 0
         try:
-            seen_pose = Pose.of(seen)
-            target_pose = Pose.of(target)
-            run = self._stable_run(seen_pose, unordered=False)
-            return self._write(learner_id, exercise, run, target_pose, confirmed=False,
-                               seen_hint=seen_pose)
+            with self._lock:
+                if not self._owns(learner_id, exercise):
+                    self.log.warning("live_samples: a gesture error for another learner or "
+                                     "exercise than the one on screen was not written")
+                    return 0
+                seen_pose = Pose.of(seen)
+                target_pose = Pose.of(target)
+                run = self._stable_run(seen_pose, unordered=False)
+                return self._write(learner_id, exercise, run, target_pose, confirmed=False,
+                                   seen_hint=seen_pose)
         except Exception:
             self.log.exception("live_samples: a gesture error was dropped")
             return 0
 
     # --- picking the windows ----------------------------------------------
 
+    def _current(self) -> list[_Observation]:
+        """The buffered windows of the owner on screen, oldest first."""
+        return [observation for observation in self._buffer if observation.epoch == self._epoch]
+
     def _latest_known_pose(self) -> Pose:
-        for observation in reversed(self._buffer):
+        for observation in reversed(self._current()):
             if observation.pose.known:
                 return observation.pose
         return Pose()
@@ -422,7 +577,7 @@ class LiveSampleWriter:
         held and the child's hands have usually left the frame by then; the run is contiguous, so a
         different pose in between ends it.
         """
-        entries = list(self._buffer)
+        entries = self._current()
         end = -1
         for index in range(len(entries) - 1, -1, -1):
             if entries[index].pose.matches(reference, unordered=unordered):
@@ -451,7 +606,7 @@ class LiveSampleWriter:
         if not run:
             return 0
 
-        title = str(exercise if exercise is not None else "").strip()
+        title = _title(exercise)
         if self._next_index is None:
             self._next_index = self._count_existing()
         self._events += 1
@@ -480,6 +635,9 @@ class LiveSampleWriter:
         self._recent.extend(signatures)
         # A written run is consumed, so a repeated event cannot write the same hold twice.
         self._buffer.clear()
+        self._held.clear()
+        self._held_pose = None
+        self._held_open = False
         return len(rows)
 
     def _row(self, index: int, who: str, title: str, hold: str, label: dict[str, Any],

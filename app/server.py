@@ -863,6 +863,13 @@ class Lesson:
         """Whose live sample rows these are. The hash, never the child's name."""
         return live_learner_id(self.learner.learner_id)
 
+    def _live(self, name: str, *args: Any) -> None:
+        """One call on the live sample writer. It may never cost the lesson anything."""
+        try:
+            getattr(self.live, name)(*args)
+        except Exception:
+            live_failed(name)
+
     def decided(self) -> dict[str, Any]:
         """The eight tutor fields for this message.
 
@@ -960,6 +967,10 @@ class Lesson:
         self.recorded = False
         self.started_at = now
         update = self.engine.load(Exercise(pick.left, pick.right))
+        # The windows collected from here on are this child's, on this exercise; whatever the
+        # writer still held from the exercise before is forgotten.
+        self._live("begin", self.live_learner, update.exercise.title,
+                   f"{self.scheduler.session}:{(self.node or {}).get('id') or 'open'}")
         self.tutor.exercise(update.exercise.title, pick,
                             (self.node or {}).get("id"), now)
         self.trace("exercise", pick.to_dict())
@@ -974,6 +985,7 @@ class Lesson:
         None, so nothing scores, nothing is recorded and no live sample is
         written. A gate that names no pair arms nothing at all.
         """
+        self._live("end")
         self.pick = None
         self.hint_level = 0
         self.hint_auto = False
@@ -1016,6 +1028,7 @@ class Lesson:
         if self.finished:
             return
         self.finished = True
+        self._live("end")
         summary = self.scheduler.end_session(now_utc())
         metrics = self.scheduler.metrics()
         self.trace("session_end", {**metrics, **summary.to_dict()})
@@ -1064,7 +1077,13 @@ class Lesson:
             if self.finished or not self.running:
                 return
             update = self.engine.observe(gesture, now)
+            validated = self.engine.latched and not self.correct_pose
             self.correct_pose = self.correct_pose or self.engine.latched
+            if validated and self.pick is not None:
+                # The answer can come long after the hands have left the frame: the windows of
+                # the pose the engine just latched are kept aside until then.
+                self._live("pose_validated", self.live_learner, self.engine.exercise.title,
+                           (self.pick.left, self.pick.right))
             reaction = self._reaction(gesture, update, now)
             if update is not None:
                 self._watch_pose(update, now)
@@ -1310,6 +1329,8 @@ class Lesson:
             # socket can stay open on the server for a heartbeat after a drop.
             self._refuse(node)
             return
+        # Whoever played before, nothing they left in the live sample writer reaches this node.
+        self._live("end")
         pairs = [list(pair) for pair in node.get("pairs") or []]
         length = int(node.get("count") or NODE_LENGTH.get(node.get("kind", "lesson"), 5))
         # A missing state is a browser that has never played, and
@@ -1412,6 +1433,7 @@ class Lesson:
         """
         if self.gate and self.running:
             self.tutor.check_ended()
+        self._live("end")
         self._beat_token += 1
         self.node = None
         self.pick = None

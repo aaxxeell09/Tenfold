@@ -86,6 +86,27 @@ def check_inference() -> bool:
     return line("PASS", "W&B Inference", f"{model} answered in {ms} ms")
 
 
+def check_rules_smoke() -> bool:
+    """loop/smoke.py on classifier/rules.py. A crash, an out-of-domain value or a slow classifier FAILs; a wrong pose
+    on an expectation case only WARNs, because the running rules can carry one until the critic loop fixes it."""
+    try:
+        if str(REPO) not in sys.path:
+            sys.path.insert(0, str(REPO))
+        from loop import smoke
+        from loop.synth import smoke_cases
+        fails = smoke.run(REPO / "classifier" / "rules.py")
+    except Exception as e:
+        return line("FAIL", "rules.py smoke", f"{type(e).__name__}: {e}", "python loop/smoke.py")
+    n = len(smoke_cases())
+    hard = [f for f in fails if not f.startswith(smoke.EXPECTATION_PREFIXES)]
+    if not fails:
+        return line("PASS", "rules.py smoke", f"{n}/{n} synthetic windows ok")
+    if not hard:
+        return line("WARN", "rules.py smoke", fails[0][:100],
+                    "the critic loop has to fix this pose before it can accept another version")
+    return line("FAIL", "rules.py smoke", hard[0][:100], "python loop/smoke.py")
+
+
 def main() -> int:
     load_env()
     ok = True
@@ -144,14 +165,7 @@ def main() -> int:
     bv = REPO / "data" / "BEST_VERSION"
     ok &= line("PASS" if bv.exists() else "WARN", "BEST_VERSION", bv.read_text().strip()[:8] if bv.exists() else "none yet: the app runs HEAD rules.py",
                "created by the first accepted critic iteration")
-    try:
-        sys.path.insert(0, str(REPO))
-        from loop.smoke import run as smoke_run
-        fails = smoke_run(REPO / "classifier" / "rules.py")
-        ok &= line("PASS" if not fails else "FAIL", "rules.py smoke", "6/6 synthetic windows ok" if not fails else fails[0][:100],
-                   "python loop/smoke.py")
-    except Exception as e:
-        ok &= line("FAIL", "rules.py smoke", f"{type(e).__name__}: {e}", "python loop/smoke.py")
+    ok &= check_rules_smoke()
     print("\nDOCTOR OK" if ok else "\nDOCTOR FAILED: fix the FAIL lines above")
     return 0 if ok else 1
 
