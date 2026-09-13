@@ -523,8 +523,18 @@ class TutorLink:
         self.early_stop = False
         if self._module is None:
             self._module = tutor_module()
+        # The still hands measurement of the gate fixes the tutor's motion
+        # threshold for the run, and a tutor is built per node: without this
+        # the lesson after the gate would start again on the floor.
+        measured = getattr(self.tutor, "motion_threshold", None)
         self.tutor = build_tutor(self._module, learner_id, self.factors,
                                  self.keep_log)
+        if (self.tutor is not None and isinstance(measured, (int, float))
+                and measured > float(getattr(self.tutor, "motion_threshold", measured))):
+            try:
+                self.tutor.motion_threshold = float(measured)
+            except Exception:
+                log.exception("server: could not carry the motion threshold")
 
     def close(self, reason: str, now: float) -> None:
         """The session is over: close the exercise still open and read back.
@@ -787,6 +797,13 @@ class Lesson:
         self.node: dict[str, Any] | None = None
         # True while the running node is the start gate rather than a lesson.
         self.gate = False
+        # Bumped whenever the node moves, so a success beat that was still
+        # holding the next exercise back lets go without firing.
+        self._beat_token = 0
+        self._beat_timer: threading.Timer | None = None
+        # Set when the hint clock rose without a line to carry it, so the next
+        # observation pushes a state message the page can read the level from.
+        self._level_moved = False
         self.correct = 0
         self.demo_available = False
         # Set once perception is gone. It rides on every message from then on,
@@ -834,6 +851,7 @@ class Lesson:
             message["tally"] = self.fault
         self.hub.publish(message)
         self._last_push = time.monotonic()
+        self._level_moved = False
 
     @property
     def live_learner(self) -> str:
@@ -1070,7 +1088,7 @@ class Lesson:
                 self.push(update, reaction=reaction)
             elif reaction is not None:
                 self.push(self.engine.snapshot(), reaction=reaction)
-            elif scored or now - self._last_push >= FINGER_REFRESH_S:
+            elif scored or self._level_moved or now - self._last_push >= FINGER_REFRESH_S:
                 self.push(self.engine.snapshot())
 
     def _follow_tutor(self) -> None:
@@ -1155,6 +1173,13 @@ class Lesson:
         if level > self.hint_level:
             self.hint_level = level
             self.hint_auto = True       # the clock raised it, not the child
+            # With the live tutor the voice is its own: it shows before it
+            # speaks, and a word from this clock would fill the silence it
+            # chose. The level still rises, for the outcome and the page,
+            # and the page still hears about it on the next push.
+            if self.tutor.live:
+                self._level_moved = True
+                return None
             return hint_event(level)
         return None
 
@@ -1178,6 +1203,8 @@ class Lesson:
                 log.info("server: ignored %s from a client that does not own the session", kind)
             elif kind == "quit":
                 self._quit()
+            elif kind == "ready":
+                self._ready()
             elif kind == "check":
                 self._check(_as_int(message.get("value")))
             elif kind == "next":
@@ -1262,6 +1289,7 @@ class Lesson:
             return
         if self.pick is not None and not self.recorded:
             self._record(correct=False, given=None)
+        self._beat_token += 1
         self._advance()
 
     def _start_node(self, node: dict[str, Any], raw: Any,
@@ -1292,6 +1320,7 @@ class Lesson:
         if node.get("kind") == "check":
             self.tutor.check_started()
 
+        self._beat_token += 1
         self.node = dict(node)
         # A gate is not an exercise. The check node opens the perception stream
         # for the start gate and nothing else: no fact is drawn, no outcome is
@@ -1357,6 +1386,17 @@ class Lesson:
         scheduler.state = self.learner
         return scheduler
 
+    def _ready(self) -> None:
+        """The page passed its gate. On a gate this ends the node; on anything
+        else it is a message from a page that is ahead of the server, logged
+        and ignored rather than dropped in silence."""
+        if not self.running:
+            return
+        if not self.gate:
+            log.info("server: ready outside a gate, ignored")
+            return
+        self._quit()
+
     def _quit(self) -> None:
         """The child left the lesson. Nothing is recorded, nothing is scored.
 
@@ -1367,6 +1407,7 @@ class Lesson:
         """
         if self.gate and self.running:
             self.tutor.check_ended()
+        self._beat_token += 1
         self.node = None
         self.pick = None
         self.gate = False
@@ -1439,7 +1480,44 @@ class Lesson:
             except Exception:
                 live_failed("confirm_correct")
         self._record(correct=True, given=value)
-        self._advance()
+        beat = self.tutor.fields.get("tutor_beat") if self.tutor.live else None
+        hold = _as_int((beat or {}).get("total_ms")) if isinstance(beat, dict) else None
+        if hold and hold > 0:
+            # The success beat: the page plays the line, the halo, the stars
+            # and the counter inside it, and the next exercise arrives only
+            # once it is over. Advancing here, microseconds after the yes,
+            # cut the yes off every time.
+            self._advance_after(hold / 1000.0)
+        else:
+            self._advance()
+
+    def _advance_after(self, seconds: float) -> None:
+        """Advance once the beat is over, unless the node has moved on."""
+        self._beat_token += 1
+        token = self._beat_token
+
+        def fire() -> None:
+            with self._lock:
+                if token != self._beat_token or not self.running or self.finished:
+                    return
+                self._advance()
+
+        timer = threading.Timer(seconds, fire)
+        timer.daemon = True
+        self._beat_timer = timer
+        timer.start()
+
+    def settle_beat(self) -> None:
+        """Play the rest of a pending success beat now. For the tests, which
+        cannot wait two and a half seconds, and for nothing in the app."""
+        timer = self._beat_timer
+        if timer is None:
+            return
+        self._beat_timer = None
+        timer.cancel()
+        with self._lock:
+            if self.running and not self.finished and self.pick is not None:
+                self._advance()
 
     def _record(self, correct: bool, given: int | None) -> None:
         if self.pick is None or self.recorded:
@@ -1656,8 +1734,12 @@ def mock_loop(lesson: Lesson, stop: threading.Event) -> None:
             # The correct pose latches the lesson, so move on before replaying it.
             # Never inside the start check: it is one exercise that waits for the
             # child's answer, and skipping it would end the check on its own.
+            # Nor under --demo: the scripted sequence is the whole point of
+            # demo/scenario.json, and a skip on the wall clock ate one of its
+            # five steps at random, a different one each run.
             in_check = (lesson.node or {}).get("kind") == "check"
-            if phase == 0 and step >= 0 and not in_check:
+            scripted = isinstance(lesson.scheduler, ScriptedScheduler)
+            if phase == 0 and step >= 0 and not in_check and not scripted:
                 lesson.command({"type": "next"})
             step = slot
         gesture = mock_gestures(lesson.engine.exercise)[phase]
