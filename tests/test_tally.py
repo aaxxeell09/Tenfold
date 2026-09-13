@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from lesson import engine as eng
@@ -63,7 +66,42 @@ def test_the_signature_matches_the_tutor_fallback():
     """lesson/tutor.py calls fallback(event, ctx) with its own context keys."""
     ctx = {"exercise": "8 x 7", "detected": None, "child": "Axel",
            "operands": (8, 7), "answer": 56}
-    assert tally.phrase(eng.EVENT_ANSWER_CORRECT, ctx) == "Yes. 56 is exactly right."
+    # The canonical success line, with the numbers of the exercise in it.
+    assert tally.phrase(eng.EVENT_ANSWER_CORRECT, ctx) == "Yes. 8 times 7 is 56."
+
+
+# --- every word comes from lesson/tally_lines.json ---------------------------
+
+
+def test_the_module_keeps_no_text_of_its_own():
+    """Tally has one voice and one place to keep it."""
+    lines = json.loads((Path(tally.__file__).with_name("tally_lines.json"))
+                       .read_text(encoding="utf-8"))
+    assert tally.LINES == {k: v for k, v in lines.items() if v.strip()}
+    for event, key in tally.KEYS.items():
+        assert key in lines, f"{event} points at {key}, which nobody wrote"
+    for event, key in tally.DETAILED_KEYS.items():
+        assert key in lines, f"{event} points at {key}, which nobody wrote"
+    assert tally.FALLBACK_KEY in lines
+    for text in list(tally.PHRASES.values()) + list(tally.DETAILED.values()):
+        assert text in lines.values()
+
+
+def test_the_pose_being_right_says_the_canonical_line_and_only_that():
+    """The bug that started this: a second wording of pose_ready."""
+    lines = json.loads((Path(tally.__file__).with_name("tally_lines.json"))
+                       .read_text(encoding="utf-8"))
+    assert tally.KEYS["correct_pose"] == "pose_ready"
+    assert tally.phrase(eng.EVENT_CORRECT_POSE, CONTEXT) == lines["pose_ready"]
+    assert "Now count the tens, then the ones." not in lines.values()
+
+
+def test_a_line_file_that_cannot_be_read_leaves_tally_silent(monkeypatch):
+    """Silence is recoverable. Words this module invented are not."""
+    monkeypatch.setattr(tally, "LINES", {})
+    monkeypatch.setattr(tally, "FALLBACK", "")
+    assert tally.phrase(eng.EVENT_CORRECT_POSE, CONTEXT) == ""
+    assert tally.phrase("review", {"exercise": "8 x 9", "seen": False}) == ""
 
 
 # --- a fact the child has never met is not a review --------------------------
