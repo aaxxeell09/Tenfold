@@ -546,17 +546,17 @@ def test_the_demo_sequence_is_unchanged_step_by_step():
     scripted path: the demo plays the file, in that order, with those hands."""
     expected = [
         {"fact": "7x8", "left": 8, "right": 7, "pose": "8x7",
-         "reason": "review", "is_new": False},
+         "reason": "review", "is_new": False, "seen": True},
         {"fact": "6x8", "left": 6, "right": 8, "pose": "6x8",
-         "reason": "next_new", "is_new": True},
+         "reason": "next_new", "is_new": True, "seen": True},
         {"fact": "6x6", "left": 6, "right": 6, "pose": "6x6",
-         "reason": "confidence", "is_new": False},
+         "reason": "confidence", "is_new": False, "seen": True},
         {"fact": "7x8", "left": 7, "right": 8, "pose": "7x8",
-         "reason": "retry", "is_new": False},
+         "reason": "retry", "is_new": False, "seen": True},
         {"fact": "6x8", "left": 8, "right": 6, "pose": "8x6",
-         "reason": "next_new", "is_new": False},
+         "reason": "next_new", "is_new": False, "seen": True},
         {"fact": "10x10", "left": 10, "right": 10, "pose": "10x10",
-         "reason": "level_up", "is_new": False},
+         "reason": "level_up", "is_new": False, "seen": True},
     ]
     engine = ScriptedScheduler.load(REPO / "demo" / "scenario.json",
                                     state=LearnerState.new(T0), now=T0)
@@ -680,6 +680,73 @@ def test_a_node_with_one_orientation_never_flips_it():
             assert (pick.left, pick.right) == (9, 6)
         engine.record(answered(pick), now=T0)
     assert served >= 1, "the node's own pair is served"
+
+
+def test_a_widened_fact_the_child_has_never_met_is_not_marked_seen():
+    """The lesson fills its count from the whole range, so it can hand the child
+    a fact for the first time. The pick has to say so, or the phrase layer calls
+    a first meeting a review."""
+    state = LearnerState.new(T0)
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 7], [7, 6]], length=5)
+    picks = []
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        picks.append(pick)
+        engine.record(answered(pick), now=T0)
+
+    widened = [pick for pick in picks if pick.fact != "6x7"]
+    assert widened, "the lesson widened past its node"
+    for pick in widened:
+        assert pick.seen is False, f"{pick.fact} was never attempted before"
+        assert pick.is_new is False, "widening is practice, never new material"
+
+
+def test_a_fact_the_child_has_met_is_marked_seen_wherever_it_comes_from():
+    """Inside the node or outside it, the history is the only thing that counts."""
+    state = learner(sessions=3, **{"10x10": 1, "6x6": 2})
+    state.fact("10x10").due_session = 4
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    seen_by_fact = {}
+    for _ in range(5):
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        seen_by_fact.setdefault(pick.fact, pick.seen)
+        engine.record(answered(pick), now=T0)
+
+    assert seen_by_fact.get("10x10") is True, "a due fact from outside was met"
+    assert seen_by_fact.get("6x6") is True, "a node fact with history was met"
+    assert seen_by_fact.get("7x7") is False, "the node's untouched pair was not"
+
+
+def test_being_met_before_does_not_move_the_mastery_gate():
+    """seen is wording only. Two first try successes still gate new material,
+    and a widened fact the child never met is still not new material."""
+    state = learner(sessions=3, **{"10x10": 2, "6x10": 2, "7x10": 2})
+    engine = Scheduler(state, now=T0)
+    engine.start_session(T0)
+    opened = []
+    for _ in range(6):
+        pick = engine.next_exercise(T0)
+        if pick is None:
+            break
+        opened.append(pick.is_new)
+        if not pick.seen:
+            assert pick.is_new or pick.reason != sch.REACTION_NEXT_NEW
+        engine.record(answered(pick, correct=True, hinted=1 if pick.is_new else 0), now=T0)
+    assert opened.count(True) <= 2, "hinted successes must not unlock more new facts"
+
+
+def test_a_scripted_step_is_served_as_written():
+    """The demo says what it says: a scripted pick counts as met, whatever the
+    state behind it, so the stage wording never moves."""
+    engine = ScriptedScheduler.load(REPO / "demo" / "scenario.json",
+                                    state=LearnerState.new(T0), now=T0)
+    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    pick = engine.next_exercise(T0)
+    assert pick is not None and pick.seen is True
 
 
 def test_a_due_review_from_another_node_may_be_inserted():
