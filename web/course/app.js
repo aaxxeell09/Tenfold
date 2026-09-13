@@ -854,7 +854,11 @@
     }
     toast(LINK_SAY);
   }
-  function sendLesson(payload) { if (socket && socketReady) socket.send(JSON.stringify(payload)); }
+  // every message names the page load it comes from, so the server can tell this page
+  // on a new socket from a genuinely second tab whatever order the messages arrive in
+  function sendLesson(payload) {
+    if (socket && socketReady) socket.send(JSON.stringify(Object.assign({ tab: TAB }, payload)));
+  }
   function onServerMessage(m) {
     if (m.demo && !demoSeeded) seedShowcase();
     if (m.type === "node_end") {
