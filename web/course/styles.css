@@ -558,3 +558,12 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 .welcome .logo { width: 300px; height: auto; display: block; margin-bottom: 4px; }
 .welcome .mascot { width: 190px; height: auto; display: block; animation: sway 3.4s ease-in-out infinite; transform-origin: 50% 92%; }
 .welcome h1 { margin: 6px 0 10px; }
+
+/* Added because the export has no place for it: tally.js builds the 3D Tally as an
+   image stack inside every [data-tally] host and needs a positioning contract. The
+   export uses .tally-art itself as a flat background box, and those are never inside
+   a [data-tally] host, so these rules are scoped and the two never meet. */
+[data-tally] .tally-art { position: relative; display: block; width: 100%; height: 100%; }
+[data-tally] .tally-art .t-base { display: block; width: 100%; height: 100%; object-fit: contain; }
+[data-tally] .tally-art .t-acc { position: absolute; display: block; pointer-events: none; }
+[data-tally] .tally-art .t-acc-back { z-index: 0; }
