@@ -1,6 +1,6 @@
 {
-  "generated_at": "2026-09-13T02:15:18+00:00",
-  "best_version": "1eb4668d9c8f9a6be2ed60fbebcc9be9a0787928",
+  "generated_at": "2026-09-13T02:16:06+00:00",
+  "best_version": "3adc4504067e8242aca6c1efd6a398a971c72ae9",
   "informed": [
     {
       "tag": "v0",
@@ -104,7 +104,7 @@
     {
       "tag": "v1",
       "version": 1,
-      "sha": "1eb4668d9c8f9a6be2ed60fbebcc9be9a0787928",
+      "sha": "3adc4504067e8242aca6c1efd6a398a971c72ae9",
       "ts": "2026-09-13T02:14:48+00:00",
       "kind": "patch",
       "data": {
