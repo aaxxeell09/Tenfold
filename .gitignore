@@ -24,3 +24,5 @@ loop/watch-state.json
 
 # agent worktrees, never committed
 .claude/worktrees/
+data/splits/
+dashboard/__marimo__/

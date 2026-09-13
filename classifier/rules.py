@@ -8,6 +8,12 @@ Hypothesis log (one line per accepted patch, newest last):
 - v1: measured (not the diagnosis's pair-selection guess) that near_contact holds were the biggest failure:
   the correct pair is found but sits just under 0.35, so contact flips true when the label expects false.
   Lowered CONTACT_THRESHOLD to 0.2975 (best passing value from --sweep-all), near_contact_accuracy 0.41 -> 0.73.
+- v2: measured that the diagnosed 6x7/6x8 pair-selection failure (nearest-pair picks index-index over
+  thumb-index) is real but not reachable by any single constant or a recent-frame vote/average without
+  regressing a small class (e.g. 8x10, near:6x10 each lose their one hold). Instead found low-confidence
+  frames (~0.50-0.52, e.g. s000500, s000513, s000560, s000561) slip past UNKNOWN_THRESHOLD and produce a
+  spurious pair on negative/transition samples. Raised UNKNOWN_THRESHOLD to 0.525 (best passing value from
+  --sweep-all), exact_match 0.492 -> 0.497, false_unknown_rate unchanged at 0.047.
 """
 from __future__ import annotations
 
@@ -15,7 +21,7 @@ from classifier import features
 from classifier.schema import GestureState, Window
 
 CONTACT_THRESHOLD = 0.2975  # fingertip distance, in units of mean hand scale
-UNKNOWN_THRESHOLD = 0.5  # below this detection confidence we refuse to answer
+UNKNOWN_THRESHOLD = 0.525  # below this detection confidence we refuse to answer
 
 
 def classify(window: Window) -> GestureState:

@@ -136,3 +136,28 @@ that would teach it the most are exactly the ones it labelled wrong.
 
 So it is a separate arm: `split` is `live`, not `train`, and it is never merged into train without passing the
 held-out gate. The mixing rule, how much of it enters an evaluation and under what weight, is Ilan's to decide.
+## Validation rétrospective, participants non identifiés
+
+```
+make split             # eval/split.py: seed 42, about 20 % of whole holds set aside
+make retro-validate    # eval/retro_validate.py: V0 vs the running rules on those holds, local only
+```
+
+The first critic iterations read the whole dataset, so the holds set aside now are a retrospective check, not
+unseen data and not a test on other people: the dataset records one session and one person label, which do not
+identify participants. Never publish these scores as held-out or "other people".
+
+- Groups are `session::hold_id`, so every window of a hold stays on one side. Byte-identical windows glue their
+  holds into one unit, and a unit spanning several holds stays in train (on the first dataset: windows with no
+  hand detected, shared by holds of many classes). Classes are the strata. `manifest.json` records the seed, the
+  source sha256, every group on each side, counts per class, rare classes and the limits.
+- `data/splits/<name>/train.jsonl` stays in the repo (gitignored). `validation.jsonl` and the manifest go to
+  `../tenfold-validation/<name>/` (mode 700), outside the repo and the critic worktree. `loop/guard.py` rejects any
+  critic tool call that mentions `tenfold-validation` or `validation.jsonl`.
+- The loop keeps reading the whole dataset until `TENFOLD_TRAIN_SAMPLES=data/splits/<name>/train.jsonl` is set in
+  `.env`; `critic.py`, `run_eval.py`, `baseline_knn.py` and `watch.py` then read the train side only, and the next
+  critic run records a data refresh. A split is a snapshot: captures pushed later reach the loop through a new split
+  under a new name, and `watch.py` logs a warning until then.
+- `eval/scorers.py` is frozen and scores `output=None` as a correct `unknown` on negatives, against SPEC.md 5.7.
+  `retro_validate.py` reports every version with the frozen scorers and with `eval/strict.py`, where a missing
+  prediction fails, applied identically to both versions.

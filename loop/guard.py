@@ -28,7 +28,8 @@ ALLOWED_IMPORTS = {"math", "statistics", "dataclasses", "typing", "numpy", "clas
 FORBIDDEN_NAMES = {"open", "exec", "eval", "__import__", "getattr", "setattr", "globals", "locals", "vars",
                    "compile", "breakpoint", "input", "sys", "os", "inspect", "importlib", "subprocess", "socket",
                    "urllib", "pickle", "shutil", "pathlib"}
-FORBIDDEN_TEXT = ("heldout", "held-out", "held_out", "test.jsonl", "tenfold-heldout")
+FORBIDDEN_TEXT = ("heldout", "held-out", "held_out", "test.jsonl", "tenfold-heldout", "tenfold-validation",
+                  "validation.jsonl")
 PATH_FIELDS = ("file_path", "path", "notebook_path")
 MAX_DIFF_LINES = 80
 MAX_FILE_LINES = 400
@@ -179,7 +180,7 @@ def check_transcript(path: Path, worktree: Path) -> list[str]:
             blob = " ".join(_strings(inp)).lower()
             for bad in FORBIDDEN_TEXT:
                 if bad in blob:
-                    out.append(reject("held_out", f"a {block.get('name')} call referenced {bad!r}", "the held-out set is off limits",
+                    out.append(reject("held_out", f"a {block.get('name')} call referenced {bad!r}", "the held-out and validation sets are off limits",
                                       "work only from eval/last_train_report.json and python loop/train_eval.py"))
                     break
             if errored.get(block.get("id"), False):

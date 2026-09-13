@@ -13,6 +13,7 @@ the evaluation is labelled in Weave, so runs that reuse a tag stay apart and the
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -41,7 +42,10 @@ def samples_path(split: str, override: str | None) -> Path:
     if override:
         return Path(override)
     if split == "train":
-        return REPO / "data" / "samples.jsonl"
+        chosen = os.environ.get("TENFOLD_TRAIN_SAMPLES")  # a train split from eval/split.py, else the whole dataset
+        if not chosen:
+            return REPO / "data" / "samples.jsonl"
+        return Path(chosen) if Path(chosen).is_absolute() else REPO / chosen
     return Path(os.environ.get("TENFOLD_HELDOUT", REPO.parent / "tenfold-heldout" / "test.jsonl"))
 
 
@@ -231,6 +235,8 @@ def main() -> int:
     rows = build_rows(samples, predict(Path(args.rules).resolve(), spath))
     metrics = scorers.aggregate(rows)
     metrics["per_slice"] = per_slice(samples, rows)
+    # which scorers produced these numbers: two scores are comparable only with the same data and the same scorers
+    metrics["scorers_sha256"] = hashlib.sha256((REPO / "eval" / "scorers.py").read_bytes()).hexdigest()
     sha = git_sha(REPO)
     print_table(metrics, args.split, args.tag)
 

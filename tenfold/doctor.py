@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
@@ -55,6 +56,36 @@ def check_camera() -> bool:
     return line("PASS", "camera", "camera 0 delivers frames")
 
 
+def check_inference() -> bool:
+    """One five-token chat completion on W&B Inference, the endpoint Tally and the loop's text agents speak through."""
+    key = os.environ.get("WANDB_API_KEY")
+    if not key:
+        return line("WARN", "W&B Inference", "skipped (no WANDB_API_KEY): Tally keeps her fixed phrases",
+                    "put it in .env (wandb.ai/authorize)")
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from lesson.tutor import DEFAULT_BASE_URL, DEFAULT_MODEL
+
+    model = os.environ.get("TENFOLD_TUTOR_MODEL", DEFAULT_MODEL)
+    headers = {"Authorization": f"Bearer {key}"}
+    if os.environ.get("WANDB_INFERENCE_PROJECT"):
+        headers["OpenAI-Project"] = os.environ["WANDB_INFERENCE_PROJECT"]
+    base = (os.environ.get("WANDB_INFERENCE_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
+    fix = "check the key and WANDB_INFERENCE_PROJECT (entity/project), and credits at wandb.ai"
+    try:
+        import httpx
+
+        t0 = time.monotonic()
+        r = httpx.post(f"{base}/chat/completions", headers=headers, timeout=20, json={
+            "model": model, "max_tokens": 5, "messages": [{"role": "user", "content": "Reply with OK."}]})
+        ms = int((time.monotonic() - t0) * 1000)
+    except Exception as e:
+        return line("WARN", "W&B Inference", f"unreachable ({type(e).__name__})", fix)
+    if r.status_code != 200:
+        return line("WARN", "W&B Inference", f"{model}: HTTP {r.status_code}", fix)
+    return line("PASS", "W&B Inference", f"{model} answered in {ms} ms")
+
+
 def main() -> int:
     load_env()
     ok = True
@@ -70,6 +101,7 @@ def main() -> int:
     ok &= line("PASS" if os.environ.get("WANDB_API_KEY") else "WARN", "WANDB_API_KEY",
                "set" if os.environ.get("WANDB_API_KEY") else "not set: Weave tracing off, tutor uses fallback phrases",
                "put it in .env (wandb.ai/authorize)")
+    ok &= check_inference()
     ok &= line("PASS" if os.environ.get("WANDB_API_KEY_HELDOUT") else "WARN", "WANDB_API_KEY_HELDOUT",
                "set" if os.environ.get("WANDB_API_KEY_HELDOUT") else "not set: held-out eval runs locally only",
                "a second W&B account's key, never the critic's")
