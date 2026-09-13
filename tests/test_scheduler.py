@@ -1,12 +1,16 @@
 """lesson/scheduler.py, table driven. Tally's brain.
 
 Time is always passed in, so a week of sessions replays in microseconds and
-nothing here depends on when the suite runs.
+nothing here depends on when the suite runs. The draw is passed in too: every
+Scheduler here is handed a seeded Random, so a failure is the same failure on
+the next run. The rules that must hold whatever the draw gives are checked over
+many seeds rather than one.
 """
 
 from __future__ import annotations
 
 import json
+import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -27,6 +31,11 @@ from lesson.scheduler import (
 
 REPO = Path(__file__).resolve().parents[1]
 T0 = datetime(2026, 9, 13, 10, 0, tzinfo=timezone.utc)
+
+
+def drawn(state: LearnerState | None = None, seed: int = 7) -> Scheduler:
+    """A scheduler whose draw replays: same seed, same lesson, every run."""
+    return Scheduler(state, now=T0, rng=random.Random(seed))
 
 
 def learner(sessions: int = 0, **facts: int) -> LearnerState:
@@ -112,7 +121,7 @@ def test_the_confidence_rule_does_not_apply_to_poses():
 def test_a_pose_error_only_touches_the_pose_and_a_math_error_only_the_fact():
     state = learner(sessions=2, **{"7x8": 3})
     state.pose_record("8x7").mastery = 3
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
 
     engine.record(Outcome(fact="7x8", left=8, right=7, correct=False, pose_error=True),
@@ -181,7 +190,7 @@ def test_a_missed_day_costs_nothing():
 
 def test_a_failed_fact_is_queued_two_exercises_later():
     state = learner(sessions=3, **{"7x8": 2, "6x10": 3, "9x9": 3, "10x10": 4})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     first = engine.next_exercise(T0)
     engine.record(answered(first, correct=False), now=T0)
@@ -193,7 +202,7 @@ def test_a_failed_fact_does_come_back_as_a_retry():
     """The exact slot can slip: the no repeated factor rule may push it out by
     one. What matters is that it comes back, and that it is announced as a retry."""
     state = learner(sessions=3, **{"7x8": 2, "6x10": 3, "9x9": 3, "10x10": 4})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     first = engine.next_exercise(T0)
     engine.record(answered(first, correct=False), now=T0)
@@ -214,20 +223,24 @@ def test_a_failed_fact_does_come_back_as_a_retry():
 
 
 def test_two_errors_in_a_row_buy_a_mastered_fact():
-    state = learner(sessions=3, **{"7x8": 1, "6x9": 1, "10x10": 5, "6x10": 5})
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0)
-    for _ in range(2):
+    """Whatever the draw gave first: the solid facts here cover every table, so
+    the no repeated table rule always leaves one standing."""
+    for seed in range(20):
+        state = learner(sessions=3, **{"6x6": 5, "7x7": 5, "8x8": 5, "9x9": 5,
+                                       "10x10": 5})
+        engine = drawn(state, seed=seed)
+        engine.start_session(T0)
+        for _ in range(2):
+            pick = engine.next_exercise(T0)
+            engine.record(answered(pick, correct=False), now=T0)
         pick = engine.next_exercise(T0)
-        engine.record(answered(pick, correct=False), now=T0)
-    pick = engine.next_exercise(T0)
-    assert pick.reason == sch.REACTION_CONFIDENCE
-    assert state.math[pick.fact].mastery >= sch.MASTERED_FROM
+        assert pick.reason == sch.REACTION_CONFIDENCE, seed
+        assert state.math[pick.fact].mastery >= sch.MASTERED_FROM
 
 
 def test_a_new_fact_opens_only_after_two_first_try_successes():
     state = learner(sessions=3, **{"10x10": 2, "6x10": 2, "7x10": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     opened = []
     for _ in range(6):
@@ -242,7 +255,7 @@ def test_a_new_fact_opens_only_after_two_first_try_successes():
 
 def test_never_the_same_factor_three_times_in_a_row():
     state = learner(sessions=3, **{k.replace("x", "_"): 2 for k in DIFFICULTY_ORDER})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     picks = []
     for _ in range(10):
@@ -263,7 +276,7 @@ def test_never_the_same_factor_three_times_in_a_row():
 
 def test_the_two_orientations_alternate_across_attempts():
     state = learner(sessions=3, **{"7x8": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     seen = []
     for _ in range(4):
@@ -276,7 +289,7 @@ def test_the_two_orientations_alternate_across_attempts():
 
 
 def test_a_doubled_fact_has_only_one_orientation():
-    engine = Scheduler(learner(sessions=3, **{"9x9": 2}), now=T0)
+    engine = drawn(learner(sessions=3, **{"9x9": 2}))
     assert engine._orientation("9x9") == (9, 9)
 
 
@@ -307,20 +320,20 @@ def test_personal_difficulty_takes_over_after_three_sessions():
 
 
 def test_the_first_session_is_the_onboarding_and_later_ones_are_not():
-    engine = Scheduler(LearnerState.new(T0), now=T0)
+    engine = drawn(LearnerState.new(T0))
     started = engine.start_session(T0)
     assert started["onboarding"] is True
     assert [step["kind"] for step in started["steps"]] == ["greeting", "numbers", "guided"]
     assert started["steps"][2]["left"] == 8 and started["steps"][2]["right"] == 7
 
-    again = Scheduler(learner(sessions=1), now=T0).start_session(T0)
+    again = drawn(learner(sessions=1)).start_session(T0)
     assert again["onboarding"] is False and again["steps"] == []
 
 
 def test_the_next_day_plan_is_three_due_one_new_one_mastered():
     state = learner(sessions=2, **{"7x8": 1, "6x10": 2, "9x9": 5})
     state.last_session_at = (T0 - timedelta(days=1)).isoformat()
-    started = Scheduler(state, now=T0).start_session(T0)
+    started = drawn(state).start_session(T0)
     assert started["plan"] == ["due", "due", "due", "new", "mastered"]
     assert started["opening_fact"] == "7x8", "the most fragile fact of last time"
 
@@ -328,13 +341,14 @@ def test_the_next_day_plan_is_three_due_one_new_one_mastered():
 def test_a_second_session_the_same_day_is_not_a_next_day_plan():
     state = learner(sessions=2)
     state.last_session_at = T0.isoformat()
-    started = Scheduler(state, now=T0 + timedelta(hours=1)).start_session(T0 + timedelta(hours=1))
+    later = T0 + timedelta(hours=1)
+    started = Scheduler(state, now=later, rng=random.Random(7)).start_session(later)
     assert started["plan"] == []
 
 
 def test_a_session_always_ends_on_a_success():
     state = learner(sessions=3, **{k.replace("x", "_"): 3 for k in DIFFICULTY_ORDER})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     picks = []
     now = T0
@@ -353,7 +367,7 @@ def test_a_session_always_ends_on_a_success():
 
 def test_the_session_stops_at_ten_exercises():
     state = learner(sessions=3, **{k.replace("x", "_"): 3 for k in DIFFICULTY_ORDER})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     now = T0
     count = 0
@@ -368,7 +382,7 @@ def test_the_session_stops_at_ten_exercises():
 
 def test_the_session_stops_at_six_minutes():
     state = learner(sessions=3, **{k.replace("x", "_"): 3 for k in DIFFICULTY_ORDER})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     pick = engine.next_exercise(T0)
     engine.record(answered(pick), now=T0)
@@ -377,7 +391,7 @@ def test_the_session_stops_at_six_minutes():
 
 def test_the_end_summary_names_what_happened():
     state = learner(sessions=3, **{"7x8": 4, "6x10": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     pick = engine.next_exercise(T0)
     engine.record(answered(pick, correct=False), now=T0)
@@ -416,7 +430,7 @@ def test_the_same_finger_on_both_hands_has_its_own_reaction():
 
 def test_three_fast_successes_earn_a_level_up():
     state = learner(sessions=3, **{"10x10": 3, "6x10": 3, "7x10": 3})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     for _ in range(3):
         pick = engine.next_exercise(T0)
@@ -426,7 +440,7 @@ def test_three_fast_successes_earn_a_level_up():
 
 def test_a_slow_success_breaks_the_fast_streak():
     state = learner(sessions=3, **{"10x10": 3, "6x10": 3, "7x10": 3})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     for seconds in (2.0, 9.0, 2.0):
         pick = engine.next_exercise(T0)
@@ -439,7 +453,7 @@ def test_a_slow_success_breaks_the_fast_streak():
 
 def test_metrics_count_the_session():
     state = learner(sessions=3, **{"7x8": 2, "6x10": 2, "9x9": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     first = engine.next_exercise(T0)
     engine.record(answered(first, seconds=4.0), now=T0)
@@ -461,7 +475,7 @@ def test_retention_is_last_session_failures_passed_without_a_hint():
     state.fact("7x8").attempts.append(
         sch.Attempt(at=T0.isoformat(), correct=False, hinted=False,
                     response_time=9.0, session=3))
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)                 # this becomes session 4
     assert engine.previous_session_failures == {"7x8"}
     engine.record(Outcome(fact="7x8", left=8, right=7, correct=True, response_time=3.0),
@@ -590,7 +604,7 @@ def test_the_pick_rules_hold_even_when_almost_nothing_is_known():
     only two facts on record every candidate gets blocked, and it must reach for
     a legal fact rather than the first one that is merely different."""
     state = learner(sessions=3, **{"10x10": 1, "6x10": 1})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     picks = []
     for _ in range(8):
@@ -609,30 +623,32 @@ def test_the_pick_rules_hold_even_when_almost_nothing_is_known():
             f"{[p.fact for p in picks[:i + 1]]}")
 
 
-# --- course nodes ------------------------------------------------------------
+# --- a course node is a label and a length -----------------------------------
 
 
-def test_a_node_opens_on_its_own_pairs_and_only_teaches_them():
-    """The node is the theme of the lesson, and the only place new material can
-    be opened. The rest of the lesson is practice drawn from the whole range."""
+def test_a_node_fixes_the_length_and_nothing_else():
+    """The node name is a label on the screen. It says how many questions the
+    lesson runs, and it says nothing about which ones."""
     state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    engine = drawn(state)
+    started = engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+    assert started["allowed"] == ["6x6", "7x7"], "the label is still reported"
     picks = []
     for _ in range(5):
         pick = engine.next_exercise(T0)
         assert pick is not None
         picks.append(pick)
         engine.record(answered(pick), now=T0)
-    assert picks[0].fact in {"6x6", "7x7"}, "a lesson opens on the facts it is named after"
-    assert {p.fact for p in picks} >= {"6x6", "7x7"}, "both pairs are served"
-    assert {p.fact for p in picks if p.is_new} <= {"6x6", "7x7"}
+    assert len({p.fact for p in picks}) == 5, "five questions, five facts"
+    for pick in picks:
+        low, high = factors_of(pick.fact)
+        assert low in sch.FACTORS and high in sch.FACTORS
     assert engine.next_exercise(T0) is None, "a lesson is exactly five exercises"
 
 
 def test_a_boss_node_is_eight_exercises():
     state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[7, 8], [8, 9], [9, 9], [6, 10]], length=8)
     count = 0
     while engine.next_exercise(T0) is not None and count < 20:
@@ -644,7 +660,7 @@ def test_a_boss_node_is_eight_exercises():
 def test_a_node_never_adds_a_rescue_exercise():
     """The page scores correct out of the node length, so the length is fixed."""
     state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
     count = 0
     while engine.next_exercise(T0) is not None and count < 20:
@@ -653,79 +669,50 @@ def test_a_node_never_adds_a_rescue_exercise():
     assert count == 5, "all five failed, and still exactly five"
 
 
-def test_a_node_uses_the_orientations_it_lists():
+def test_a_node_does_not_choose_the_hands_either():
+    """The listed orientations are gone with the fence: a fact is asked the way
+    the alternation says, whatever the node was called."""
     state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 8], [8, 6]], length=4)
-    seen = set()
-    for _ in range(4):
-        pick = engine.next_exercise(T0)
-        if pick.fact == "6x8":
-            seen.add((pick.left, pick.right))
-        engine.record(answered(pick), now=T0)
-    assert seen == {(6, 8), (8, 6)}, "both listed orientations are asked"
-
-
-def test_a_node_with_one_orientation_never_flips_it():
-    """The lesson widens past the single pair, but that pair is only ever asked
-    the way the node lists it."""
-    state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[9, 6]], length=3)
-    served = 0
     for _ in range(3):
         pick = engine.next_exercise(T0)
-        if pick.fact == "6x9":
-            served += 1
-            assert (pick.left, pick.right) == (9, 6)
+        assert pick is not None
+        assert (pick.left, pick.right) == engine._orientation(pick.fact)
         engine.record(answered(pick), now=T0)
-    assert served >= 1, "the node's own pair is served"
 
 
-def test_a_widened_fact_the_child_has_never_met_is_not_marked_seen():
-    """The lesson fills its count from the whole range, so it can hand the child
-    a fact for the first time. The pick has to say so, or the phrase layer calls
-    a first meeting a review."""
+def test_a_fact_the_child_has_never_met_is_not_marked_seen():
+    """The draw can hand the child a fact for the first time. The pick has to
+    say so, or the phrase layer calls a first meeting a review."""
     state = LearnerState.new(T0)
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[6, 7], [7, 6]], length=5)
-    picks = []
     for _ in range(5):
         pick = engine.next_exercise(T0)
         assert pick is not None
-        picks.append(pick)
-        engine.record(answered(pick), now=T0)
-
-    widened = [pick for pick in picks if pick.fact != "6x7"]
-    assert widened, "the lesson widened past its node"
-    for pick in widened:
         assert pick.seen is False, f"{pick.fact} was never attempted before"
-        assert pick.is_new is False, "widening is practice, never new material"
+        engine.record(answered(pick), now=T0)
 
 
-def test_a_fact_the_child_has_met_is_marked_seen_wherever_it_comes_from():
-    """Inside the node or outside it, the history is the only thing that counts."""
+def test_a_fact_the_child_has_met_is_marked_seen_wherever_the_draw_lands():
+    """The history is the only thing that counts, and the node is not history."""
     state = learner(sessions=3, **{"10x10": 1, "6x6": 2})
-    state.fact("10x10").due_session = 4
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
-    seen_by_fact = {}
     for _ in range(5):
         pick = engine.next_exercise(T0)
         assert pick is not None
-        seen_by_fact.setdefault(pick.fact, pick.seen)
+        assert pick.seen is (pick.fact in {"10x10", "6x6"}), pick.fact
         engine.record(answered(pick), now=T0)
 
-    assert seen_by_fact.get("10x10") is True, "a due fact from outside was met"
-    assert seen_by_fact.get("6x6") is True, "a node fact with history was met"
-    assert seen_by_fact.get("7x7") is False, "the node's untouched pair was not"
 
-
-def test_being_met_before_does_not_move_the_mastery_gate():
-    """seen is wording only. Two first try successes still gate new material,
-    and a widened fact the child never met is still not new material."""
+def test_being_met_before_is_exactly_what_new_material_means_now():
+    """seen and is_new answer the same question from two sides in a live draw:
+    a fact the child has met is never new, and an unmet fact is new material
+    while the gate is open and plain practice once it is shut."""
     state = learner(sessions=3, **{"10x10": 2, "6x10": 2, "7x10": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     opened = []
     for _ in range(6):
@@ -733,8 +720,8 @@ def test_being_met_before_does_not_move_the_mastery_gate():
         if pick is None:
             break
         opened.append(pick.is_new)
-        if not pick.seen:
-            assert pick.is_new or pick.reason != sch.REACTION_NEXT_NEW
+        if pick.seen:
+            assert pick.is_new is False, "a fact already met is never new material"
         engine.record(answered(pick, correct=True, hinted=1 if pick.is_new else 0), now=T0)
     assert opened.count(True) <= 2, "hinted successes must not unlock more new facts"
 
@@ -749,18 +736,38 @@ def test_a_scripted_step_is_served_as_written():
     assert pick is not None and pick.seen is True
 
 
-def test_a_due_review_from_another_node_may_be_inserted():
-    """Spaced repetition is the point: an old fact can come back mid lesson."""
-    state = learner(sessions=3, **{"10x10": 1})
+def _owed_and_owing() -> LearnerState:
+    """One fact owed right now, one not owed for a week."""
+    state = learner(sessions=3, **{"10x10": 1, "6x7": 4})
     state.fact("10x10").due_session = 4
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
-    facts = []
-    for _ in range(5):
-        pick = engine.next_exercise(T0)
-        facts.append(pick.fact)
-        engine.record(answered(pick), now=T0)
-    assert "10x10" in facts, facts
+    state.fact("6x7").due_at = (T0 + timedelta(days=7)).isoformat()
+    state.fact("6x7").due_session = None
+    return state
+
+
+def test_a_due_fact_waits_its_turn_in_the_draw_like_every_other_one():
+    """Spacing is still recorded and still readable. It no longer chooses: a
+    fact that is owed today comes up about as often as one owed next week,
+    because nothing can be both a uniform draw and a due queue."""
+    sample = _owed_and_owing()
+    assert sch.is_due(sample.math["10x10"], T0, session=4) is True
+    assert sch.is_due(sample.math["6x7"], T0, session=4) is False
+
+    rounds = 900
+    counts = {"10x10": 0, "6x7": 0}
+    for seed in range(rounds):
+        engine = drawn(_owed_and_owing(), seed=seed)
+        engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+        for _ in range(5):
+            pick = engine.next_exercise(T0)
+            assert pick is not None
+            if pick.fact in counts:
+                counts[pick.fact] += 1
+            engine.record(answered(pick), now=T0)
+
+    flat = rounds * 5 / len(DIFFICULTY_ORDER)
+    for key, count in counts.items():
+        assert 0.5 * flat < count < 1.5 * flat, f"{key}: {count} against {flat}"
 
 
 def test_xp_rides_along_on_the_learner_record():
@@ -773,13 +780,12 @@ def test_xp_rides_along_on_the_learner_record():
     assert LearnerState.from_dict({"learner_id": "x"}).xp == 0
 
 
-# --- the opening exercise and the node scope ---------------------------------
+# --- the node label steers nothing -------------------------------------------
 
 
-def test_the_start_check_asks_the_fact_it_is_checking():
-    """A returning learner used to open on the most fragile fact of the whole
-    record, so the one exercise check scoped to 6 x 6 served something else and
-    could never be passed."""
+def test_a_one_question_node_draws_like_any_other():
+    """A check node used to be guaranteed its own fact. The label does not shape
+    what is served any more, so the one question is a draw like the rest."""
     state = learner(sessions=1)
     for key in ("9x9", "9x8"):
         record = state.fact(key)
@@ -787,17 +793,18 @@ def test_the_start_check_asks_the_fact_it_is_checking():
                                        correct=False, hinted=False, response_time=9.0,
                                        session=1)]
     state.last_session_at = (T0 - timedelta(days=1)).isoformat()
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     started = engine.start_session(T0, pairs=[[6, 6]], length=1)
 
-    assert started["allowed"] == ["6x6"]
-    assert started["opening_fact"] in (None, "6x6")
+    assert started["allowed"] == ["6x6"], "the label is reported, and that is all"
     pick = engine.next_exercise(T0)
-    assert pick is not None and pick.fact == "6x6" and (pick.left, pick.right) == (6, 6)
-    assert engine.outside_reviews == 0
+    assert pick is not None and pick.fact in DIFFICULTY_ORDER
+    engine.record(answered(pick), now=T0)
+    assert engine.next_exercise(T0) is None, "one question, as the node says"
 
 
-def test_the_opening_exercise_is_the_fragile_fact_of_the_node_and_costs_nothing():
+def _yesterday() -> LearnerState:
+    """A child who played yesterday and left three facts behind."""
     state = learner(sessions=1)
     for key, mastery in (("6x6", 0), ("7x7", 2), ("10x10", 0)):
         record = state.fact(key)
@@ -807,21 +814,26 @@ def test_the_opening_exercise_is_the_fragile_fact_of_the_node_and_costs_nothing(
                                        response_time=4.0, session=1)]
         sch.schedule_next(record, T0 - timedelta(days=1), 1)
     state.last_session_at = (T0 - timedelta(days=1)).isoformat()
-    engine = Scheduler(state, now=T0)
-    started = engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
-
-    assert started["opening_fact"] == "6x6", "the fragile fact of the node, not of the record"
-    pick = engine.next_exercise(T0)
-    assert pick.fact == "6x6" and pick.reason == sch.REACTION_REVIEW
-    assert engine.outside_reviews == 0, "an opening in scope spends no outside review"
+    return state
 
 
-def test_a_lesson_widens_past_its_node_to_fill_the_count():
-    """The node cannot fill five questions with two pairs without repeating, so
-    the lesson draws on the other tables once its own theme is served."""
+def test_the_fragile_fact_is_named_but_no_longer_opens_the_session():
+    """The record still says what is most fragile, for the summary and for the
+    trace. It is a note now: the first question is drawn like every other one."""
+    opening = set()
+    for seed in range(40):
+        engine = drawn(_yesterday(), seed=seed)
+        started = engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
+        assert started["opening_fact"] == "10x10", "the fragile fact of the record"
+        pick = engine.next_exercise(T0)
+        assert pick is not None
+        opening.add(pick.fact)
+    assert len(opening) > 1, f"the first question is drawn, not decreed: {opening}"
+
+
+def test_a_lesson_draws_from_the_whole_range_whatever_the_node_is_called():
     state = learner(sessions=3, **{"10x10": 5, "6x10": 5, "9x9": 4, "7x10": 1})
-    state.fact("7x10").due_session = 4
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
     facts = []
     for _ in range(5):
@@ -830,38 +842,34 @@ def test_a_lesson_widens_past_its_node_to_fill_the_count():
         facts.append(pick.fact)
         engine.record(answered(pick), now=T0)
 
-    assert facts[0] in {"6x6", "7x7"}, "the theme still opens the lesson"
-    assert {"6x6", "7x7"} <= set(facts), "the theme is served"
-    outside = [key for key in facts if key not in {"6x6", "7x7"}]
-    assert len(outside) == 3, facts
-    assert engine.outside_reviews == 3, "the count is kept, it is no longer a budget"
+    assert len(set(facts)) == 5, facts
+    assert set(facts) - {"6x6", "7x7"}, "the draw is not the label"
 
 
-def test_the_confidence_exercise_prefers_the_node_then_widens():
-    """Two errors buy a solid fact. The node's own solid fact comes first, and
-    when it is the fact that was just missed the lesson reaches outside rather
-    than hand back the question the child has just failed."""
-    state = learner(sessions=3, **{"10x10": 5, "6x10": 5, "6x6": 1, "7x7": 5,
-                                   "8x9": 5})
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 6], [8, 9]], length=5)
-    first = engine.next_exercise(T0)
-    assert first.fact == "6x6", "the fragile fact of the node opens"
-    engine.record(answered(first, correct=False), now=T0)
-    second = engine.next_exercise(T0)
-    engine.record(answered(second, correct=False), now=T0)
-    pick = engine.next_exercise(T0)
-    assert pick.reason == sch.REACTION_CONFIDENCE
-    assert state.math[pick.fact].mastery >= sch.MASTERED_FROM
-    assert pick.fact not in {first.fact, second.fact}, "never the fact just failed"
+def test_the_confidence_exercise_is_a_fact_the_child_owns():
+    """Two errors buy a solid fact, from anywhere in six to ten, and never the
+    question the child has just failed."""
+    for seed in range(20):
+        state = learner(sessions=3, **{"6x6": 5, "7x7": 5, "8x8": 5, "9x9": 5,
+                                       "10x10": 5})
+        engine = drawn(state, seed=seed)
+        engine.start_session(T0, pairs=[[6, 6], [8, 9]], length=5)
+        first = engine.next_exercise(T0)
+        engine.record(answered(first, correct=False), now=T0)
+        second = engine.next_exercise(T0)
+        engine.record(answered(second, correct=False), now=T0)
+        pick = engine.next_exercise(T0)
+        assert pick.reason == sch.REACTION_CONFIDENCE, seed
+        assert state.math[pick.fact].mastery >= sch.MASTERED_FROM
+        assert pick.fact not in {first.fact, second.fact}, "never the fact just failed"
 
 
-def test_mastered_facts_are_only_the_ones_in_scope():
+def test_mastered_facts_are_every_fact_the_child_owns():
     state = learner(sessions=3, **{"10x10": 5, "7x7": 4, "6x6": 1})
-    engine = Scheduler(state, now=T0)
-    assert "10x10" in engine._mastered_facts()
+    engine = drawn(state)
+    assert engine._mastered_facts() == ["10x10", "7x7"]
     engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
-    assert engine._mastered_facts() == ["7x7"]
+    assert engine._mastered_facts() == ["10x10", "7x7"], "the node does not narrow it"
 
 
 # --- the orientation keeps alternating ---------------------------------------
@@ -871,7 +879,7 @@ def test_the_orientation_keeps_alternating_past_five_attempts():
     """Only the last five attempts are kept, so the alternation used to freeze
     on the sixth and the child only ever saw one hand order after that."""
     state = learner(sessions=3, **{"7x8": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     seen = []
     for _ in range(10):
@@ -882,18 +890,16 @@ def test_the_orientation_keeps_alternating_past_five_attempts():
     assert seen[0::2] == [seen[0]] * 5 and seen[1::2] == [seen[1]] * 5
 
 
-def test_a_node_orientation_keeps_alternating_over_a_long_session():
-    state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 8], [8, 6]], length=10)
-    seen = []
-    for _ in range(10):
-        pick = engine.next_exercise(T0)
-        assert pick is not None
-        if pick.fact == "6x8":
-            seen.append((pick.left, pick.right))
-        engine.record(answered(pick), now=T0)
-    assert seen == [(6, 8), (8, 6)] or seen == [(8, 6), (6, 8)], seen
+def test_a_fact_asked_twice_is_asked_the_other_way_round():
+    """The two orientations are two questions, and the alternation is what
+    tells them apart across a fact's attempts."""
+    state = learner(sessions=3, **{"6x8": 2})
+    engine = drawn(state)
+    engine.start_session(T0, pairs=[[6, 8]], length=10)
+    first = engine._orientation("6x8")
+    engine.record(Outcome(fact="6x8", left=first[0], right=first[1], correct=True,
+                          response_time=3.0), now=T0)
+    assert engine._orientation("6x8") == (first[1], first[0])
 
 
 # --- variety -----------------------------------------------------------------
@@ -901,41 +907,96 @@ def test_a_node_orientation_keeps_alternating_over_a_long_session():
 
 def test_a_five_question_lesson_serves_five_different_facts():
     """The complaint that started this: every lesson repeated the same facts.
-    Two pairs cannot fill five questions, so the lesson widens."""
-    state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 7], [7, 8]], length=5)
-    facts = []
-    for _ in range(5):
-        pick = engine.next_exercise(T0)
-        assert pick is not None
-        facts.append(pick.fact)
-        engine.record(answered(pick), now=T0)
-    assert len(set(facts)) == 5, facts
-    assert facts[0] in {"6x7", "7x8"}, "and it still opens on its own theme"
+    Fifteen facts, five questions, five of them, whatever the seed."""
+    for seed in range(40):
+        state = learner(sessions=3)
+        engine = drawn(state, seed=seed)
+        engine.start_session(T0, pairs=[[6, 7], [7, 8]], length=5)
+        facts = []
+        for _ in range(5):
+            pick = engine.next_exercise(T0)
+            assert pick is not None
+            facts.append(pick.fact)
+            engine.record(answered(pick), now=T0)
+        assert len(set(facts)) == 5, f"seed {seed}: {facts}"
+
+
+def test_the_draw_is_uniform_over_the_fifteen_facts_and_not_clustered():
+    """A long run. Every fact of six to ten comes up, and none of them runs away
+    with the lesson: the first question of a session is a flat draw over the
+    fifteen, and a whole session stays close to flat once the no repeated table
+    rule has had its say. That rule is the only thing that bends the draw, and
+    it bends it the same way for everyone: a double carries one factor instead
+    of two, so fewer questions block it and it comes up about a third more often
+    than a mixed fact. The band here is wide enough for that and far too narrow
+    for a fence."""
+    first: dict[str, int] = {}
+    every: dict[str, int] = {}
+    rounds = 1500
+    for seed in range(rounds):
+        engine = drawn(learner(sessions=3), seed=seed)
+        engine.start_session(T0, length=5)
+        for index in range(5):
+            pick = engine.next_exercise(T0)
+            assert pick is not None
+            if index == 0:
+                first[pick.fact] = first.get(pick.fact, 0) + 1
+            every[pick.fact] = every.get(pick.fact, 0) + 1
+            engine.record(answered(pick), now=T0)
+
+    assert set(first) == set(DIFFICULTY_ORDER), "every fact opens a session"
+    flat = rounds / len(DIFFICULTY_ORDER)
+    assert max(first.values()) < 1.5 * flat, first
+    assert min(first.values()) > 0.5 * flat, first
+
+    assert set(every) == set(DIFFICULTY_ORDER)
+    flat = rounds * 5 / len(DIFFICULTY_ORDER)
+    assert max(every.values()) < 1.5 * flat, every
+    assert min(every.values()) > 0.5 * flat, every
+
+
+def test_the_node_label_does_not_make_its_pairs_any_likelier():
+    """The proof that the fence is gone: the same long run on a two pair node
+    serves those two pairs no more often than chance does."""
+    rounds = 1500
+    counts = {"6x7": 0, "8x9": 0}
+    for seed in range(rounds):
+        engine = drawn(learner(sessions=3), seed=seed)
+        engine.start_session(T0, pairs=[[6, 7], [8, 9]], length=5)
+        for _ in range(5):
+            pick = engine.next_exercise(T0)
+            assert pick is not None
+            if pick.fact in counts:
+                counts[pick.fact] += 1
+            engine.record(answered(pick), now=T0)
+
+    flat = rounds * 5 / len(DIFFICULTY_ORDER)
+    for key, count in counts.items():
+        assert count < 1.5 * flat, f"{key} is favoured: {count} against {flat}"
+        assert count > 0.5 * flat, f"{key} is shunned: {count} against {flat}"
 
 
 def test_a_wrong_fact_comes_back_and_is_the_only_repeat():
-    state = learner(sessions=3)
-    engine = Scheduler(state, now=T0)
-    engine.start_session(T0, pairs=[[6, 7], [7, 8]], length=6)
-    facts = []
-    for index in range(6):
-        pick = engine.next_exercise(T0)
-        assert pick is not None
-        facts.append(pick.fact)
-        engine.record(answered(pick, correct=index > 0), now=T0)
-    missed = facts[0]
-    assert facts.count(missed) == 2, f"the missed fact comes back: {facts}"
-    assert len(facts) - len(set(facts)) == 1, f"and nothing else repeats: {facts}"
+    for seed in range(40):
+        state = learner(sessions=3)
+        engine = drawn(state, seed=seed)
+        engine.start_session(T0, pairs=[[6, 7], [7, 8]], length=6)
+        facts = []
+        for index in range(6):
+            pick = engine.next_exercise(T0)
+            assert pick is not None
+            facts.append(pick.fact)
+            engine.record(answered(pick, correct=index > 0), now=T0)
+        missed = facts[0]
+        assert facts.count(missed) == 2, f"seed {seed}, the missed fact comes back: {facts}"
+        assert len(facts) - len(set(facts)) == 1, f"seed {seed}, nothing else repeats: {facts}"
 
 
 def test_orientation_flips_when_a_fact_comes_back():
-    """A double has one orientation and a node keeps the ones it lists, so this
-    is the open session and a plain fact: asked again, it is asked the other way
-    round."""
+    """The retry is the one repeat of a session, and it is asked the other way
+    round: the two orientations are two questions."""
     state = learner(sessions=3, **{k.replace("x", "_"): 2 for k in DIFFICULTY_ORDER})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     poses: dict[str, list[tuple[int, int]]] = {}
     missed: str | None = None
@@ -957,30 +1018,31 @@ def test_orientation_flips_when_a_fact_comes_back():
 
 
 def test_never_the_same_table_twice_in_a_row_over_a_long_session():
-    for pairs, length in (([[6, 7], [7, 8]], 10), ([[9, 9]], 8), (None, None)):
-        state = learner(sessions=3, **{k.replace("x", "_"): 2 for k in DIFFICULTY_ORDER})
-        engine = Scheduler(state, now=T0)
-        engine.start_session(T0, pairs=pairs, length=length)
-        picks = []
-        for _ in range(length or 10):
-            pick = engine.next_exercise(T0)
-            if pick is None:
-                break
-            picks.append(pick)
-            engine.record(answered(pick), now=T0)
-        assert len(picks) >= 6, picks
-        for i in range(1, len(picks)):
-            shared = set(factors_of(picks[i].fact)) & set(factors_of(picks[i - 1].fact))
-            assert not shared, (
-                f"table {shared} twice in a row at {i} for {pairs}: "
-                f"{[p.fact for p in picks[:i + 1]]}")
+    for seed in range(20):
+        for pairs, length in (([[6, 7], [7, 8]], 10), ([[9, 9]], 8), (None, None)):
+            state = learner(sessions=3, **{k.replace("x", "_"): 2 for k in DIFFICULTY_ORDER})
+            engine = drawn(state, seed=seed)
+            engine.start_session(T0, pairs=pairs, length=length)
+            picks = []
+            for _ in range(length or 10):
+                pick = engine.next_exercise(T0)
+                if pick is None:
+                    break
+                picks.append(pick)
+                engine.record(answered(pick), now=T0)
+            assert len(picks) >= 6, picks
+            for i in range(1, len(picks)):
+                shared = set(factors_of(picks[i].fact)) & set(factors_of(picks[i - 1].fact))
+                assert not shared, (
+                    f"seed {seed}, table {shared} twice in a row at {i} for {pairs}: "
+                    f"{[p.fact for p in picks[:i + 1]]}")
 
 
-def test_a_first_lesson_opens_on_its_pairs_and_draws_from_the_whole_range():
+def test_a_first_lesson_draws_from_the_whole_range():
     """A brand new child has no history to unlock anything with, and does not
     need one: the tables are six to ten for everybody."""
     state = LearnerState.new(T0)
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[6, 7], [7, 6]], length=5)
     facts = []
     for _ in range(5):
@@ -988,9 +1050,7 @@ def test_a_first_lesson_opens_on_its_pairs_and_draws_from_the_whole_range():
         assert pick is not None
         facts.append(pick.fact)
         engine.record(answered(pick), now=T0)
-    assert facts[0] == "6x7", "the lesson opens on the pair it is named after"
-    assert len(set(facts)) >= 4, facts
-    assert set(facts) - {"6x7"}, "and it draws on the other tables to fill up"
+    assert len(set(facts)) == 5, facts
     for key in facts:
         low, high = factors_of(key)
         assert low in sch.FACTORS and high in sch.FACTORS
@@ -1011,7 +1071,7 @@ POSE_HAND_CASES = [
 @pytest.mark.parametrize("hand,kind", POSE_HAND_CASES, ids=[c[0] for c in POSE_HAND_CASES])
 def test_a_pose_error_is_filed_against_the_hand_that_was_wrong(hand, kind):
     state = learner(sessions=3, **{"7x8": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     engine.record(Outcome(fact="7x8", left=8, right=7, correct=False, pose_error=True,
                           wrong_hand=hand), now=T0)
@@ -1024,7 +1084,7 @@ def test_a_pose_error_on_a_double_is_filed_by_the_hand_not_by_the_symmetry():
     """6x6, 7x7, 8x8, 9x9 and 10x10 used to file every pose error as the right
     hand, and every other fact as the left."""
     state = learner(sessions=3, **{"9x9": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     engine.record(Outcome(fact="9x9", left=9, right=9, correct=False, pose_error=True,
                           wrong_hand="left"), now=T0)
@@ -1034,7 +1094,7 @@ def test_a_pose_error_on_a_double_is_filed_by_the_hand_not_by_the_symmetry():
 
 def test_a_pose_error_with_no_hand_named_is_filed_against_neither():
     state = learner(sessions=3, **{"7x8": 2})
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0)
     engine.record(Outcome(fact="7x8", left=8, right=7, correct=False, pose_error=True),
                   now=T0)
@@ -1067,14 +1127,14 @@ def _play(engine: Scheduler, seconds=lambda n: 3.0, limit: int = 30) -> int:
 
 
 def test_an_open_session_runs_to_the_maximum_when_it_is_going_well():
-    engine = Scheduler(_steady_learner(same_day=True), now=T0)
+    engine = drawn(_steady_learner(same_day=True))
     started = engine.start_session(T0)
     assert started["plan"] == []
     assert _play(engine) == sch.SESSION_MAX_EXERCISES
 
 
 def test_a_next_day_session_stops_once_its_plan_is_played():
-    engine = Scheduler(_steady_learner(same_day=False), now=T0)
+    engine = drawn(_steady_learner(same_day=False))
     started = engine.start_session(T0)
     assert started["plan"] == list(sch.NEXT_DAY_PLAN)
     count = _play(engine)
@@ -1082,7 +1142,7 @@ def test_a_next_day_session_stops_once_its_plan_is_played():
 
 
 def test_an_open_session_that_slows_down_stops_before_the_maximum():
-    engine = Scheduler(_steady_learner(same_day=True), now=T0)
+    engine = drawn(_steady_learner(same_day=True))
     engine.start_session(T0)
     count = _play(engine, seconds=lambda n: 2.0 if n <= 3 else 12.0)
     assert count == sch.SESSION_MIN_EXERCISES
@@ -1090,7 +1150,7 @@ def test_an_open_session_that_slows_down_stops_before_the_maximum():
 
 
 def test_a_node_keeps_its_own_length_whatever_the_open_shape_says():
-    engine = Scheduler(_steady_learner(same_day=True), now=T0)
+    engine = drawn(_steady_learner(same_day=True))
     engine.start_session(T0, pairs=[[6, 6], [7, 7]], length=5)
     assert _play(engine) == 5
 
@@ -1130,10 +1190,10 @@ def test_a_malformed_record_never_raises_and_still_runs_a_lesson(name, raw):
     assert all(isinstance(record, Record) for record in state.pose.values())
     assert set(state.error_profile) == set(sch.ERROR_KINDS)
 
-    engine = Scheduler(state, now=T0)
+    engine = drawn(state)
     engine.start_session(T0, pairs=[[6, 6]], length=1)
     pick = engine.next_exercise(T0)
-    assert pick is not None and pick.fact == "6x6"
+    assert pick is not None and pick.fact in DIFFICULTY_ORDER
     engine.record(answered(pick), now=T0)
     assert engine.next_exercise(T0) is None
     json.dumps(state.to_dict())                 # and it still round trips
