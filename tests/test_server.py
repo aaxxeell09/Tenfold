@@ -968,12 +968,13 @@ class StubObservation:
     """app/tutor.py's Observation, with the fields the seam fills in."""
 
     def __init__(self, gesture=None, fingers=(), hands_seen=0, hint=None,
-                 motion=None) -> None:
+                 motion=None, palm=None) -> None:
         self.gesture = gesture
         self.fingers = list(fingers)
         self.hands_seen = hands_seen
         self.hint = hint
         self.motion = motion
+        self.palm = palm
 
 
 class StubTutor:
@@ -993,6 +994,7 @@ class StubTutor:
         self.log = log
         self.handed: list[float] = []
         self.observations: list[tuple[str, float, float]] = []
+        self.palms: list[float | None] = []
         self.events: list[tuple[str, object]] = []
         self.decision: dict = {}
         self.early_stop = False
@@ -1005,6 +1007,7 @@ class StubTutor:
             return self.decision
         self._taken_at = now
         self.observations.append((obs.gesture.method, obs.motion, now))
+        self.palms.append(getattr(obs, "palm", None))
         self.events.append(("hint", obs.hint) if obs.hint else ("observe", None))
         return self.decision
 
@@ -1928,3 +1931,19 @@ def test_a_bare_client_owns_its_hello_session_and_can_take_it_back():
     assert lesson.owner is again
     lesson.command({"type": "next"}, client=again)
     assert len(lesson.scheduler.outcomes) == 1
+
+
+def test_the_palm_the_camera_measured_reaches_the_tutor():
+    """A gap between two fingertips means nothing without the palm it is read in.
+
+    app/server.py already measures it for the motion meter. The tutor needs the
+    same number to tell a touch from a pose held ten centimetres apart, so it
+    rides with the fingertips rather than being estimated twice.
+    """
+    lesson = _tutored()
+    lesson.command({"type": "start_node", "node": _node(count=1), "state": None})
+    gesture = GestureState(method="6-10", left=6, right=6, contact=True, confidence=0.9)
+    lesson.observe(gesture, _hands(), 2, 0.0, palm=0.11)
+    lesson.observe(gesture, _hands(), 2, 1.0)
+
+    assert lesson.tutor.tutor.palms == [0.11, None], "measured, then not measured"
