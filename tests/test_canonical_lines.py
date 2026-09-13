@@ -37,16 +37,10 @@ REPO = Path(__file__).resolve().parents[1]
 LINES_FILE = REPO / "lesson" / "tally_lines.json"
 
 PYTHON_FILES = ("lesson/tally.py", "app/tutor.py", "app/server.py")
-# The page still holds phrases the export and the older screens wrote into it.
-# They are being moved into lesson/tally_lines.json by the agent that holds
-# app.js; until that lands this arm is a known failure rather than a gate on
-# the rest of the audit, which is green. Remove the mark with the move.
-JS_FILES = (
-    pytest.param("web/course/app.js",
-                 marks=pytest.mark.xfail(
-                     strict=True,
-                     reason="app.js phrases not yet moved to tally_lines.json")),
-)
+# The page reads its lines from the file like every other layer, so it is audited
+# like every other layer: the phrases the export and the older screens wrote into
+# it have moved into lesson/tally_lines.json, under the page's own keys.
+JS_FILES = ("web/course/app.js",)
 
 MIN_WORDS = 3
 SENTENCE_END = (".", "!", "?")

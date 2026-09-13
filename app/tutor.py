@@ -211,10 +211,19 @@ LAUNCH_KEY = "launch"
 # The opening call for hands that are not in frame yet. It is a child's line,
 # not the reminder of a camera failure, so it has its own key and its own clock.
 HANDS_PROMPT_KEY = "hands_come_here"
-# Lines the page says and the tutor never renders: the three steps of the start
-# gate. They live in the same file because Tally has one voice, and the server
-# hands them to the page rather than the page writing them out again.
-PAGE_LINE_KEYS = ("gate_ready",)
+# Lines the page says and the tutor never renders: the ready gate, the home and
+# path bubbles, the finish card, the profile. They live in the same file because
+# Tally has one voice, and the page reads them from it rather than writing a
+# sentence of its own.
+PAGE_LINE_KEYS = (
+    "gate_ready", "home_greeting", "home_greeting_plain", "home_camera_live",
+    "showcase_unit_1", "showcase_unit_2", "showcase_unit_3",
+    "path_next", "path_chest", "path_boss", "path_all_done", "path_locked",
+    "show_both_hands", "gate_hands_ok", "gate_pose", "gate_pose_ok",
+    "gate_banner", "gate_path_open", "link_trouble",
+    "finish_need", "finish_unlocked", "finish_more_stars", "level_up_card",
+    "profile_top_level",
+)
 # Lines the server says when perception is gone or the tab is not the one
 # playing. They are Tally's voice too, so they live in the line file and not in
 # app/server.py, where two of them used to be typed out.
