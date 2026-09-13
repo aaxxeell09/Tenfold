@@ -39,13 +39,30 @@ def git(repo: Path, *args: str) -> str:
     return p.stdout if p.returncode == 0 else ""
 
 
+def git_bytes(repo: Path, *args: str) -> bytes:
+    p = subprocess.run(["git", *args], cwd=repo, capture_output=True)
+    return p.stdout if p.returncode == 0 else b""
+
+
 def version_rows(metrics: dict | None, repo: Path, with_diff: bool) -> list[dict]:
+    """One row per evaluated version, with the identity of what was scored: the sha256 of classifier/rules.py at the
+    version's commit, and the scorers' sha256 as recorded with the metrics or, for versions evaluated before it was
+    recorded, the sha256 of eval/scorers.py at that same commit. The dashboard only compares rows whose data and
+    scorers are both identified and equal."""
     rows = []
     for v in (metrics or {}).get("versions", []):
         row = {k: v.get(k) for k in ("tag", "version", "sha", "ts", "kind", "data", "diagnosis", "patch_hypothesis",
                                      "patch", "expected", "gate", "spent_usd")}
         row["train"], row["heldout"] = slim(v.get("train")), slim(v.get("heldout"))
         sha = v.get("sha")
+        known = bool(sha and sha != "no-commit")
+        rules = git_bytes(repo, "show", f"{sha}:classifier/rules.py") if known else b""
+        scorers = git_bytes(repo, "show", f"{sha}:eval/scorers.py") if known else b""
+        row["rules_sha256"] = hashlib.sha256(rules).hexdigest() if rules else None
+        recorded = (v.get("train") or {}).get("scorers_sha256")
+        row["scorers"] = ({"sha256": recorded, "source": "recorded with the metrics"} if recorded else
+                          {"sha256": hashlib.sha256(scorers).hexdigest(), "source": "eval/scorers.py at the version commit"}
+                          if scorers else None)
         if with_diff and sha and sha != "no-commit" and (v.get("version") or 0) > 0:
             row["diff"] = git(repo, "show", "--format=", sha, "--", "classifier/rules.py")[:12000]
         rows.append(row)
@@ -151,20 +168,29 @@ def explorer(repo: Path, informed: dict | None) -> dict | None:
     first = git(repo, "log", "--reverse", "--format=%H", "--", "classifier/rules.py").split()
     if first:
         try:
+            first_rules = git_bytes(repo, "show", f"{first[0]}:classifier/rules.py")
             with tempfile.TemporaryDirectory() as tmp:
                 first_path = Path(tmp) / "rules_first.py"
-                first_path.write_text(git(repo, "show", f"{first[0]}:classifier/rules.py"))
+                first_path.write_bytes(first_rules)
                 first_mod = load_rules(first_path)
                 first_metrics, _ = evaluate(first_mod.classify, samples)
             now_metrics, _ = evaluate(mod.classify, samples)
             near = [s for s in samples if s.get("kind") == "near_contact"]
             last = git(repo, "log", "-1", "--format=%H", "--", "classifier/rules.py").strip()
-            compare = {"a": {"commit": first[0], "constants": numeric_constants(first_mod), **{k: first_metrics.get(k) for k in METRICS}},
-                       "b": {"commit": last, "constants": constants, **{k: now_metrics.get(k) for k in METRICS}},
+            compare = {"a": {"commit": first[0], "rules_sha256": hashlib.sha256(first_rules).hexdigest(),
+                             "constants": numeric_constants(first_mod), **{k: first_metrics.get(k) for k in METRICS}},
+                       "b": {"commit": last, "rules_sha256": hashlib.sha256(rules_path.read_bytes()).hexdigest(),
+                             "constants": constants, **{k: now_metrics.get(k) for k in METRICS}},
+                       "data_sha": data_sha, "scorers_sha256": hashlib.sha256((repo / "eval" / "scorers.py").read_bytes()).hexdigest(),
                        "windows": len(samples), "holds": len({s.get("hold_id", s["id"]) for s in samples}),
                        "near_windows": len(near), "near_holds": len({s.get("hold_id", s["id"]) for s in near})}
         except Exception as e:  # a V0 that no longer loads must not take the rest of the snapshot down
             compare = {"error": f"{type(e).__name__}: {e}"}
+    # the grid the hand explorable answers on, plus the exact touch limits of V0 and of the rule in use, so the
+    # dashboard's before and after buttons land on a precomputed answer instead of the nearest one
+    first_limit = (((compare or {}).get("a") or {}).get("constants") or {}).get("CONTACT_THRESHOLD")
+    contact_grid = sorted({*CONTACT_GRID, *(round(float(x), 4) for x in (constants.get("CONTACT_THRESHOLD"), first_limit)
+                                           if isinstance(x, (int, float)))})
 
     sweep = {}
     for name, value in constants.items():
@@ -201,7 +227,7 @@ def explorer(repo: Path, informed: dict | None) -> dict | None:
             left, right = features.last_valid_frame(window)
             answers = []
             if "CONTACT_THRESHOLD" in constants:
-                for t in CONTACT_GRID:
+                for t in contact_grid:
                     mod.CONTACT_THRESHOLD = t
                     answers.append({"threshold": t, **{k: v for k, v in mod.classify(window).to_dict().items()
                                                       if k in ("method", "left", "right", "contact")}})

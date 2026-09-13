@@ -1,4 +1,4 @@
-/* Tenfold dashboard styles. One neutral ground, one indigo accent, semantic green, red and amber.
+/* Nimble dashboard styles. One neutral ground, one indigo accent, semantic green, red and amber.
    Geist for text and numbers (tabular figures), Instrument Serif for the claim titles. */
 @import url("https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&family=Instrument+Serif:ital@0;1&display=swap");
 
@@ -66,7 +66,8 @@
 .tf-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); gap: 1px; background: var(--tf-line);
   border: 1px solid var(--tf-line); border-radius: 16px; overflow: hidden; margin-top: 30px; }
 .tf-kpi { background: #fff; padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 8px; min-height: 158px; }
-.tf-kpi-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.tf-kpi-top { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 6px 8px; }
+.tf-kpi-top .tf-pill { white-space: normal; }
 .tf-kpi-label { font-size: 13px; line-height: 1.35; color: var(--tf-ink-2); font-weight: 500; }
 .tf-kpi-value { font: 500 32px/1.05 var(--tf-mono); letter-spacing: -0.04em; color: var(--tf-ink); white-space: nowrap; }
 .tf-kpi-value .tf-from { color: var(--tf-faint); }
@@ -82,6 +83,16 @@
 .tf-hint { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; line-height: 1.4; color: var(--tf-accent-ink);
   background: var(--tf-accent-tint); border-radius: 8px; padding: 7px 11px; }
 .tf-label { font: 500 12px/1.3 var(--marimo-text-font); letter-spacing: 0.06em; text-transform: uppercase; color: var(--tf-muted); }
+.tf-measure { margin-top: 12px; display: flex; gap: 8px; align-items: flex-start; font-size: 13px; line-height: 1.5; color: var(--tf-ink-2); }
+.tf-measure .tf-icon { margin-top: 2px; color: var(--tf-muted); }
+.tf-limits { margin: 0 0 18px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.tf-limits .tf-label { margin-right: 4px; color: var(--tf-warn); }
+.tf-kicker { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
+.tf-kicker-title { font-weight: 600; font-size: 15px; color: var(--tf-ink); }
+.tf-kicker-value { font-size: 13px; color: var(--tf-ink-2); }
+.tf-kicker-note { font-size: 12px; line-height: 1.45; color: var(--tf-muted); margin-top: 2px; }
+.tf-chart-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--tf-muted); }
 
 /* the loop */
 .tf-loop { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }

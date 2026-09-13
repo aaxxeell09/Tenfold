@@ -99,6 +99,11 @@ recover frames where MediaPipe lost a hand.
 `{exact_match, false_unknown_rate, n_samples, n_holds}`; `angle=side`, `distance=far`, ...; absent on versions
 evaluated before it existed). Any metric can be null.
 
+Every `informed` row also carries `rules_sha256` (classifier/rules.py at the row's commit) and `scorers`
+(`{"sha256", "source"}`: recorded with the metrics, or eval/scorers.py at the row's commit). `explorer.compare` carries
+`data_sha`, `scorers_sha256` and `rules_sha256` for `a` and `b`. The dashboard compares two scores only when data and
+scorers are both identified and equal, and says "not verified" otherwise.
+
 Chart mapping (SPEC section 10): held-out `exact_match` by version for `informed` (solid green) and `blind`
 (solid grey), train dashed, `knn_heldout.exact_match` dotted, `detection_ceiling.both_hands_contact_frames`
 horizontal, CI bands from `exact_match_ci95`, commit subject on hover, `diff` under the fold.

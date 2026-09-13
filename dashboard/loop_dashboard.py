@@ -1,23 +1,23 @@
-"""Tenfold loop report: how AI agents teach a finger multiplication tutor to read children's hands, what they
+"""Nimble loop report: how AI agents teach a finger multiplication tutor to read children's hands, what they
 proved and where the evidence stops. A marimo app over one file, data/snapshot.json, styled by dashboard/tenfold.css.
 
     make dashboard                               # marimo run dashboard/loop_dashboard.py
     marimo edit dashboard/loop_dashboard.py      # to change it
     TENFOLD_SNAPSHOT=/path/snapshot.json marimo run dashboard/loop_dashboard.py
 
-No W&B key and no repo needed: without a local snapshot it reads the one committed on GitHub, so it runs on molab
-and as WebAssembly. The loop rewrites and pushes the snapshot after every accepted version (loop/watch.py).
+Snapshot order: $TENFOLD_SNAPSHOT, then this repository's data/snapshot.json, then the working directory's, then the
+one committed on GitHub main. The footer names the one loaded and the top of the page lists what it lacks.
 
-Few words, each one earning its place: four measured numbers; 01 the loop as six stages with how often each said no;
-02 the hard case (almost touching) on real hand landmarks with a touch limit you can move; 03 every version measured,
-with kept and refused fixes; 04 be the referee on the real sweep; 05 the evidence ladder: practice gestures, the
-validation rétrospective (participants non identifiés) drawn around zero, new people, kids in real use.
-Gains are only compared on the same data with the same scorers. Hands come from the practice side only.
+Presentation path: the result (what the scores measure, holds, gains in points), 01 hands before and after,
+02 how a change is accepted or refused, 03 every version and attempt, 04 the effect across the practice set,
+05 the limits of the evidence (validation rétrospective, participants non identifiés, with its intervals).
+Two scores are compared only when their data and scorers are identified and equal; otherwise the page says
+"not verified". The explorables are precomputed and never change the tutor in production.
 """
 import marimo
 
 __generated_with = "0.24.2"
-app = marimo.App(width="medium", app_title="Tenfold loop report", css_file="tenfold.css")
+app = marimo.App(width="medium", app_title="Nimble loop report", css_file="tenfold.css")
 
 
 @app.cell
@@ -59,6 +59,7 @@ def _():
         "check": '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
         "x": '<path d="M6 6l12 12"/><path d="M18 6 6 18"/>',
         "minus": '<path d="M6 12h12"/>',
+        "info": '<circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><path d="M12 7.5h.01"/>',
         "pointer": '<path d="M9 11.5V5.2a1.6 1.6 0 0 1 3.2 0V11"/><path d="M12.2 10.2a1.6 1.6 0 0 1 3.2 0V11"/>'
                    '<path d="M15.4 10.8a1.6 1.6 0 0 1 3.2 0v3.4A6.8 6.8 0 0 1 11.8 21h-.6a6.8 6.8 0 0 1-5.6-3L3.3 14.4'
                    'a1.6 1.6 0 0 1 2.6-1.8L9 15"/>',
@@ -86,21 +87,27 @@ def _(Path, json, mo, os, urllib):
 
     def _candidates():
         if os.environ.get("TENFOLD_SNAPSHOT"):
-            yield Path(os.environ["TENFOLD_SNAPSHOT"])
+            yield Path(os.environ["TENFOLD_SNAPSHOT"]), "TENFOLD_SNAPSHOT"
         try:
             _dir = mo.notebook_dir()
             if _dir:
-                yield Path(_dir).parent / "data" / "snapshot.json"
+                yield Path(_dir).parent / "data" / "snapshot.json", "this repository"
         except Exception:
             pass
-        yield Path.cwd() / "data" / "snapshot.json"
+        yield Path.cwd() / "data" / "snapshot.json", "working directory"
 
     def _load():
-        for _path in _candidates():
+        for _path, _kind in _candidates():
             if _path.exists():
-                return json.loads(_path.read_text()), str(_path)
-        with urllib.request.urlopen(RAW_SNAPSHOT, timeout=10) as _r:
-            return json.loads(_r.read().decode()), RAW_SNAPSHOT
+                try:
+                    return json.loads(_path.read_text()), f"{_path.name} ({_kind})"
+                except (OSError, json.JSONDecodeError):
+                    return {}, f"{_path.name} ({_kind}, unreadable)"
+        try:
+            with urllib.request.urlopen(RAW_SNAPSHOT, timeout=10) as _r:
+                return json.loads(_r.read().decode()), "snapshot.json (GitHub main)"
+        except Exception:
+            return {}, "none: no local snapshot and GitHub unreachable"
 
     snap, snap_source = _load()
     informed = snap.get("informed") or []
@@ -108,7 +115,8 @@ def _(Path, json, mo, os, urllib):
     _cmp = (explorer or {}).get("compare")
     compare = _cmp if isinstance(_cmp, dict) and not _cmp.get("error") and _cmp.get("a") and _cmp.get("b") else None
     refused = snap.get("refused") or [{"stage": "gate", **_r} for _r in (snap.get("rejected") or [])]
-    return compare, explorer, informed, refused, snap
+    refused_known = "refused" in snap or bool(snap.get("rejected"))  # older snapshots never recorded refusals
+    return compare, explorer, informed, refused, refused_known, snap, snap_source
 
 
 @app.cell
@@ -125,8 +133,13 @@ def _(datetime, icon, mo, re):
         return "n/a" if x is None else f"{x * 100:+.1f} pts"
 
     def basis(v):
-        """Two scores are compared only when measured on the same data with the same scorers."""
-        return ((v.get("data") or {}).get("sha"), (v.get("train") or {}).get("scorers_sha256"))
+        """The identity of what a score was measured with: data and scorers, or None when either is unknown."""
+        data = (v.get("data") or {}).get("sha")
+        scorers = (v.get("scorers") or {}).get("sha256") or (v.get("train") or {}).get("scorers_sha256")
+        return (data, scorers) if data and scorers else None
+
+    def comparable(a, b):
+        return a is not None and b is not None and basis(a) is not None and basis(a) == basis(b)
 
     def when(ts):
         try:
@@ -204,124 +217,210 @@ def _(datetime, icon, mo, re):
     def hint(text):
         return mo.Html(f'<div class="tf tf-hint">{icon("pointer", 16)}<span>{text}</span></div>')
 
-    return (RETRO_LABEL, basis, em, hint, names_for, pct, pill, plain_change, plain_class, plain_reason, pts, said,
-            same_pose, section, when)
+    def kicker(title, value, note):
+        return mo.Html(f'<div class="tf"><div class="tf-kicker"><span class="tf-kicker-title">{title}</span>'
+                       f'<span class="tf-mono tf-kicker-value">{value}</span></div><div class="tf-kicker-note">{note}</div></div>')
+
+    def limits(items):
+        return mo.Html(f'<div class="tf tf-limits">{"".join(pill(i, "warn") for i in items)}</div>') if items else mo.md("")
+
+    def signed(x):
+        """A change in percentage points with two decimals and a true minus sign, from a fraction."""
+        return "n/a" if x is None else f"{'+' if x >= 0 else '−'}{abs(x) * 100:.2f}"
+
+    def retro_summary(r):
+        """The retrospective result in words that follow the numbers: the measured change, then what its 95% interval
+        allows. Nothing here assumes the change is positive."""
+        p = (r or {}).get("paired") or {}
+        d, (lo, hi) = p.get("mean_difference"), (p.get("ci95") or [None, None])
+        if d is None:
+            return None
+        includes_zero = lo is None or hi is None or lo <= 0 <= hi
+        if d > 0 and not includes_zero:
+            badge, tone, text = ("Observed gain · interval above zero", "good",
+                                 "The updated rules scored higher on this retrospective evaluation, and the uncertainty "
+                                 "interval stays above no improvement.")
+        elif d > 0:
+            badge, tone, text = ("Observed gain · uncertainty remains", "warn",
+                                 "The updated rules scored higher on this retrospective evaluation. The uncertainty interval "
+                                 "includes no improvement, so this result does not yet establish a reliable gain.")
+        elif d < 0 and not includes_zero:
+            badge, tone, text = ("Observed drop · interval below zero", "bad",
+                                 "The updated rules scored lower on this retrospective evaluation, and the uncertainty "
+                                 "interval stays below no change.")
+        elif d < 0:
+            badge, tone, text = ("Observed drop · uncertainty remains", "warn",
+                                 "The updated rules scored lower on this retrospective evaluation. The uncertainty interval "
+                                 "includes no change, so this result does not establish a reliable drop.")
+        else:
+            badge, tone, text = ("No change observed", "neutral", "The updated rules scored the same on this retrospective evaluation.")
+        return {"badge": badge, "tone": tone, "text": text, "gain": f"{signed(d)} pts",
+                "ci": f"{signed(lo)} to {signed(hi)} pts" if lo is not None and hi is not None else "",
+                "a": pct(((r.get("a") or {}).get("exact_match")), 2), "b": pct(((r.get("b") or {}).get("exact_match")), 2)}
+
+    return (RETRO_LABEL, basis, comparable, em, hint, kicker, limits, names_for, pct, pill, plain_change, plain_class,
+            plain_reason, pts, retro_summary, said, same_pose, section, when)
 
 
 @app.cell
-def _(RETRO_LABEL, basis, compare, em, informed, mo, names_for, pill, pts, refused, snap, when):
+def _(compare, explorer, informed, snap):
+    _best_sha = snap.get("best_version") or ""
+    best_version = next((v for v in reversed(informed) if v.get("sha") and _best_sha
+                         and (v["sha"].startswith(_best_sha[:7]) or _best_sha.startswith(v["sha"][:7]))), None)
+    _rules = (best_version or {}).get("rules_sha256")
+    _data = ((best_version or {}).get("data") or {}).get("sha")
+    _scorers = (((best_version or {}).get("scorers") or {}).get("sha256")
+                or ((best_version or {}).get("train") or {}).get("scorers_sha256"))
+    _retro = snap.get("retrospective_validation") or {}
+    # what each block of the page was computed from must be the version in use, on the same data, with the same scorers
+    checks = {
+        "hands": bool(explorer and _rules and explorer.get("rules_sha256") == _rules and explorer.get("data_sha") == _data),
+        "compare": bool(compare and _rules and _scorers and compare.get("data_sha") == _data
+                        and compare.get("scorers_sha256") == _scorers and (compare.get("b") or {}).get("rules_sha256") == _rules),
+        "retro": bool(_retro and _rules and (_retro.get("b") or {}).get("rules_sha256") == _rules),
+    }
+    missing = [label for label, present in (("versions", informed), ("hand data and threshold sweep", explorer),
+                                            ("retrospective check", _retro)) if not present]
+    unverified = [label for key, label, present in (("hands", "hand data", explorer), ("compare", "before and after", compare),
+                                                     ("retro", "retrospective check", _retro)) if present and not checks[key]]
+    return best_version, checks, missing, unverified
+
+
+@app.cell
+def _(RETRO_LABEL, best_version, checks, comparable, compare, em, icon, informed, missing, mo, names_for, pill, pts,
+      refused, refused_known, retro_summary, snap, unverified, when):
+    _names = names_for(informed)
     _scored = [v for v in informed if em(v.get("train")) is not None]
     _last = _scored[-1] if _scored else None
-    if compare:
+    _in_use = best_version or _last
+    _in_use_name = _names.get((_in_use or {}).get("tag"), "the rule in use")
+    if compare and checks["compare"]:
         _a, _b = compare["a"], compare["b"]
+        _holds, _near_holds, _pair = compare.get("holds"), compare.get("near_holds"), f"Start → {_in_use_name}"
     else:
-        _first = next((v for v in _scored if basis(v) == basis(_last)), None) if _last else None
-        _a, _b = (_first or {}).get("train") or {}, (_last or {}).get("train") or {}
-    _names = names_for(informed)
+        _first = next((v for v in _scored if comparable(v, _last)), None) if _last else None
+        _pairable = _first is not None and _first is not _last
+        _a = ((_first or {}).get("train") or {}) if _pairable else {}
+        _b = (_last or {}).get("train") or {}
+        _holds, _near_holds = _b.get("n_holds"), None
+        _pair = f"{_names[_first['tag']]} → {_names[_last['tag']]}" if _pairable else ""
 
     def _move(key, digits):
         x, y = _a.get(key), _b.get(key)
-        if x is None or y is None:
+        if y is None:
             return '<span class="tf-from">n/a</span>'
+        if x is None:
+            return f"{y * 100:.{digits}f}%"
         return f'<span class="tf-from">{x * 100:.{digits}f}%</span><span class="tf-arrow">→</span>{y * 100:.{digits}f}%'
+
+    def _gain(key):
+        x, y = _a.get(key), _b.get(key)
+        if y is None:
+            return ""
+        if x is None:
+            return pill("comparison not verified", "warn")
+        return pill(pts(y - x), "good" if y > x else ("bad" if y < x else "neutral"))
 
     def _kpi(label, value, foot, badge=""):
         return (f'<div class="tf-kpi"><div class="tf-kpi-top"><span class="tf-kpi-label">{label}</span>{badge}</div>'
                 f'<div class="tf-kpi-value">{value}</div><div class="tf-kpi-foot">{foot}</div></div>')
 
-    _gain = (_b["exact_match"] - _a["exact_match"]) if _a.get("exact_match") is not None and _b.get("exact_match") is not None else None
-    _paired = (snap.get("retrospective_validation") or {}).get("paired") or {}
-    _ci = _paired.get("ci95") or [None, None]
+    def _foot(*parts):
+        return " · ".join(p for p in parts if p)
+
+    _retro = snap.get("retrospective_validation") or {}
+    _rs = retro_summary(_retro)
+    _retro_badge = (pill("not verified", "warn") if _retro and not checks["retro"] else pill(_rs["badge"], _rs["tone"]) if _rs else "")
     _kept = sum(1 for v in informed if v.get("kind") == "patch")
     _spend = sum(v.get("spent_usd") or 0 for v in informed if v.get("kind") == "patch")
     _kpis = "".join([
-        _kpi("Almost touching, read right", _move("near_contact_accuracy", 0), "practice gestures"),
-        _kpi("All gestures, read right", _move("exact_match", 1), "practice gestures",
-             pill(pts(_gain), "good") if _gain and _gain > 0 else ""),
-        _kpi("Retrospective check", pts(_paired.get("mean_difference")) if _paired else '<span class="tf-from">not run</span>',
-             f"range {pts(_ci[0])} to {pts(_ci[1])} · {RETRO_LABEL}" if _paired else RETRO_LABEL,
-             pill("not yet proven", "warn") if _paired and (_ci[0] is None or _ci[0] <= 0) else (pill("above zero", "good") if _paired else "")),
+        _kpi("All gestures, read right", _move("exact_match", 1),
+             _foot("Exact left and right fingers and contact", f"{_holds} practice holds" if _holds else "practice gestures", _pair),
+             _gain("exact_match")),
+        _kpi("Almost touching, read right", _move("near_contact_accuracy", 0),
+             _foot(f"{_near_holds} practice holds" if _near_holds else "practice gestures", _pair), _gain("near_contact_accuracy")),
+        _kpi("Retrospective evaluation", _rs["gain"] if _rs else '<span class="tf-from">not run</span>',
+             _foot(f"{_rs['a']} → {_rs['b']}" if _rs else "", f"95% CI {_rs['ci']}" if _rs and _rs["ci"] else "",
+                   f"{_retro.get('holds')} holds" if _retro.get("holds") else "", RETRO_LABEL), _retro_badge),
         _kpi("AI fixes",
-             f'{_kept}<span class="tf-unit">kept</span> <span class="tf-from">·</span> {len(refused)}<span class="tf-unit">refused</span>',
+             f'{_kept}<span class="tf-unit">kept</span> <span class="tf-from">·</span> '
+             + (f'{len(refused)}<span class="tf-unit">refused</span>' if refused_known else '<span class="tf-unit">refusals not recorded</span>'),
              f"${_spend:.2f} of agent time" if _spend else ""),
     ])
-    _best = next((v for v in reversed(informed) if v.get("kind") != "data_refresh"), None)
-    _status = pill(f"Rule in use: {_names.get(_best['tag'], _best['tag'])} · {when(_best.get('ts'))}", "dark", dot=True) if _best else ""
+    _limits = [f"missing: {m}" for m in missing] + [f"not verified: {u}" for u in unverified]
+    _limits_html = (f'<div class="tf-limits"><span class="tf-label">Limits of this snapshot</span>'
+                    f'{"".join(pill(l, "warn") for l in _limits)}</div>') if _limits else ""
+    _status = pill(f"Rule in use: {_in_use_name} · {when(_in_use.get('ts'))}", "dark", dot=True) if _in_use else ""
     mo.Html(
-        f'<div class="tf"><div class="tf-topbar"><div class="tf-brand"><span class="tf-mark">10</span><span>Tenfold</span></div>'
+        f'<div class="tf"><div class="tf-topbar"><div class="tf-brand"><span class="tf-mark">N</span><span>Nimble</span></div>'
         f'<div class="tf-stack">{pill("Traced in W&amp;B Weave")}{pill("Agents on W&amp;B Inference · CoreWeave")}'
         f'{pill("Built with marimo")}{_status}</div></div>'
-        '<div class="tf-hero"><div class="tf-eyebrow">A finger multiplication tutor for kids</div>'
+        '<div class="tf-hero"><div class="tf-eyebrow">Nimble · a finger multiplication tutor for kids</div>'
         '<h1 class="tf-h1">An AI loop that teaches a tutor to <em>see</em> children\'s hands.</h1></div>'
-        f'<div class="tf-kpis">{_kpis}</div></div>'
+        f'{_limits_html}<div class="tf-kpis">{_kpis}</div>'
+        f'<div class="tf-measure">{icon("info", 16)}<span><b>What these scores measure:</b> whether the rule reads both hands\' '
+        'fingers and the contact exactly, on recorded practice gestures. They are not children\'s success rates and '
+        'not proof that children learn better.</span></div></div>'
     )
     return
 
 
 @app.cell
-def _(icon, informed, mo, pill, refused, section):
-    _guard = sum(1 for r in refused if r.get("stage") == "guard")
-    _gate = sum(1 for r in refused if r.get("stage") != "guard")
-    _kept = sum(1 for v in informed if v.get("kind") == "patch")
-    _stages = [
-        ("camera", "", "New gestures", "Hand points, no images", "camera", ""),
-        ("search", " tf-ai", "Diagnosis agent", "Finds the top mistake", "W&B Inference · Qwen3", ""),
-        ("code", " tf-ai", "Patch agent", "Edits the rule", "Claude Code", ""),
-        ("shield", " tf-ai", "Guard agent", "Checks the loop's rules", "W&B Inference", pill(f"{_guard} refused", "bad") if _guard else ""),
-        ("scale", " tf-judge", "Referee", "No gesture may drop 5 pts", "metric gate", pill(f"{_gate} refused", "bad") if _gate else ""),
-        ("commit", " tf-judge", "Kept", "Commit and evaluation", "W&B Weave", pill(f"{_kept} kept", "good")),
-    ]
-    _cards = "".join(
-        f'<div class="tf-stage{_kind}"><div class="tf-stage-head"><span class="tf-stage-icon">{icon(_icon, 18)}</span>'
-        f'<span class="tf-stage-step">{_k + 1:02d}</span></div><div class="tf-stage-name">{_name}</div>'
-        f'<div class="tf-stage-text">{_text}</div><div class="tf-stage-foot"><span class="tf-stage-tech">{_tech}</span>{_count}</div></div>'
-        for _k, (_icon, _kind, _name, _text, _tech, _count) in enumerate(_stages))
-    mo.vstack([
-        section("loop", 1, "How the loop works", "Agents propose. <em>Two judges</em> can say no."),
-        mo.Html(f'<div class="tf"><div class="tf-loop">{_cards}</div><div class="tf-loopback">{icon("loop", 14)}'
-                'Repeats when new gestures arrive</div></div>'),
-    ])
-    return
-
-
-@app.cell
-def _(explorer, mo, plain_class, section):
+def _(checks, explorer, limits, mo, plain_class, section):
     example_options = {plain_class(_x["class"]).capitalize(): _i for _i, _x in enumerate((explorer or {}).get("examples", []))}
     example_pick = mo.ui.radio(options=example_options, value=next(iter(example_options), None), inline=True) if example_options else None
     mo.vstack([
-        section("see", 2, "See what the tutor sees", "Almost touching is the <em>hard case</em>.",
+        section("see", 1, "Hands, before and after", "Almost touching is the <em>hard case</em>.",
                 "Fingertips closer than the touch limit count as touching."),
-        example_pick if example_pick is not None else mo.callout(mo.md("No hand data in this snapshot yet."), kind="neutral"),
+        limits(["not verified: this hand data does not match the rule in use"] if explorer and not checks["hands"] else []),
+        example_pick if example_pick is not None else mo.callout(mo.md("**No hand data in this snapshot.** This section needs a snapshot built on the practice split."), kind="warn"),
     ], gap=1)
     return (example_pick,)
 
 
 @app.cell
 def _(explorer, mo):
-    _in_use = ((explorer or {}).get("constants") or {}).get("CONTACT_THRESHOLD", 0.35)
-    get_limit, set_limit = mo.state(_in_use)
+    _in_use = ((explorer or {}).get("constants") or {}).get("CONTACT_THRESHOLD")
+    get_limit, set_limit = mo.state(_in_use if isinstance(_in_use, (int, float)) else 0.35)
     return get_limit, set_limit
 
 
 @app.cell
 def _(compare, explorer, get_limit, mo, set_limit):
-    _in_use = ((explorer or {}).get("constants") or {}).get("CONTACT_THRESHOLD", 0.35)
-    _before = (((compare or {}).get("a") or {}).get("constants") or {}).get("CONTACT_THRESHOLD", 0.35)
-    limit_slider = mo.ui.slider(start=0.10, stop=0.50, step=0.0125, value=get_limit(), on_change=set_limit,
-                                label="Touch limit", show_value=False, full_width=True)
-    old_rule_button = mo.ui.button(label=f"Before the AI · {_before:g}", on_click=lambda _: set_limit(_before))
-    ai_rule_button = mo.ui.button(label=f"Found by the AI · {_in_use:g}", kind="success", on_click=lambda _: set_limit(_in_use))
-    return ai_rule_button, limit_slider, old_rule_button
+    _in_use = ((explorer or {}).get("constants") or {}).get("CONTACT_THRESHOLD")
+    _before = (((compare or {}).get("a") or {}).get("constants") or {}).get("CONTACT_THRESHOLD")
+    _grid = [a["threshold"] for a in ((((explorer or {}).get("examples") or [{}])[0]).get("answers_by_contact_threshold") or [])]
+    _steps = sorted({round(float(x), 4) for x in _grid + [v for v in (_in_use, _before) if isinstance(v, (int, float))]})
+    if len(_steps) > 1:
+        limit_slider = mo.ui.slider(steps=_steps, value=min(_steps, key=lambda s: abs(s - get_limit())), on_change=set_limit,
+                                    label="Touch limit", show_value=False, full_width=True)
+    else:
+        limit_slider = mo.ui.slider(start=0.10, stop=0.50, step=0.0125, value=0.35, label="Touch limit", disabled=True, full_width=True)
+    return (limit_slider,)
 
 
 @app.cell
-def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button, alt, example_pick, explorer, get_limit,
-      hint, icon, limit_slider, mo, old_rule_button, pd, said, same_pose, style):
+def _(compare, explorer, mo, set_limit):
+    # the buttons live in their own cell: a state set from here re-renders the slider cell, so the slider follows them
+    _in_use = ((explorer or {}).get("constants") or {}).get("CONTACT_THRESHOLD")
+    _before = (((compare or {}).get("a") or {}).get("constants") or {}).get("CONTACT_THRESHOLD")
+    old_rule_button = mo.ui.button(label=f"Before the AI · {_before:g}" if _before is not None else "Before the AI · unknown",
+                                   disabled=_before is None, on_click=lambda _: set_limit(_before),
+                                   tooltip="Only the touch limit changes; the rest of the rule stays as in use")
+    ai_rule_button = mo.ui.button(label=f"Found by the AI · {_in_use:g}" if _in_use is not None else "Found by the AI · unknown",
+                                  kind="success", disabled=_in_use is None, on_click=lambda _: set_limit(_in_use))
+    return ai_rule_button, old_rule_button
+
+
+@app.cell
+def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button, alt, compare, example_pick, explorer,
+      get_limit, hint, icon, kicker, limit_slider, mo, old_rule_button, pd, said, same_pose, style):
     if example_pick is None or not explorer:
         _view = mo.md("")
     else:
         _ex = explorer["examples"][example_pick.value]
         _limit = get_limit()
+        _current = (explorer.get("constants") or {}).get("CONTACT_THRESHOLD")
         _pts, _bones, _tips = [], [], []
         for _hand in ("left", "right"):
             _p = _ex[_hand]
@@ -333,7 +432,11 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
         _gap = _d[_li][_rj]
         _lt, _rt = _ex["left"][_ex["tip_index"][_li]], _ex["right"][_ex["tip_index"][_rj]]
         _grid = _ex.get("answers_by_contact_threshold") or []
-        _answer = min(_grid, key=lambda a: abs(a["threshold"] - _limit)) if _grid else _ex["running"]
+        _exact = next((a for a in _grid if abs(a["threshold"] - _limit) < 1e-6), None)
+        if _current is not None and abs(_limit - _current) < 1e-6:
+            _answer = _ex["running"]  # the rule in use, exactly as the snapshot recorded it
+        else:
+            _answer = _exact or (min(_grid, key=lambda a: abs(a["threshold"] - _limit)) if _grid else _ex["running"])
         _right = same_pose(_answer, _ex["label"])
         _color = GOOD if _right else BAD
         _xs, _ys = [p["x"] for p in _pts], [p["y"] for p in _pts]
@@ -376,10 +479,13 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
             f'<span class="tf-key"><i class="tf-swatch" style="background:{RIGHT_HAND}"></i>right hand</span>'
             '<span class="tf-key"><i class="tf-dash"></i>closest fingertips</span></div>')
         _view = mo.vstack([
-            hint("Pick “Almost touching 6×10”, then press <b>Before the AI</b>."),
+            hint("Pick “Almost touching 6×10”, then press <b>Before the AI</b>." if compare else "Pick a gesture, then move the touch limit."),
             mo.hstack([
                 mo.vstack([mo.ui.altair_chart(style(_hands), chart_selection=False, legend_selection=False), _keys], gap=0.5),
-                mo.vstack([_verdict, mo.hstack([old_rule_button, ai_rule_button], justify="start", wrap=True, gap=0.5),
+                mo.vstack([_verdict,
+                           kicker("Try it on this gesture", f"touch limit {_limit:.4g}",
+                                  "Precomputed answers for this recorded hold. Does not change the tutor in production."),
+                           mo.hstack([old_rule_button, ai_rule_button], justify="start", wrap=True, gap=0.5),
                            limit_slider, mo.ui.altair_chart(style(_ruler), chart_selection=False, legend_selection=False)], gap=1),
             ], wrap=True, gap=2, align="start"),
         ], gap=1)
@@ -388,12 +494,49 @@ def _(ACCENT, BAD, GOOD, HAND_BONES, INK2, LEFT_HAND, RIGHT_HAND, ai_rule_button
 
 
 @app.cell
-def _(ACCENT, INK, INK2, alt, basis, em, informed, mo, names_for, pd, refused, section, style):
+def _(icon, informed, mo, pill, refused, refused_known, section):
+    _guard = sum(1 for r in refused if r.get("stage") == "guard")
+    _gate = sum(1 for r in refused if r.get("stage") != "guard")
+    _unknown = "" if refused_known else pill("refusals not recorded")
+    _kept = sum(1 for v in informed if v.get("kind") == "patch")
+    _stages = [
+        ("camera", "", "New gestures", "Hand points, no images", "camera", ""),
+        ("search", " tf-ai", "Diagnosis agent", "Finds the top mistake", "W&B Inference · Qwen3", ""),
+        ("code", " tf-ai", "Patch agent", "Edits the rule", "Claude Code", ""),
+        ("shield", " tf-ai", "Guard agent", "Checks the loop's rules", "W&B Inference", pill(f"{_guard} refused", "bad") if _guard else _unknown),
+        ("scale", " tf-judge", "Referee", "No gesture may drop 5 pts", "metric gate", pill(f"{_gate} refused", "bad") if _gate else _unknown),
+        ("commit", " tf-judge", "Kept", "Commit and evaluation", "W&B Weave", pill(f"{_kept} kept", "good")),
+    ]
+    _cards = "".join(
+        f'<div class="tf-stage{_kind}"><div class="tf-stage-head"><span class="tf-stage-icon">{icon(_icon, 18)}</span>'
+        f'<span class="tf-stage-step">{_k + 1:02d}</span></div><div class="tf-stage-name">{_name}</div>'
+        f'<div class="tf-stage-text">{_text}</div><div class="tf-stage-foot"><span class="tf-stage-tech">{_tech}</span>{_count}</div></div>'
+        for _k, (_icon, _kind, _name, _text, _tech, _count) in enumerate(_stages))
+    mo.vstack([
+        section("loop", 2, "How a change is accepted or refused", "Agents propose. <em>Two judges</em> can say no."),
+        mo.Html(f'<div class="tf"><div class="tf-loop">{_cards}</div><div class="tf-loopback">{icon("loop", 14)}'
+                'Repeats when new gestures arrive</div></div>'),
+    ])
+    return
+
+
+@app.cell
+def _(informed, mo):
+    _default = next((v["tag"] for v in reversed(informed) if v.get("kind") == "patch"), informed[-1]["tag"] if informed else "")
+    get_selected, set_selected = mo.state(_default)
+    return get_selected, set_selected
+
+
+@app.cell
+def _(ACCENT, INK, INK2, alt, basis, em, get_selected, informed, mo, names_for, pd, pill, refused, section, style):
     version_names = names_for(informed)
-    _rows, _segment, _previous = [], 0, None
+    _selected = get_selected()
+    _rows, _segment, _previous, _unknown = [], 0, None, False
     for _v in informed:
-        if _previous is not None and basis(_v) != basis(_previous):
-            _segment += 1
+        _basis = basis(_v)
+        _unknown = _unknown or _basis is None
+        if _previous is None or _basis is None or _basis != basis(_previous):
+            _segment += 1  # a line only joins versions measured on identified, identical data and scorers
         _previous = _v
         _rows.append({"tag": _v["tag"], "name": version_names[_v["tag"]], "kind": _v.get("kind") or "patch",
                       "right": em(_v.get("train")), "segment": _segment, "label": f"{(em(_v.get('train')) or 0) * 100:.1f}%"})
@@ -406,62 +549,77 @@ def _(ACCENT, INK, INK2, alt, basis, em, informed, mo, names_for, pd, refused, s
                axis=alt.Axis(labelAngle=0, labelFontSize=13, labelColor=INK, domain=False, ticks=False, labelPadding=12,
                              labelExpr="split(datum.label, ' ')"))
     _y = alt.Y("right:Q", title=None, scale=alt.Scale(domain=[_lo, _hi]), axis=alt.Axis(format=".0%", tickCount=4))
-    _pick = alt.selection_point(name="version", fields=["tag"], on="click", empty=False)
     _base = alt.Chart(versions_df)
     _refresh = _base.transform_filter(alt.datum.kind == "data_refresh")
     _layers = [
         _refresh.mark_rule(strokeDash=[3, 3], color="#A8A29E").encode(x=_x),
         _refresh.mark_text(align="left", dx=8, y=6, fontSize=11, color=INK2).encode(x=_x, text=alt.value("new data")),
         _base.mark_line(interpolate="step-after", strokeWidth=2.5, color=ACCENT).encode(x=_x, y=_y, detail="segment:N"),
-        _base.mark_circle(opacity=1, stroke="white", strokeWidth=2.5).encode(
+        _base.mark_circle(opacity=1, stroke="white", strokeWidth=2.5, cursor="pointer").encode(
             x=_x, y=_y, tooltip=[alt.Tooltip("name:N", title="version"), alt.Tooltip("right:Q", format=".1%", title="read right")],
             color=alt.Color("kind:N", scale=alt.Scale(domain=["baseline", "patch", "data_refresh"], range=["#A8A29E", ACCENT, "#78716C"]), legend=None),
-            size=alt.condition(_pick, alt.value(520), alt.value(200))).add_params(_pick),
+            size=alt.condition(alt.FieldEqualPredicate(field="tag", equal=_selected), alt.value(560), alt.value(200))).properties(name="dots"),
         _base.mark_text(dy=-18, fontSize=12, fontWeight=600, color=INK).encode(x=_x, y=_y, text="label:N"),
     ]
-    version_chart = mo.ui.altair_chart(style(alt.layer(*_layers).properties(width="container", height=240)),
-                                       chart_selection=False, legend_selection=False)
+    _layered = alt.layer(*_layers).properties(width="container", height=240)
+    # the click selection sits at the top of the layered chart, on the dots only: marimo reads selections there
+    _layered.params = [alt.TopLevelSelectionParameter(name="version", views=["dots"],
+                                                      select=alt.PointSelectionConfig(type="point", fields=["tag"], on="click"))]
+    version_chart = mo.ui.altair_chart(style(_layered), chart_selection=False, legend_selection=False)
     _kept = sum(1 for v in informed if v.get("kind") == "patch")
     mo.vstack([
         section("versions", 3, "Every version, measured",
                 f"{_kept} fixes kept. {len(refused)} refused." if refused else f"{_kept} fixes kept.",
-                "Each dot is a version of the rule. Click one."),
+                "Each dot is a version of the rule. Click one, or pick it in the menu below." if _rows else "No versions in this snapshot."),
+        mo.Html(f'<div class="tf tf-chart-head"><span>Exact reading on practice gestures, per version</span>'
+                f'{pill("Zoomed axis") if _rows and _lo > 0 else ""}</div>'),
         version_chart,
+        mo.Html('<div class="tf tf-kicker-note">A version without identified data and scorers stands alone: comparison not verified.</div>')
+        if _unknown else mo.md(""),
     ], gap=1)
     return version_chart, version_names, versions_df
 
 
 @app.cell
-def _(informed, mo, version_names):
-    version_menu = mo.ui.dropdown(options={version_names[v["tag"]]: v["tag"] for v in reversed(informed)} or {"none": "none"},
-                                  value=next((version_names[v["tag"]] for v in reversed(informed) if v.get("kind") == "patch"),
-                                             next(iter(version_names.values()), "none")))
+def _(set_selected, version_chart, versions_df):
+    try:
+        _clicked = version_chart.apply_selection(versions_df)
+        if 0 < len(_clicked) < len(versions_df):
+            set_selected(_clicked["tag"].iloc[0])
+    except Exception:
+        pass
+    return
+
+
+@app.cell
+def _(get_selected, informed, mo, set_selected, version_names):
+    _options = {version_names[v["tag"]]: v["tag"] for v in reversed(informed)}
+    version_menu = mo.ui.dropdown(
+        options=_options or {"no versions": ""},
+        value=next((name for name, tag in _options.items() if tag == get_selected()), None) if _options else "no versions",
+        on_change=set_selected, label="Version", disabled=not _options)
     return (version_menu,)
 
 
 @app.cell
-def _(basis, em, html, informed, mo, pill, plain_change, plain_class, plain_reason, pts, re, version_chart, version_menu,
-      version_names, versions_df):
-    try:
-        _clicked = version_chart.apply_selection(versions_df)
-        _clicked_tag = _clicked["tag"].iloc[0] if 0 < len(_clicked) < len(versions_df) else None
-    except Exception:
-        _clicked_tag = None
-    _tag = _clicked_tag or version_menu.value
+def _(comparable, em, get_selected, html, informed, mo, pill, plain_change, plain_class, plain_reason, pts, re,
+      version_menu, version_names):
+    _tag = get_selected()
     _i = next((i for i, v in enumerate(informed) if v["tag"] == _tag), len(informed) - 1)
     if not informed:
         _out = mo.md("")
     else:
         _v = informed[_i]
-        _prev = informed[_i - 1] if _i > 0 and basis(informed[_i - 1]) == basis(_v) else None
+        _prev = informed[_i - 1] if _i > 0 else None
+        _ok = comparable(_prev, _v)
         _now = (_v.get("train") or {}).get("per_class") or {}
-        _before = ((_prev or {}).get("train") or {}).get("per_class") or {}
-        _moves = sorted(((c, (_now[c] or 0) - (_before.get(c) or 0)) for c in _now if _prev and c in _before
+        _before = ((_prev or {}).get("train") or {}).get("per_class") or {} if _ok else {}
+        _moves = sorted(((c, (_now[c] or 0) - (_before.get(c) or 0)) for c in _now if c in _before
                          and abs((_now[c] or 0) - (_before.get(c) or 0)) > 1e-9), key=lambda cm: -cm[1])
         _shown = [m for m in _moves if m[1] > 0][:3] + [m for m in _moves if m[1] < 0][-2:]
-        _moves_html = "".join(
+        _moves_html = ("".join(
             f'<div class="tf-move"><span>{plain_class(c)}</span><span class="{"tf-up" if d > 0 else "tf-down"}">{d * 100:+.0f} pts</span></div>'
-            for c, d in _shown) or '<div class="tf-card-text">none by much</div>'
+            for c, d in _shown) or '<div class="tf-card-text">none by much</div>') if _ok else '<div class="tf-card-text">comparison not verified</div>'
         _name = version_names.get(_v["tag"], _v["tag"])
         if _v.get("kind") == "patch":
             _changed = [l for l in (_v.get("diff") or "").splitlines() if l[:1] in "+-" and not l.startswith(("+++", "---")) and l[1:].strip()]
@@ -469,15 +627,17 @@ def _(basis, em, html, informed, mo, pill, plain_change, plain_class, plain_reas
             _lines = sorted((_code or _changed)[:4], key=lambda l: l[0] == "+")
             _diff = "".join(f'<div class="tf-diff-row {"tf-add" if l[0] == "+" else "tf-del"}"><span class="tf-diff-sign">{l[0]}</span>'
                             f'<span>{html.escape(l[1:].split("#")[0].strip()[:90])}</span></div>' for l in _lines)
-            _delta = (em(_v.get("train")) - em(_prev.get("train"))) if _prev and em(_v.get("train")) is not None and em(_prev.get("train")) is not None else None
+            _delta = (em(_v.get("train")) - em(_prev.get("train"))) if _ok and em(_v.get("train")) is not None and em(_prev.get("train")) is not None else None
+            _gain = (pill(pts(_delta), "good" if _delta > 0 else "neutral") if _delta is not None else pill("comparison not verified", "warn"))
             _cards = (
                 f'<div class="tf-card"><span class="tf-label">The AI changed</span><div class="tf-card-title">{html.escape(plain_change(_v.get("patch")))}</div>'
                 f'{f"<div class=tf-diff>{_diff}</div>" if _diff else ""}</div>'
                 f'<div class="tf-card"><span class="tf-label">Referee kept it</span><div class="tf-card-title">{html.escape(plain_reason(_v.get("gate")))}</div>'
-                f'<div>{pill(pts(_delta), "good") if _delta is not None and _delta > 0 else ""}</div></div>'
+                f'<div>{_gain}</div></div>'
                 f'<div class="tf-card"><span class="tf-label">Gestures that moved</span><div class="tf-moves">{_moves_html}</div></div>')
         elif _v.get("kind") == "data_refresh":
-            _cards = ('<div class="tf-card"><span class="tf-label">New data</span><div class="tf-card-title">Same rule, scored on the 80% practice set</div></div>')
+            _cards = ('<div class="tf-card"><span class="tf-label">New data</span><div class="tf-card-title">Same rule, new practice set</div>'
+                      '<div class="tf-card-text">Scores before and after use different data, so they are not compared.</div></div>')
         else:
             _cards = '<div class="tf-card"><span class="tf-label">Start</span><div class="tf-card-title">Written by hand, before any AI</div></div>'
         _details = {}
@@ -487,27 +647,31 @@ def _(basis, em, html, informed, mo, pill, plain_change, plain_class, plain_reas
                                                             ("expected", "Expected:")) if _v.get(key)))
         if _v.get("diff"):
             _details["Full code change"] = mo.md(f"```diff\n{_v['diff']}\n```")
+        _ids = [f"commit `{(_v.get('sha') or '')[:8]}`", f"rules `{(_v.get('rules_sha256') or 'unknown')[:8]}`",
+                f"data `{(_v.get('data') or {}).get('sha') or 'unknown'}`",
+                f"scorers `{(((_v.get('scorers') or {}).get('sha256')) or 'unknown')[:8]}` ({(_v.get('scorers') or {}).get('source', 'not identified')})"]
+        _details["Identity of this version"] = mo.md(" · ".join(_ids))
         _out = mo.vstack([
             mo.hstack([mo.Html(f'<div class="tf tf-card-title" style="font-size:20px">{_name}</div>'), version_menu],
-                      justify="space-between", align="center"),
+                      justify="space-between", align="center", wrap=True),
             mo.Html(f'<div class="tf tf-grid3">{_cards}</div>'),
-            mo.accordion(_details) if _details else mo.md(""),
+            mo.accordion(_details),
         ], gap=1)
     _out
     return
 
 
 @app.cell
-def _(basis, em, html, informed, mo, pill, plain_change, plain_reason, pts, refused, version_names, when):
+def _(comparable, em, html, informed, mo, pill, plain_change, plain_reason, pts, refused, version_names, when):
     _events = []
     _previous = None
     for _v in informed:
         _kind = _v.get("kind") or "patch"
         if _kind == "patch":
-            _delta = (em(_v.get("train")) - em(_previous.get("train"))
-                      if _previous and basis(_previous) == basis(_v) and em(_v.get("train")) is not None and em(_previous.get("train")) is not None else None)
+            _ok = comparable(_previous, _v) and em(_v.get("train")) is not None and em(_previous.get("train")) is not None
             _events.append((str(_v.get("ts") or ""), 1, pill("Kept", "good"),
-                            f"{version_names.get(_v['tag'], _v['tag'])}: {html.escape(plain_change(_v.get('patch')))}", pts(_delta) if _delta is not None else ""))
+                            f"{version_names.get(_v['tag'], _v['tag'])}: {html.escape(plain_change(_v.get('patch')))}",
+                            pts(em(_v.get("train")) - em(_previous.get("train"))) if _ok else "not verified"))
         elif _kind == "data_refresh":
             _events.append((str(_v.get("ts") or ""), 1, pill("Data", "accent"), "New data: 80% practice set", ""))
         else:
@@ -529,8 +693,8 @@ def _(basis, em, html, informed, mo, pill, plain_change, plain_reason, pts, refu
 def _(explorer, mo, section):
     _sweep = (explorer or {}).get("sweep") or {}
     sweep_name = "CONTACT_THRESHOLD" if "CONTACT_THRESHOLD" in _sweep else next(iter(_sweep), None)
-    section("referee", 4, "Try it yourself", "Be the <em>referee</em>.",
-            "Drag the slider: would you keep this touch limit?" if sweep_name else "No sweep in this snapshot yet.")
+    section("referee", 4, "The effect across the practice set", "Be the <em>referee</em>.",
+            "Would the referee keep another touch limit?" if sweep_name else "")
     return (sweep_name,)
 
 
@@ -545,15 +709,17 @@ def _(explorer, mo, sweep_name):
 
 
 @app.cell
-def _(ACCENT, BAD, GOOD, INK, INK2, alt, explorer, icon, mo, pct, pd, plain_reason, pts, style, sweep_name, sweep_slider):
+def _(ACCENT, BAD, GOOD, INK, INK2, alt, checks, explorer, icon, kicker, limits, mo, pct, pd, pill, plain_reason, pts,
+      style, sweep_name, sweep_slider):
     if sweep_slider is None:
-        _view = mo.md("")
+        _view = mo.callout(mo.md("**No threshold sweep in this snapshot.** This section needs a snapshot built on the practice split."), kind="warn")
     else:
         _s = explorer["sweep"][sweep_name]
         _rows = _s["rows"]
         _row = _rows[min(sweep_slider.value, len(_rows) - 1)]
         _in_use = min(_rows, key=lambda r: abs(r["value"] - _s["current"]))
         _any_kept = any(r["gate"] == "PASS" for r in _rows)
+        _holds = (explorer.get("compare") or {}).get("holds")
         _df = pd.DataFrame([{"limit": r["value"], "right": r["exact_match"], "referee": "keeps" if r["gate"] == "PASS" else "refuses"} for r in _rows])
         _lo, _hi = float(_df["right"].min()), float(_df["right"].max())
         _pad = max(0.01, (_hi - _lo) * 0.2)
@@ -584,13 +750,22 @@ def _(ACCENT, BAD, GOOD, INK, INK2, alt, explorer, icon, mo, pct, pd, plain_reas
             f'<dl class="tf-rows" style="margin:0"><dt>Touch limit</dt><dd class="tf-mono">{_row["value"]:g}</dd>'
             f'<dt>Read right</dt><dd class="tf-mono">{pct(_row["exact_match"])} <span class="tf-muted">{"" if _is_current else pts(_delta)}</span></dd></dl>'
             f'<div class="tf-note">{_note}</div></div>')
-        _view = mo.vstack([sweep_slider, _verdict, mo.ui.altair_chart(style(_chart), chart_selection=False, legend_selection=False)], gap=1)
+        _view = mo.vstack([
+            limits(["not verified: this sweep does not match the rule in use"] if not checks["hands"] else []),
+            kicker("See the effect across the practice set", f"touch limit {_row['value']:g}",
+                   f"Precomputed: the rule in use re-scored at each limit on {explorer.get('windows')} practice windows"
+                   f"{f' ({_holds} holds)' if _holds else ''}. Does not change the tutor in production."),
+            sweep_slider, _verdict,
+            mo.Html(f'<div class="tf tf-chart-head"><span>Exact reading on practice gestures, per touch limit</span>{pill("Zoomed axis") if _dom[0] > 0 else ""}</div>'),
+            mo.ui.altair_chart(style(_chart), chart_selection=False, legend_selection=False),
+        ], gap=1)
     _view
     return
 
 
 @app.cell
-def _(ACCENT, INK, MUTED, RETRO_LABEL, compare, icon, informed, math, mo, names_for, pct, pill, pts, section, snap):
+def _(ACCENT, INK, MUTED, RETRO_LABEL, checks, compare, icon, informed, math, mo, names_for, pct, pill, pts, retro_summary,
+      section, snap):
     _retro = snap.get("retrospective_validation") or {}
     _versions = snap.get("retrospective_versions") or ([_retro] if _retro else [])
     _names = names_for(informed)
@@ -611,7 +786,7 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, compare, icon, informed, math, mo, names_
         lows = [r["paired"]["ci95"][0] * 100 for r in items]
         highs = [r["paired"]["ci95"][1] * 100 for r in items]
         lo, hi = min(-4, math.floor(min(lows)) - 1), max(10, math.ceil(max(highs)) + 1)
-        w, left, right, row_h, top = 440, 70, 72, 40, 34
+        w, left, right, row_h, top = 470, 70, 96, 40, 34
         h = top + row_h * len(items) + 30
 
         def sx(v):
@@ -624,7 +799,7 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, compare, icon, informed, math, mo, names_
                              f'<text x="{sx(t):.1f}" y="{h - 8}" text-anchor="middle" font-size="11" fill="{MUTED}">{"0" if t == 0 else f"{t:+d}"}</text>')
         parts.append(f'<line x1="{sx(0):.1f}" x2="{sx(0):.1f}" y1="{top - 14}" y2="{h - 26}" stroke="{INK}" stroke-width="1.5"/>'
                      f'<text x="{sx(0):.1f}" y="{top - 20}" text-anchor="middle" font-size="11" fill="{INK}">no change</text>'
-                     f'<text x="0" y="{top - 20}" font-size="11" fill="{MUTED}">likely gain</text>'
+                     f'<text x="0" y="{top - 20}" font-size="11" fill="{MUTED}">95% CI</text>'
                      f'<text x="0" y="{h - 8}" font-size="11" fill="{MUTED}">points</text>')
         for k, r in enumerate(items):
             y = top + k * row_h + row_h / 2
@@ -639,14 +814,13 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, compare, icon, informed, math, mo, names_
                 f'<rect x="{sx(a):.1f}" y="{y - 7:.1f}" width="{max(sx(b) - sx(a), 2):.1f}" height="14" rx="7" fill="url(#tf-ci-{k})"/>'
                 f'<circle cx="{sx(est):.1f}" cy="{y:.1f}" r="6.5" fill="{color}" stroke="#fff" stroke-width="2"/>'
                 f'<text x="0" y="{y + 4:.1f}" font-size="13" fill="{ACCENT if in_use else INK}" font-weight="{600 if in_use else 400}">{_name_of(r["b"]["commit"])}</text>'
-                f'<text x="{w - right + 8:.1f}" y="{y + 4:.1f}" font-size="13" fill="{INK}">{est:+.1f} pts</text>')
-        return (f'<svg viewBox="0 0 {w} {h}" width="100%" role="img" aria-label="Likely range of the gain over the hand-written rule, '
-                f'per version, on the {RETRO_LABEL}">{"".join(parts)}</svg>')
+                f'<text x="{w - right + 8:.1f}" y="{y + 4:.1f}" font-size="13" fill="{INK}">{"+" if est >= 0 else "−"}{abs(est):.2f} pts</text>')
+        return (f'<svg viewBox="0 0 {w} {h}" width="100%" role="img" aria-label="Nimble: 95 percent range of the gain over the '
+                f'hand-written rule, per version, on the {RETRO_LABEL}">{"".join(parts)}</svg>')
 
-    _paired = _retro.get("paired") or {}
-    _ci = _paired.get("ci95") or [None, None]
-    _proven = _ci[0] is not None and _ci[0] > 0
-    _a, _b = (compare or {}).get("a") or {}, (compare or {}).get("b") or {}
+    _rs = retro_summary(_retro)
+    _verified = bool(compare and checks["compare"])
+    _a, _b = ((compare or {}).get("a") or {}, (compare or {}).get("b") or {}) if _verified else ({}, {})
 
     def _rung(state, title, text, value="", extra=""):
         mark = icon("check", 14, "#fff", 2.8) if state == "done" else ""
@@ -654,32 +828,43 @@ def _(ACCENT, INK, MUTED, RETRO_LABEL, compare, icon, informed, math, mo, names_
                 f'<div class="tf-rung-text">{text}</div>{extra}</div><div class="tf-rung-value">{value}</div></div>')
 
     _practice_gain = (_b["exact_match"] - _a["exact_match"]) if _a.get("exact_match") is not None and _b.get("exact_match") is not None else None
+    _retro_pills = ((pill(_rs["badge"], _rs["tone"]) if _rs else pill("not run"))
+                    + (pill("not verified", "warn") if _retro and not checks["retro"] else ""))
+    _pair = f"Original → {_name_of((_retro.get('b') or {}).get('commit'))}" if _retro else ""
+    _method = ((f'<div class="tf-kicker-note" style="margin-top:10px">These {_retro.get("holds")} gesture holds were set aside after '
+                'earlier development had used the full dataset. Participants are not reliably identified. Evaluation on new users '
+                f'is still needed. <span class="tf-tag">{_retro.get("label", RETRO_LABEL)}</span></div>') if _retro else "")
     _rungs = [
-        _rung("done", f"Practice gestures {pill('done', 'good')}",
+        _rung("done" if _verified else "next", f"Training gains {pill('done', 'good') if _verified else pill('not verified', 'warn')}",
               (f"All {pct(_a.get('exact_match'))} → {pct(_b.get('exact_match'))} · almost touching "
-               f"{pct(_a.get('near_contact_accuracy'), 0)} → {pct(_b.get('near_contact_accuracy'), 0)}") if compare else "",
+               f"{pct(_a.get('near_contact_accuracy'), 0)} → {pct(_b.get('near_contact_accuracy'), 0)} · {compare.get('holds')} holds, same data and scorers")
+              if _verified else "No verified before and after comparison in this snapshot.",
               pts(_practice_gain) if _practice_gain is not None else ""),
-        _rung("partial" if _retro else "next",
-              f"Retrospective check {pill('not yet proven', 'warn') if _retro and not _proven else (pill('above zero', 'good') if _retro else pill('not run'))}",
-              (f'<span class="tf-tag">{_retro.get("label", RETRO_LABEL)}</span> 20% held back · {_retro.get("holds")} holds'
-               if _retro else f'<span class="tf-tag">{RETRO_LABEL}</span>'),
-              pts(_paired.get("mean_difference")) if _paired else "",
-              f'<div class="tf-ci">{_ci_svg(_versions)}</div>' if _versions else ""),
-        _rung("next", f"New people {pill('next')}", "People the loop has never seen"),
-        _rung("later", f"Kids using the tutor {pill('later')}", "Do they learn faster?"),
+        _rung("partial" if _rs else "next", f"Retrospective evaluation {_retro_pills}",
+              (f"{_pair}: {_rs['a']} → {_rs['b']}, {_rs['gain']} · 95% CI {_rs['ci']}<br>{_rs['text']}"
+               if _rs else f'Not in this snapshot. <span class="tf-tag">{RETRO_LABEL}</span>'),
+              _rs["gain"] if _rs else "",
+              (f'<div class="tf-ci">{_ci_svg(_versions)}</div>' if _versions else "") + _method),
+        _rung("next", f"Independent evaluation {pill('next')}", "New users the loop has never seen"),
+        _rung("later", f"Children's learning {pill('not measured')}",
+              "Every check above evaluates gesture recognition, not children's learning outcomes."),
     ]
     mo.vstack([
-        section("evidence", 5, "How far the evidence goes", "Where we stand, <em>honestly</em>."),
+        section("evidence", 5, "Limits of the evidence", "Where we stand, <em>honestly</em>.",
+                "Training gains, the retrospective evaluation and independent evaluation are kept apart."),
         mo.Html(f'<div class="tf"><div class="tf-ladder">{"".join(_rungs)}</div></div>'),
     ], gap=1)
     return
 
 
 @app.cell
-def _(REPO_URL, WEAVE_URL, explorer, icon, informed, mo, snap):
+def _(REPO_URL, WEAVE_URL, checks, explorer, icon, informed, mo, snap, snap_source):
     _train = next((v.get("train") for v in reversed(informed) if v.get("train")), None) or {}
     _retro = snap.get("retrospective_validation") or {}
+    _all_checked = all(checks.values())
     _items = [
+        ("loaded", snap_source),
+        ("checked", "rules, data and scorers match the rule in use" if _all_checked else "see the limits at the top"),
         ("rule", (snap.get("best_version") or "")[:8]),
         ("practice data", (explorer or {}).get("data_sha", "")),
         ("scorers", (_train.get("scorers_sha256") or "")[:8]),
@@ -688,8 +873,8 @@ def _(REPO_URL, WEAVE_URL, explorer, icon, informed, mo, snap):
     ]
     _prov = "".join(f"<span>{k} <b>{v}</b></span>" for k, v in _items if v)
     mo.Html(
-        f'<div class="tf"><div class="tf-prov">{_prov}<a href="{WEAVE_URL}" target="_blank" rel="noopener">Weave traces {icon("link", 12)}</a>'
-        f'<a href="{REPO_URL}" target="_blank" rel="noopener">Code {icon("link", 12)}</a></div>'
+        f'<div class="tf"><div class="tf-prov">{_prov}<a href="{WEAVE_URL}" target="_blank" rel="noopener">Nimble traces in Weave {icon("link", 12)}</a>'
+        f'<a href="{REPO_URL}" target="_blank" rel="noopener">Nimble code {icon("link", 12)}</a></div>'
         '<div class="tf-closing"><p>The child learns multiplication.<br><em>The tutor learns to see the child.</em></p></div></div>'
     )
     return
