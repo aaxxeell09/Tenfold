@@ -536,10 +536,15 @@ wire.
 | 1 | L1 nudge | One short line pointing at the hands, no specifics. Costs one `max_unsolicited_verbal` when the clock raised it. | `pulse_finger` or `finger_numbers`, and one line. |
 | 2 | L2 targeted correction | Name the hand and the finger it needs. | `correction`, and one line naming the hand and the number. |
 | 3 | L3 show | Show where the finger goes. Never before `hint_2_delay` on the exercise clock. | `ghost` at the target fingertip, and one line. |
-| 4 | L4 rescue | Walk the whole thing through. Never before `rescue_delay`. Sets `rescue_used`, and ends first try. | `rescue_card` with the tens, the units and the total. |
+| 4 | L4 rescue | Walk the whole thing through. Sets `rescue_used`, and ends first try. | `rescue_card` with the tens, the units and the total. |
 
-The level never goes down inside one exercise, and never climbs more than one step at a time. It resets to 0 on
-every new exercise.
+The level never goes down inside one exercise, and it resets to 0 on every new exercise.
+
+It normally climbs one step at a time, but the rescue has three triggers of its own and two of them can
+raise it from any level: two wrong numeric answers on the same exercise, and the child's third help request.
+The third trigger, a correct pose held with no answer after earlier help, is the only one gated by
+`rescue_delay`. The rescue is delivered at most once per exercise, it obeys `min_verbal_gap` like every other
+line, and it sits outside `max_unsolicited_verbal`, which is the budget of L1, L2 and L3 alone.
 
 ---
 
