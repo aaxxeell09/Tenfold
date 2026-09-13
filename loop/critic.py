@@ -69,6 +69,11 @@ ITERATION_MIN_USD = DIAG_MIN_USD + MIN_PATCH_USD + GUARD_RESERVE_USD
 # billed to W&B credits, traced with token usage in Weave). The patch agent needs tools and stays on Claude Code.
 WANDB_INFERENCE_URL = "https://api.inference.wandb.ai/v1"
 TEXT_AGENT_MODEL = "Qwen/Qwen3-235B-A22B-Instruct-2507"
+# Hidden sets (loop/gate.py check_hidden): scored locally after the train gate, never shown to the agents, never
+# published to Weave. Their variables are kept out of the agents' environment.
+HIDDEN_ENV = ("TENFOLD_VALIDATION_SAMPLES", "TENFOLD_LIVE_SAMPLES")
+HIDDEN_KEEP = ("exact_match", "n_holds", "n_samples", "contact_accuracy", "false_unknown_rate",
+               "negative_rejection_accuracy", "near_contact_accuracy", "per_class")
 
 
 GUARD_TIMEOUT_S = 120.0
@@ -163,7 +168,7 @@ class Critic:
         self.logfile = None if a.dry_run else self.repo / "loop" / ("nightly-blind.log" if a.blind else "nightly.log")
         self.spent = 0.0  # USD reported by the agents' result events (Claude Code only; W&B Inference is not counted)
         self.run_id = datetime.now(timezone.utc).strftime("%m%d-%H%M")  # labels this run's evaluations in Weave
-        self.env = {k: v for k, v in os.environ.items() if not k.endswith("_HELDOUT")}
+        self.env = {k: v for k, v in os.environ.items() if not k.endswith("_HELDOUT") and k not in HIDDEN_ENV}
         self.env["PYTHONDONTWRITEBYTECODE"] = "1"
         if self.env.get("ANTHROPIC_API_KEY") or self.env.get("ANTHROPIC_AUTH_TOKEN"):
             # key-based backend: run the CLI with its own config dir so the developer's claude.ai login,
@@ -181,6 +186,10 @@ class Critic:
                 log(f"weave init failed, continuing untraced: {e}", None)
         if a.blind and not self.rules_src.exists():
             shutil.copy(self.repo / RULES_REL, self.rules_src)
+        self.hidden = {name: Path(p) for name, p in (("validation", a.validation_samples), ("live", a.live_samples)) if p}
+        self.hidden_dir = Path(a.hidden_dir).resolve()
+        if self.hidden:
+            self.hidden_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # ---------- worktree ----------
     def files(self) -> list[str]:
@@ -428,6 +437,36 @@ class Critic:
         from loop import gate  # shared with train_eval.py --sweep, so the patch agent sees the same verdict
         return gate.check(prev, cand)
 
+    def hidden_eval(self, name: str, rules: Path, tag: str) -> dict | None:
+        """Metrics of `rules` on one hidden set, or None. Local only; results and reports go to the hidden directory,
+        outside the repo and the critic worktree, and nothing is published."""
+        path = self.hidden[name]
+        out = self.hidden_dir / f"{name}-{tag}.json"
+        cmd = [sys.executable, str(self.repo / "eval" / "run_eval.py"), "--split", "train", "--local",
+               "--rules", str(rules), "--samples", str(path), "--tag", f"{name}-{tag}", "--out", str(out),
+               "--report", str(self.hidden_dir / f"report-{name}-{tag}.json")]
+        env = {k: v for k, v in self.env.items() if k not in ("WANDB_API_KEY", "TENFOLD_TRAIN_SAMPLES")}
+        for attempt in range(2):
+            p = subprocess.run(cmd, cwd=self.repo, env=env, capture_output=True, text=True, timeout=1200)
+            if p.returncode == 0 and out.exists():
+                m = json.loads(out.read_text())["metrics"]
+                return {k: m.get(k) for k in HIDDEN_KEEP} | {"data_sha": data_fingerprint(path)["sha"]}
+            log(f"hidden {name} eval attempt {attempt + 1} failed: {p.stderr.strip()[-300:]}", self.logfile)
+        return None
+
+    def hidden_gate(self, prev: dict, rules: Path, tag: str) -> tuple[bool, str, dict]:
+        """check_hidden on every hidden set, stopping at the first refusal. Returns (ok, reason, measured)."""
+        from loop import gate
+        measured: dict = {}
+        reasons = []
+        for name in self.hidden:
+            measured[name] = self.hidden_eval(name, rules, tag)
+            ok, why = gate.check_hidden(name, prev.get(name), measured[name])
+            if not ok:
+                return False, why, measured
+            reasons.append(why)
+        return True, ", ".join(reasons), measured
+
     # ---------- persistence ----------
     def load_metrics(self) -> dict:
         if self.metrics_path.exists():
@@ -515,6 +554,19 @@ class Critic:
                 self.save_metrics(metrics)
             accepted = [entry]
         last = accepted[-1]
+        if self.hidden and not a.dry_run:
+            # the running version's score on each hidden set, measured again whenever that set's file changed
+            known = last.setdefault("hidden", {})
+            stale = [n for n, p in self.hidden.items()
+                     if not known.get(n) or known[n].get("data_sha") != data_fingerprint(p)["sha"]]
+            for name in stale:
+                known[name] = self.hidden_eval(name, self.rules_src, last["tag"])
+                if known[name] is None:
+                    log(f"FATAL: the running version could not be scored on the hidden {name} set", self.logfile)
+                    return 2
+            if stale:
+                self.save_metrics(metrics)
+                log(f"hidden sets scored on the running version {last['tag']}: {', '.join(stale)}", self.logfile)
         version = int(last.get("version", str(last["tag"]).lstrip("v").split("-")[0])) + 1
         self.tag_prev = last["tag"]
         no_improve = 0
@@ -594,6 +646,22 @@ class Critic:
                     no_improve += 1
                     outcome = "rejected"
                     break
+                measured: dict = {}
+                if self.hidden:
+                    hidden_ok, hidden_why, measured = self.hidden_gate(last.get("hidden") or {}, self.worktree / RULES_REL, cand_tag)
+                    if not hidden_ok:
+                        name = hidden_why.split(" ")[0]
+                        log(f"hidden gate rejected: {hidden_why}", self.logfile)
+                        # the set's name only in metrics.json and Weave: hidden numbers stay in the local log
+                        metrics["rejected"].append({"iteration": it, "ts": now(), "reason": f"hidden gate: {name}",
+                                                    "train": cand["metrics"], "hidden": measured,
+                                                    "diagnosis": diagnosis[:300], "patch": patch_summary})
+                        self.save_metrics(metrics)
+                        self.record_rejection(it, f"hidden gate: {name}", diff)
+                        no_improve += 1
+                        outcome = "rejected"
+                        break
+                    log(f"hidden gate passed: {hidden_why}", self.logfile)
                 sha = self.commit(version, diagnosis, patch_summary, expected)
                 if cand_report.exists():
                     shutil.copy(cand_report, self.report_src)
@@ -603,7 +671,8 @@ class Critic:
                 entry = {"tag": f"v{version}{self.suffix}", "version": version, "sha": sha, "train": cand["metrics"],
                          "heldout": None, "accepted": True, "blind": a.blind, "ts": now(), "diagnosis": diagnosis[:300],
                          "patch": patch_summary, "patch_hypothesis": patch_hypothesis, "expected": expected, "gate": why,
-                         "spent_usd": round(self.spent, 3), "kind": "patch", "data": self.data}
+                         "spent_usd": round(self.spent, 3), "kind": "patch", "data": self.data,
+                         "hidden": measured}
                 if not a.skip_heldout:
                     h = self.run_eval("heldout", self.rules_src, f"v{version}{self.suffix}")
                     entry["heldout"] = h["metrics"] if h else None
@@ -648,6 +717,12 @@ def main() -> int:
     ap.add_argument("--text-model", default=None,
                     help="W&B Inference model for those agents (default TENFOLD_TEXT_AGENT_MODEL, else Qwen3 235B)")
     ap.add_argument("--mock-inference", help="script that stands in for W&B Inference (tests)")
+    ap.add_argument("--validation-samples", default=None,
+                    help="hidden validation holds, scored after the train gate (default TENFOLD_VALIDATION_SAMPLES)")
+    ap.add_argument("--live-samples", default=None,
+                    help="real-lesson windows, scored after the train gate (default TENFOLD_LIVE_SAMPLES)")
+    ap.add_argument("--hidden-dir", default=None,
+                    help="where hidden evaluations are written (default ../tenfold-validation/loop-runs)")
     ap.add_argument("--max-cost", type=float, default=None,
                     help="stop this arm once the agents have spent this many USD (default TENFOLD_MAX_COST_USD or 40)")
     a = ap.parse_args()
@@ -665,6 +740,15 @@ def main() -> int:
     if a.text_agents not in ("claude", "wandb"):
         raise SystemExit(f"TENFOLD_TEXT_AGENTS must be claude or wandb, got {a.text_agents!r}")
     a.text_model = a.text_model or os.environ.get("TENFOLD_TEXT_AGENT_MODEL") or TEXT_AGENT_MODEL
+    for attr, env_name in (("validation_samples", "TENFOLD_VALIDATION_SAMPLES"), ("live_samples", "TENFOLD_LIVE_SAMPLES")):
+        chosen = getattr(a, attr) or os.environ.get(env_name) or None
+        if chosen:
+            path = Path(chosen) if Path(chosen).is_absolute() else repo / chosen
+            if not path.exists():
+                raise SystemExit(f"{env_name} points at {path}, which does not exist")
+            chosen = str(path.resolve())
+        setattr(a, attr, chosen)
+    a.hidden_dir = a.hidden_dir or str(repo.parent / "tenfold-validation" / "loop-runs")
     if a.max_cost is None:
         a.max_cost = float(os.environ.get("TENFOLD_MAX_COST_USD", "40"))
     if a.blind:
