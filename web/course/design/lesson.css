@@ -1,0 +1,197 @@
+/* Tenfold tablet additions. Reuses every token and component from styles.css.
+   Load after styles.css: welcome.html, hub.html, learn.html, check.html, practice.html,
+   lesson.html and finish.html all share this file. */
+
+/* ---------- tablet box: 1194 x 834, scaled down only when the window is smaller ---------- */
+body.tablet {
+  height: 100vh; overflow: hidden; background: var(--polar);
+  display: flex; align-items: center; justify-content: center;
+}
+.frame {
+  position: relative; flex: none; width: 1194px; height: 834px; overflow: hidden;
+  background: var(--snow); transform: scale(var(--fit, 1)); transform-origin: center center;
+}
+
+/* the app shell is fluid in styles.css; inside the tablet box it is always the three column layout */
+.frame .app { grid-template-columns: 256px minmax(0, 1fr) 368px !important; min-height: 834px; height: 834px; }
+.frame .side { height: 834px !important; padding: 24px 16px; display: flex !important; }
+.frame .side .wordmark { font-size: 32px !important; }
+.frame .nav-item { justify-content: flex-start !important; padding: 0 16px !important; }
+.frame .nav-item span:last-child { display: inline !important; }
+.frame .right { height: 834px !important; display: flex !important; }
+.frame .center { height: 834px; overflow-y: auto; padding: 20px 24px 80px; }
+.frame .topstats { display: none !important; }
+.frame .mascot { display: block !important; }
+.frame .tabbar { display: none !important; }
+.nav-icon svg, .stat svg, .icon-btn svg { width: 100%; height: 100%; }
+.nav-icon { display: block; color: currentColor; }
+
+/* ---------- node icons ---------- */
+.node svg { color: var(--snow); }
+.node.is-locked svg { color: var(--lock-lip); }
+.mini-stars svg { color: var(--yellow); }
+.mini-stars svg.off { color: var(--swan); }
+.path-hint { margin: 0 0 4px; color: var(--hare); font-size: 14px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; text-align: center; }
+
+/* ---------- shared bits ---------- */
+a.btn, a.door, a.icon-btn, a.nav-item { text-decoration: none; }
+a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
+.btn-xl { height: 64px; font-size: 19px; padding: 0 36px; }
+.field {
+  height: 64px; width: 100%; padding: 0 20px; border: 2px solid var(--swan); border-radius: var(--radius);
+  background: var(--snow); color: var(--eel); font-family: var(--font); font-size: 24px; font-weight: 800; outline: none;
+}
+.field::placeholder { color: var(--hare); }
+.field:focus { border-color: var(--blue-line); background: var(--blue-soft); }
+.centered { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; }
+.stack { display: flex; flex-direction: column; gap: 18px; align-items: center; }
+.minibar { position: absolute; top: 24px; right: 28px; display: flex; gap: 10px; }
+.minibar .nav-item { height: 44px; border: 2px solid var(--swan); border-radius: 14px; gap: 10px; }
+.minibar .nav-icon { width: 22px; height: 22px; }
+
+/* ---------- welcome ---------- */
+.welcome .tally { width: 210px; }
+.welcome h1 { margin: 8px 0 4px; font-size: 40px; font-weight: 900; color: var(--eel); }
+.welcome p.sub { margin: 0 0 26px; color: var(--wolf); font-size: 18px; font-weight: 700; }
+.welcome form { width: 420px; display: flex; flex-direction: column; gap: 18px; }
+
+/* ---------- hub ---------- */
+.hub { padding: 92px 64px 48px; display: flex; flex-direction: column; gap: 26px; height: 100%; }
+.hub h1 { margin: 0; font-size: 34px; font-weight: 900; color: var(--eel); }
+.doors { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; flex: 1; }
+.door {
+  --c: var(--green); --lip-c: var(--green-lip);
+  color: var(--eel); text-decoration: none;
+  display: flex; flex-direction: column; gap: 0; padding: 0; border: 0; border-radius: 26px;
+  background: var(--snow); box-shadow: 0 8px 0 var(--swan), 0 0 0 2px var(--swan) inset;
+  overflow: hidden; text-align: left; transition: transform 80ms ease, box-shadow 80ms ease, filter 120ms ease;
+}
+.door:hover { filter: brightness(1.02); }
+.door:active { transform: translateY(8px); box-shadow: 0 0 0 var(--swan), 0 0 0 2px var(--swan) inset; }
+.door-top { background: var(--c); box-shadow: 0 4px 0 var(--lip-c); padding: 20px 24px; color: var(--snow); }
+.door-top .kicker { font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.8px; opacity: 0.85; }
+.door-top h2 { margin: 2px 0 0; font-size: 28px; font-weight: 900; }
+.door-body { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 22px; }
+.door-body p { margin: 0; color: var(--wolf); font-size: 17px; font-weight: 700; text-align: center; }
+.door-blue { --c: var(--blue); --lip-c: var(--blue-lip); }
+.door .tally { width: 190px; }
+.minipath { width: 100%; max-width: 330px; }
+.minipath .track { fill: none; stroke: var(--swan); stroke-width: 6; stroke-linecap: round; stroke-dasharray: 2 14; }
+.minipath text { font-family: var(--font); font-size: 15px; font-weight: 800; fill: var(--wolf); }
+.minipath .lock-label { fill: var(--hare); }
+
+/* ---------- practice start check ---------- */
+.check { padding: 80px 64px 48px; display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 44px; align-items: center; height: 100%; }
+.check h1 { margin: 0 0 6px; font-size: 36px; font-weight: 900; color: var(--eel); }
+.check .sub { margin: 0 0 26px; color: var(--wolf); font-size: 17px; font-weight: 700; }
+.steps { display: flex; flex-direction: column; gap: 14px; margin-bottom: 28px; }
+.step {
+  display: flex; align-items: center; gap: 16px; width: 100%; padding: 18px 20px;
+  border: 2px solid var(--swan); border-radius: var(--radius); background: var(--snow);
+  box-shadow: 0 4px 0 var(--swan); color: var(--eel); font-size: 20px; font-weight: 800; text-align: left;
+  transition: transform 60ms ease, box-shadow 60ms ease, background 140ms ease, border-color 140ms ease;
+}
+.step:active { transform: translateY(4px); box-shadow: 0 0 0 var(--swan); }
+.step .tick {
+  width: 40px; height: 40px; flex: none; border: 2px solid var(--swan); border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; color: var(--swan);
+}
+.step .tick svg { width: 24px; height: 24px; opacity: 0; }
+.step .hint { display: block; margin-top: 2px; font-size: 14px; font-weight: 700; color: var(--hare); }
+.step.is-done { border-color: var(--green); background: var(--green-soft); box-shadow: 0 4px 0 var(--green); color: var(--green-lip); }
+.step.is-done .tick { border-color: var(--green); background: var(--green); color: var(--snow); }
+.step.is-done .tick svg { opacity: 1; }
+.step.is-done .hint { color: var(--green-lip); }
+
+/* ---------- camera view, shared by check.html and lesson.html ---------- */
+.cam {
+  position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: 24px; overflow: hidden;
+  background: #2b2b2b; box-shadow: 0 6px 0 rgba(0, 0, 0, 0.18);
+}
+.cam .ghosts { position: absolute; inset: 0; width: 100%; height: 100%; }
+.cam-tag {
+  position: absolute; top: 14px; left: 18px; display: flex; align-items: center; gap: 8px;
+  color: rgba(255, 255, 255, 0.55); font-size: 12px; font-weight: 900; text-transform: uppercase; letter-spacing: 1.4px;
+}
+.cam-tag svg { width: 18px; height: 18px; }
+.ghosts .palm, .ghosts .bar { fill: rgba(255, 255, 255, 0.12); stroke: rgba(255, 255, 255, 0.42); stroke-width: 3; }
+.ghosts .tip { fill: rgba(255, 255, 255, 0.18); stroke: rgba(255, 255, 255, 0.6); stroke-width: 3; }
+.ghosts .num { fill: rgba(255, 255, 255, 0.92); font-family: var(--font); font-size: 20px; font-weight: 900; text-anchor: middle; }
+.ghosts .fin.is-expect .bar { fill: rgba(88, 204, 2, 0.2); stroke: var(--green); }
+.ghosts .fin.is-expect .tip { fill: var(--green); stroke: var(--green-lip); }
+.ghosts .fin.is-wrong .bar { fill: rgba(255, 150, 0, 0.2); stroke: var(--orange); }
+.ghosts .fin.is-wrong .tip { fill: var(--orange); stroke: #d97e00; }
+[data-state="cannotsee"] .ghosts { opacity: 0.22; }
+.cam-veil {
+  position: absolute; inset: 0; display: none; align-items: center; justify-content: center; flex-direction: column; gap: 8px;
+  background: rgba(24, 24, 24, 0.74); color: var(--snow); font-size: 22px; font-weight: 900; text-align: center;
+}
+.cam-veil small { font-size: 15px; font-weight: 700; color: rgba(255, 255, 255, 0.7); }
+[data-state="cannotsee"] .cam-veil { display: flex; }
+.reasons {
+  position: absolute; left: 0; right: 0; bottom: 0; display: none; flex-direction: column; gap: 6px;
+  padding: 16px 22px 18px; background: rgba(0, 0, 0, 0.58);
+}
+[data-state="yes"] .reasons { display: flex; }
+.reasons span { color: var(--snow); font-size: 19px; font-weight: 800; }
+.reasons span b { color: var(--green-soft); }
+.reasons span:nth-child(1) { animation: reason-in 300ms ease-out backwards; animation-delay: 80ms; }
+.reasons span:nth-child(2) { animation: reason-in 300ms ease-out backwards; animation-delay: 340ms; }
+.reasons span:nth-child(3) { animation: reason-in 300ms ease-out backwards; animation-delay: 600ms; }
+@keyframes reason-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* ---------- camera lesson ---------- */
+.camera-lesson { position: absolute; inset: 0; display: flex; flex-direction: column; background: var(--snow); }
+.camera-lesson .lesson-top { max-width: 1100px; padding: 26px 36px 0; }
+.lesson-count { min-width: 72px; color: var(--hare); font-size: 15px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.8px; text-align: right; }
+.cl-body { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 10px 36px 0; }
+.cl-exercise { margin: 0; font-size: 76px; line-height: 1; font-weight: 900; color: var(--eel); font-variant-numeric: tabular-nums; }
+.cl-cam { width: 720px; }
+.cl-foot { width: 720px; display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.camera-lesson .speaker .tally { width: 104px; }
+.camera-lesson .speech { margin-bottom: 22px; max-width: 430px; font-size: 23px; }
+[data-state="almost"] .speech { border-color: var(--orange); background: #fff3e0; color: #a85f00; }
+[data-state="almost"] .speech::before { background: #fff3e0; border-color: var(--orange); }
+[data-state="yes"] .speech { border-color: var(--green); background: var(--green-soft); color: var(--green-lip); }
+[data-state="yes"] .speech::before { background: var(--green-soft); border-color: var(--green); }
+[data-state="cannotsee"] .speech { border-color: var(--blue-line); background: var(--blue-soft); color: var(--blue-lip); }
+[data-state="cannotsee"] .speech::before { background: var(--blue-soft); border-color: var(--blue-line); }
+.mic {
+  display: flex; align-items: center; gap: 10px; height: 46px; padding: 0 16px; margin-bottom: 22px;
+  border: 2px solid var(--swan); border-radius: 14px; color: var(--wolf);
+  font-size: 13px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.8px;
+}
+.mic svg { width: 20px; height: 20px; color: var(--green); }
+.mic .bars { display: flex; align-items: center; gap: 3px; height: 20px; }
+.mic .bars i { width: 4px; height: 8px; border-radius: 2px; background: var(--green); animation: mic 900ms ease-in-out infinite; }
+.mic .bars i:nth-child(2) { animation-delay: 150ms; }
+.mic .bars i:nth-child(3) { animation-delay: 300ms; }
+@keyframes mic { 0%, 100% { height: 7px; } 50% { height: 19px; } }
+.mic.is-off { color: var(--hare); }
+.mic.is-off svg, .mic.is-off .bars i { color: var(--hare); background: var(--hare); animation: none; }
+
+/* prototype state switcher, in the same dashed style as the dev reset */
+.statebar { display: flex; gap: 8px; justify-content: center; padding: 10px 0 16px; }
+.statebar button {
+  border: 2px dashed var(--swan); border-radius: 12px; background: none; color: var(--hare);
+  padding: 8px 14px; font-family: var(--font); font-size: 12px; font-weight: 900;
+  text-transform: uppercase; letter-spacing: 0.8px;
+}
+.statebar button.is-on { border-style: solid; border-color: var(--blue-line); background: var(--blue-soft); color: var(--blue-lip); }
+
+/* ---------- finish ---------- */
+.frame .finish { position: absolute; inset: 0; }
+.finish .cards.cards-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); max-width: 420px; }
+
+/* practice path on its own: no left rail, just the path, the right column and a back button */
+.frame .app.app-bare { grid-template-columns: minmax(0, 1fr) 368px !important; }
+.frame .app-bare .center { padding: 20px 24px 80px 96px; }
+.backbtn {
+  position: absolute; top: 22px; left: 22px; z-index: 5;
+  width: 56px; height: 56px; border-radius: 18px; border: 2px solid var(--swan);
+  background: var(--snow); box-shadow: 0 4px 0 var(--swan); color: var(--wolf);
+  display: flex; align-items: center; justify-content: center; text-decoration: none;
+  transition: transform 60ms ease, box-shadow 60ms ease;
+}
+.backbtn svg { width: 28px; height: 28px; }
+.backbtn:active { transform: translateY(4px); box-shadow: 0 0 0 var(--swan); }
