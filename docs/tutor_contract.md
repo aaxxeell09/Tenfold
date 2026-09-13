@@ -246,13 +246,15 @@ moment the tutor decides it until one state message carries it, publishes that m
 decided whatever the camera rate, never drops it for a stalled browser, and sends null on every message after.
 Null means nothing new: it never cancels a line already queued. Without a `tutor_line`, `tally` is the line,
 and only when `tally` itself has changed since the previous message. Neither is spoken twice in a row.
-`.tally-say` shows the line being spoken.
+`#lesson .say` shows the line being spoken.
 
 A line belongs to the moment it was sent in, the exercise and the engine `state`, or to the exercise alone when
 it arrives with `state` `exercise_shown`. A line still waiting when its moment has gone is obsolete and dropped,
-on the server before it is sent and on the page before it is spoken. A newer `tutor_line` supersedes a waiting
-one and a waiting `tally`; a `tally` never supersedes a `tutor_line`. The start check (`checkMessage`) keeps its
-own scripted lines and ignores `tutor_line` entirely.
+on the server before it is sent and on the page before it is spoken. On the page the queue keeps two kinds of
+line whatever has happened since: an acknowledgement (`ack`) and a line the child has earned (`earned`, the line
+that opens an exercise and the one that closes the success beat). A newer `tutor_line` supersedes a waiting one
+and a waiting `tally`; a `tally` never supersedes a `tutor_line`. The start check (`checkMessage`) keeps its own
+scripted lines and ignores `tutor_line` entirely.
 
 ---
 
