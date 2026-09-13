@@ -51,7 +51,8 @@ def test_build_message_carries_everything_the_page_renders():
                             "fact", "session", "node", "demo",
                             "tutor_state", "intervention_level", "tutor_line",
                             "tutor_visual", "scored_gesture_error",
-                            "scored_math_error", "first_try", "mode"}
+                            "scored_math_error", "first_try", "mode",
+                            "tutor_line_cuts", "tutor_beat"}
     assert message["pose_slip"] is False and message["hint_auto"] is False
     # The eight tutor fields, with the defaults a page reads an absent one as.
     assert message["tutor_state"] == "WORKING"

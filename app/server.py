@@ -191,6 +191,12 @@ TUTOR_FIELDS: dict[str, Any] = {
     "scored_math_error": False,
     "first_try": False,
     "mode": "normal",
+    # The one line allowed to cut what the page is saying: the acknowledgement of
+    # a confirmed pose, contract section 4.2 as amended.
+    "tutor_line_cuts": False,
+    # The success beat the page choreographs between exercises. One shot, null on
+    # every other message, so a page replaying it cannot loop the celebration.
+    "tutor_beat": None,
 }
 # The three per learner factors that ride on the learner record under "tutor",
 # contract section 2.4. The server carries them, the tutor owns their values.
@@ -218,6 +224,7 @@ TUTOR_NAMES = {
     "speech": "speech",
     "hint": "hint_requested",
     "answer": "answer",
+    "line_drop": "line_dropped",
     # what the tutor decides
     "decision": "state_fields",
     "factors": "learner_factors",
@@ -284,7 +291,9 @@ def build_message(update: Update, fingers: list[dict[str, Any]],
                   hint_auto: bool = False,
                   tutor: dict[str, Any] | None = None) -> dict[str, Any]:
     context = {"hint": update.hint, "answer": update.answer,
-               "exercise": update.exercise.title}
+               "exercise": update.exercise.title,
+               # A fact the child has never met is announced, not reviewed.
+               "seen": pick.seen if pick else True}
     # A reaction from the scheduler outranks the screen state: it is the thing
     # Tally actually wants to say at this moment.
     moment = reaction or moment_of(update, hands_seen)
@@ -571,6 +580,12 @@ class TutorLink:
 
     def asked_for_help(self, now: float) -> None:
         self._absorb(self._send("hint", now=now))
+
+    def line_dropped(self, line: Any, reason: Any, at: Any, now: float) -> None:
+        """A line the page could not speak. Diagnostic only: it scores nothing,
+        moves no ladder and changes no state, it is written to the tutor log so
+        the lines that never reach the child stop being invisible."""
+        self._absorb(self._send("line_drop", line=line, reason=reason, at=at, now=now))
 
     def answered(self, correct: bool, value: int | None, now: float) -> None:
         self._absorb(self._send("answer", correct=correct, value=value, now=now))
@@ -1134,6 +1149,8 @@ class Lesson:
                 self._tts(bool(message.get("speaking")))
             elif kind == "speech":
                 self._speech(message.get("text"))
+            elif kind == "line_drop":
+                self._line_dropped(message)
             elif kind == "repeat":
                 self.push(self.engine.repeat())
 
@@ -1171,6 +1188,13 @@ class Lesson:
         if not text:
             return
         self.tutor.heard(text, time.monotonic())
+
+    def _line_dropped(self, message: dict[str, Any]) -> None:
+        """The page could not speak a line. Nothing here may raise or filter:
+        this is data about things going wrong, and the tutor is the one that
+        decides what a usable reason looks like."""
+        self.tutor.line_dropped(message.get("line"), message.get("reason"),
+                                message.get("at"), time.monotonic())
 
     def _hint_asked(self) -> None:
         """The child asked for the next level of help.
@@ -1753,7 +1777,7 @@ def create_app(mock: bool = False, camera: int | None = None,
     a camera, a browser or a port.
     """
     hub = Hub()
-    lesson = Lesson(Engine(), hub, make_scheduler)
+    lesson = Lesson(Engine(params=load_tutor_params().get("global", {})), hub, make_scheduler)
     lesson.demo_available = demo
     # data/tutor_log.jsonl is the dataset Loop 2 is built on, so a run with no
     # camera in front of a child never writes a line into it.
