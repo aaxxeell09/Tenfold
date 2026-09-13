@@ -879,6 +879,37 @@ def test_the_pill_drops_the_number_on_the_success_beat(page):
     assert pill(tab).lower() == "listening"
 
 
+def test_the_success_beat_plays_on_the_numbers_it_is_given(page):
+    """The tutor calls the beat and hands the page its numbers. The parts it names run
+    for success_ms and no longer, and the line that closes it is said when the next
+    exercise arrives, never over the success line the child has just earned."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(FAKE_RECOGNITION + CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    open_lesson(tab, url)
+    node = running_lesson(tab)
+    tab.evaluate("() => { window.__spoken = []; }")
+    beat = dict(SUCCESS_BEAT, success_ms=700, pause_ms=400, total_ms=1100, next_line="Next one.")
+    feed(tab, node, state="answer_correct", answer=42, first_try=True,
+         tutor_line=beat["line"], tutor_beat=beat)
+    # the parts the tutor named, and only those, for as long as it asked
+    tab.wait_for_function("() => document.querySelector('#lesson').dataset.beat === 'success'", timeout=5000)
+    classes = tab.get_attribute("#lesson", "class")
+    assert all(f"beat-{part}" in classes for part in beat["parts"]), classes
+    tab.wait_for_function("() => document.querySelector('#lesson').dataset.beat === ''", timeout=5000)
+    assert "beat-halo" not in (tab.get_attribute("#lesson", "class") or "")
+
+    # the next exercise closes the beat: its line is said, and it never cut the success
+    # line, which is what exercise_shown used to do
+    tab.wait_for_function("window.__spoken.length >= 2", timeout=5000)
+    tab.evaluate("() => { window.__cancelled = 0; }")
+    feed(tab, node, state="exercise_shown", tutor_line="Here we go.")
+    tab.wait_for_function("window.__spoken.some((u) => u.text === 'Next one.')", timeout=10000)
+    # the success line goes out first, whole: it is short sentences, one utterance each
+    assert " ".join(said(tab)[:2]) == beat["line"], said(tab)
+    assert tab.evaluate("window.__cancelled") == 0, "the success line was cut by the next exercise"
+
+
 def test_a_lesson_line_never_plays_over_the_finish_card(page):
     """Every view change cuts the dialogue: the queue is emptied and the utterance in
     flight is cancelled, so a long lesson line is silent the moment the card appears and
@@ -964,6 +995,11 @@ def test_an_interim_number_and_its_final_are_one_answer(page):
     assert checks(tab) == [11], "the same number was sent twice"
 
 
+# Stale against the ready gate, see audit/xfail.md: a step of the gate now stands for
+# gate_step_pause_ms before the next one may open, and lesson/tutor_params.json carries
+# that value, so the turn is no longer immediate. What the test guards, that no clock of
+# the page's own invention holds a step back, is now the policy file's to say.
+@pytest.mark.xfail(reason="the gate stands gate_step_pause_ms on a step, see audit/xfail.md")
 def test_the_check_steps_turn_with_no_wait_at_all(page):
     """The step is not on a clock. The moment the camera says the condition is true the
     step is turned, in the same breath as the message that carried it: check_step_min_ms
@@ -1293,6 +1329,9 @@ def test_the_gate_never_asks_for_an_answer(page):
     tab.add_init_script(FAKE_RECOGNITION + SILENT_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
     open_check(tab, url)
     feed_check(tab, state="waiting_pose")
+    # the camera keeps streaming while a step stands its gate_step_pause_ms out, so the
+    # pose is told again after the step that reads it has opened, the way it really is
+    wait_step(tab, "pose")
     feed_check(tab, state="correct_pose")
     wait_step(tab, "ready")
     quiet(tab)
