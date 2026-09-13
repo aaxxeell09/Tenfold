@@ -107,7 +107,7 @@ def _(mo, re):
 
     def plain_change(patch):
         names = {"CONTACT_THRESHOLD": "touch limit", "UNKNOWN_THRESHOLD": "confidence needed to answer"}
-        m = re.search(r"([A-Z_]{4,}) from ([0-9.]+) to ([0-9.]+)", patch or "")
+        m = re.search(r"([A-Z_]{4,}) from ([0-9.]+) to ([0-9.]+)", (patch or "").replace("`", ""))
         if m:
             return f"{names.get(m.group(1), m.group(1).lower())}: {m.group(2)} → {m.group(3)}"
         text = " ".join((patch or "").split())
@@ -317,12 +317,14 @@ def _(GOOD, WARN, alt, basis, chapter, em, informed, mo, names_for, pd, try_it, 
         _previous = _v
         _rows.append({"tag": _v["tag"], "name": version_names[_v["tag"]], "kind": _v.get("kind") or "patch",
                       "right": em(_v.get("train")), "segment": _segment, "label": f"{(em(_v.get('train')) or 0) * 100:.1f}%"})
+    for _k, _r in enumerate(_rows):
+        _r["show"] = _k == len(_rows) - 1 or _rows[_k + 1]["segment"] != _r["segment"]
     versions_df = pd.DataFrame(_rows)
     _names = list(versions_df["name"]) if len(versions_df) else []
     _values = [r["right"] for r in _rows if r["right"] is not None]
     _lo = max(0.0, (min(_values) if _values else 0.4) - 0.08)
     _hi = min(1.0, (max(_values) if _values else 0.6) + 0.06)
-    _x = alt.X("name:N", sort=_names, title=None, axis=alt.Axis(labelAngle=0, labelFontSize=14, labelColor="#0f172a"))
+    _x = alt.X("name:N", sort=_names, title=None, axis=alt.Axis(labelAngle=0 if len(_names) <= 4 else -30, labelFontSize=14, labelColor="#0f172a"))
     _y = alt.Y("right:Q", title="gestures read right", scale=alt.Scale(domain=[_lo, _hi]), axis=alt.Axis(format=".0%", tickCount=4))
     _pick = alt.selection_point(name="version", fields=["tag"], on="click", empty=False)
     _base = alt.Chart(versions_df)
@@ -332,7 +334,7 @@ def _(GOOD, WARN, alt, basis, chapter, em, informed, mo, names_for, pd, try_it, 
             x=_x, y=_y, tooltip=[alt.Tooltip("name:N", title="version"), alt.Tooltip("right:Q", format=".1%", title="read right")],
             color=alt.Color("kind:N", scale=alt.Scale(domain=["baseline", "patch", "data_refresh"], range=["#94a3b8", GOOD, WARN]), legend=None),
             size=alt.condition(_pick, alt.value(620), alt.value(260))).add_params(_pick),
-        _base.mark_text(dy=-24, fontSize=14, fontWeight="bold", color="#0f172a").encode(x=_x, y=_y, text="label:N"),
+        _base.transform_filter(alt.datum.show).mark_text(dy=-24, fontSize=14, fontWeight="bold", color="#0f172a").encode(x=_x, y=_y, text="label:N"),
     ]
     version_chart = mo.ui.altair_chart(style(alt.layer(*_layers).properties(width="container", height=280)),
                                        chart_selection=False, legend_selection=False)
@@ -492,7 +494,7 @@ def _(chapter, em, informed, mo, pct, snap):
 def _(mo):
     mo.Html(
         '<div style="margin:56px 0 12px;background:#0B0D10;color:#FFFFFF;padding:60px 36px;border-radius:20px;text-align:center;'
-        'font:800 42px/1.15 Nunito, \'Avenir Next Rounded\', system-ui, sans-serif">'
+        'font:800 clamp(24px, 5vw, 42px)/1.15 Nunito, \'Avenir Next Rounded\', system-ui, sans-serif;overflow-wrap:anywhere">'
         "The child learns multiplication.<br>The tutor learns how to see the child.</div>"
     )
     return
