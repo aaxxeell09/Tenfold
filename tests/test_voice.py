@@ -703,8 +703,14 @@ def queued_lesson(tab, url):
     """
     open_lesson(tab, url)
     node = running_lesson(tab)
+    # the lines the node opened on are let out first: the line that opens an exercise is
+    # owed to the child and waits its turn now instead of cutting, so a queue looked at
+    # with one of them still in it is not the queue this test is about
+    tab.evaluate("() => { window.__endUpTo = 99; }")
+    tab.wait_for_function("() => !Tenfold.queue.line && Tenfold.queue.waiting.length === 0",
+                          timeout=10000)
     tab.evaluate(WATCH_SENDS)
-    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; }")
+    tab.evaluate("() => { window.__endUpTo = 0; window.__spoken = []; window.__sent = []; }")
     tab.evaluate("() => Tenfold.speak('A long instruction still playing.')")
     tab.wait_for_function("window.__spoken.length === 1", timeout=5000)
     return node
@@ -883,6 +889,37 @@ def test_the_pill_drops_the_number_on_the_success_beat(page):
     feed(tab, node, state="exercise_shown")
     tab.wait_for_timeout(150)
     assert pill(tab).lower() == "listening"
+
+
+def test_a_line_cut_in_flight_is_reported_as_interrupted(page):
+    """Nothing is dropped quietly, a line the child was already hearing least of all.
+    A line cut by a newer one, or by the screen going away, is reported with the reason
+    the tutor's vocabulary has for it; a line that ends by itself is not a drop."""
+    context, url = page
+    tab = context.new_page()
+    tab.add_init_script(CAPTURE_SOCKET + voices([("Samantha", "en-US")]) + FAKE_SYNTH)
+    queued_lesson(tab, url)
+    assert drops(tab) == [], "nothing was cut yet"
+
+    # the acknowledgement cuts what is playing, and says so
+    tab.evaluate("""() => Tenfold.say('Yes, that is it.', null, null,
+      { kind: 'ack', key: 'correct_pose' })""")
+    tab.wait_for_function("window.__spoken.length === 2", timeout=5000)
+    assert drops(tab) == [("A long instruction still playing.", "interrupted")]
+    assert all(m["at"] > 0 for m in sent(tab, "line_drop")), "a drop is stamped with its moment"
+
+    # a line that ends by itself is not a drop
+    tab.evaluate("() => { window.__endUpTo = 99; window.__finish(); }")
+    tab.wait_for_timeout(400)
+    assert drops(tab) == [("A long instruction still playing.", "interrupted")]
+
+    # leaving the screen cuts what is playing too
+    tab.wait_for_function("() => !Tenfold.queue.line", timeout=8000)
+    tab.evaluate("() => { window.__endUpTo = 0; Tenfold.speak('One more long line for the road.'); }")
+    tab.wait_for_function("() => Tenfold.queue.line === 'One more long line for the road.'", timeout=8000)
+    tab.evaluate("() => { location.hash = 'home'; }")
+    tab.wait_for_function("document.body.dataset.view === 'home'", timeout=10000)
+    assert ("One more long line for the road.", "interrupted") in drops(tab)
 
 
 def test_the_line_that_cuts_is_the_field_the_server_sends(page):
