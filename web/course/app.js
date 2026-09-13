@@ -16,6 +16,8 @@
   const KEY_NAME = "tenfold.name";
   const KEY_LEARNER = "tenfold.learner";
   const KEY_MUTED = "tenfold.muted";
+  const KEY_CHILD = "tenfold.child";          // who is playing on this computer right now
+  const KEY_CHILDREN = "tenfold.children";    // the roster, one entry per child ever named here
   const params = new URLSearchParams(location.search);
   const $ = (sel, root) => (root || document).querySelector(sel);
   const $$ = (sel, root) => Array.prototype.slice.call((root || document).querySelectorAll(sel));
@@ -29,21 +31,59 @@
   function write(key, value) {
     try { localStorage.setItem(key, typeof value === "string" ? value : JSON.stringify(value)); } catch (e) { /* keep going in memory */ }
   }
-  function load() { return Object.assign(L.emptyProgress(), read(KEY, {})); }
-  function save() { write(KEY, progress); }
+  function readText(key) { try { return localStorage.getItem(key) || ""; } catch (e) { return ""; } }
+  // ---------- one record per child ----------
+  // Several children share one tablet and they are separate learners. A child is the
+  // first name typed on the welcome screen, trimmed and lowercased, and everything
+  // below (profile, XP, the tutor's factors, the path) lives in that child's own slot.
+  // Switching learner moves the pointer and nothing else: no other child's record is
+  // ever read, written or erased.
+  function idOf(value) { return String(value || "").trim().replace(/\s+/g, " ").toLowerCase(); }
+  function tidy(value) { return String(value || "").trim().replace(/\s+/g, " "); }
+  function child() { return readText(KEY_CHILD); }
+  // before any name is typed there is one anonymous slot, which is the plain key
+  function slot(key) { const who = child(); return who ? `${key}.${who}` : key; }
+  function load() { return Object.assign(L.emptyProgress(), read(slot(KEY), {})); }
+  function save() { write(slot(KEY), progress); }
   // the learner record is the profile: the scheduler's memory plus display_name and xp
-  function learner() { return read(KEY_LEARNER, null); }
-  function saveLearner(state) { write(KEY_LEARNER, state); }
+  function learner() { return read(slot(KEY_LEARNER), null); }
+  function saveLearner(state) { write(slot(KEY_LEARNER), state); }
   function name() {
     const me = learner();
     if (me && me.display_name) return String(me.display_name);
-    try { return localStorage.getItem(KEY_NAME) || ""; } catch (e) { return ""; }
+    return readText(slot(KEY_NAME));
   }
   function setName(value) {
     const me = learner() || {};
     me.display_name = value;
     saveLearner(me);
-    write(KEY_NAME, value);
+    write(slot(KEY_NAME), value);
+    write(KEY_NAME, value);   // the name of whoever is playing, for anything that reads it plain
+  }
+  function roster() { const list = read(KEY_CHILDREN, []); return Array.isArray(list) ? list : []; }
+  function remember(key, display) {
+    const list = roster().filter((c) => c && c.key !== key);
+    list.push({ key, name: display });
+    write(KEY_CHILDREN, list);
+  }
+  function setChild(value) {
+    const key = idOf(value);
+    if (!key) return false;
+    const firstEver = roster().length === 0;
+    const known = readText(`${KEY_LEARNER}.${key}`) !== "";
+    write(KEY_CHILD, key);
+    // whatever was played before any name existed belongs to the first child named,
+    // and to no one after that: a second child always starts from zero
+    if (firstEver && !known) {
+      const anon = read(KEY_LEARNER, null), anonProgress = read(KEY, null);
+      if (anon) saveLearner(anon);
+      if (anonProgress) write(slot(KEY), anonProgress);
+    }
+    remember(key, tidy(value));
+    setName(tidy(value));
+    progress = load();
+    unitAt = null;
+    return true;
   }
   function xp() { const me = learner(); return me ? Math.max(0, Math.floor(Number(me.xp) || 0)) : 0; }
   function addXp(gain) {
@@ -76,7 +116,6 @@
 
   // ---------- icons and Tally ----------
   const use = (id, box) => `<svg viewBox="${box || "0 0 48 48"}" aria-hidden="true"><use href="#${id}"></use></svg>`;
-  function starSvg(on) { return `<svg viewBox="0 0 48 48" class="${on ? "" : "off"}" style="color:${on ? "var(--gold)" : "var(--line)"}"><use href="#icon-star"></use></svg>`; }
   function decorate(root) {
     const scope = root || document;
     const info = L.levelInfo(xp());
@@ -86,11 +125,13 @@
     renderLevelBoxes(scope, info);
   }
   function levelLabel(info) { return info.next ? `${info.inLevel} / ${info.span} XP` : `${info.xp} XP`; }
+  // the level box of the practice top bar, the one place a level is shown outside the profile
   function renderLevelBoxes(scope, info) {
-    $$("[data-level-name]", scope).forEach((el) => { el.textContent = info.name; });
-    $$("[data-level-xp]", scope).forEach((el) => { el.textContent = levelLabel(info); });
-    $$("[data-level-fill]", scope).forEach((el) => { el.style.width = `${info.percent}%`; });
-    $$("[data-level-next]", scope).forEach((el) => { el.textContent = info.next ? `${info.toNext} XP to ${info.next}` : "Top level reached"; });
+    const box = $("#practice");
+    if (!box || (scope && scope !== document && scope !== box)) return;
+    $("#lvl-name", box).textContent = info.name;
+    $("#lvl-xp", box).textContent = levelLabel(info);
+    $("#lvl-fill", box).style.width = `${info.percent}%`;
   }
   function setTally(host, expr) {
     if (!host) return;
@@ -114,6 +155,7 @@
     $("#lesson").hidden = true;
     $("#finish").hidden = true;
     if (name !== "check") stopCheck();
+    if (name === "welcome") renderWelcome();
     if (name === "home") renderHome();
     if (name === "learn") renderShowcase();
     if (name === "practice") renderCourse();
@@ -131,90 +173,60 @@
   }
 
   // ---------- welcome ----------
-  $("#welcome-form").addEventListener("submit", (e) => {
+  const welcome = $("#welcome");
+  $("#form", welcome).addEventListener("submit", (e) => {
     e.preventDefault();
-    const value = ($("#welcome-name").value || "").trim();
-    if (!value) return;
-    setName(value);
+    if (!setChild($("#name", welcome).value)) return;
     go("home");
   });
+  // the children this computer already knows: one tap and no spelling, and the
+  // name is never put back on screen as markup
+  function renderWelcome() {
+    const field = $("#name", welcome);
+    field.value = "";
+    setTimeout(() => { try { field.focus(); } catch (e) { /* no focus, no harm */ } }, 0);
+    const box = $("#known", welcome);
+    const list = roster();
+    box.hidden = list.length === 0;
+    box.replaceChildren();
+    list.forEach((c) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "known-btn";
+      button.dataset.action = "child";
+      button.dataset.child = c.key;
+      button.textContent = c.name || c.key;
+      box.appendChild(button);
+    });
+  }
 
   // ---------- home ----------
   function renderHome() {
     const who = name();
-    $("#greeting").textContent = who ? `Which door today, ${who}?` : "Which door today?";
-    const nodes = L.allNodes();
-    const units = L.UNITS.map((u, i) => {
-      const unitNodes = nodes.filter((n) => n.unitId === u.id);
-      const done = unitNodes.every((n) => L.nodeState(progress, n.id) === "done");
-      const current = unitNodes.some((n) => L.nodeState(progress, n.id) === "current");
-      return { title: u.title, state: done ? "done" : current ? "current" : "locked" };
-    }).concat([{ title: "11 to 15", state: "locked" }, { title: "16 to 20", state: "locked" }]).slice(0, 4);
-    const pts = [[60, 30], [150, 92], [68, 152], [158, 212]];
-    let svg = `<path class="track" d="M 60 30 Q 168 58 150 92 Q 122 124 68 152 Q 26 180 158 212"></path>`;
-    units.forEach((u, i) => {
-      const [x, y] = pts[i];
-      const fill = u.state === "done" ? ["var(--green-lip)", "var(--green)"] : u.state === "current" ? ["var(--blue-lip)", "var(--blue)"] : ["var(--lock-lip)", "var(--lock)"];
-      svg += `<circle cx="${x}" cy="${y + 4}" r="17" fill="${fill[0]}"></circle><circle cx="${x}" cy="${y}" r="17" fill="${fill[1]}"></circle>` +
-             `<text x="${x + 28}" y="${y + 6}" class="${u.state === "locked" ? "lock-label" : ""}">${u.title}</text>`;
-    });
-    $("#minipath").innerHTML = svg;
+    $("#greeting").textContent = who ? `Ready to practice, ${who}?` : "Ready to practice?";
+    $("#switch-child").textContent = who ? `Not ${who}?` : "Switch child";
     decorate($("#home"));
   }
 
-  // ---------- learn: the showcase, four units, not wired to progress ----------
-  const SHOWCASE = [
-    { kicker: "Unit 1", name: "First steps", desc: "Meet your ten fingers", count: "15/15", tone: 0, mascot: "right",
-      nodes: [{ t: "lesson", s: "done", stars: 3 }, { t: "lesson", s: "done", stars: 3 }, { t: "chest", s: "done" }, { t: "lesson", s: "done", stars: 2 }, { t: "boss", s: "done", stars: 3 }] },
-    { kicker: "Unit 2", name: "6 to 10", desc: "The finger trick for 6 to 10", count: "7/15", tone: 1, mascot: "left",
-      nodes: [{ t: "lesson", s: "done", stars: 3 }, { t: "lesson", s: "done", stars: 2 }, { t: "lesson", s: "current" }, { t: "chest", s: "locked" }, { t: "lesson", s: "locked" }, { t: "boss", s: "locked" }] },
-    { kicker: "Unit 3", name: "11 to 15", desc: "Two hands and one carry", count: "0/15", tone: 2,
-      nodes: [{ t: "lesson", s: "locked" }, { t: "lesson", s: "locked" }, { t: "lesson", s: "locked" }, { t: "chest", s: "locked" }, { t: "boss", s: "locked" }] },
-    { kicker: "Unit 4", name: "16 to 20", desc: "The big ones", count: "0/15", tone: 3,
-      nodes: [{ t: "lesson", s: "locked" }, { t: "lesson", s: "locked" }, { t: "lesson", s: "locked" }, { t: "boss", s: "locked" }] },
-  ];
-  function renderShowcase() {
-    let html = "";
-    SHOWCASE.forEach((u) => {
-      const tone = TONES[u.tone % TONES.length];
-      html += `<section class="unit" style="--unit:${tone[0]};--unit-lip:${tone[1]}"><div class="unit-banner"><div><div class="unit-kicker">${u.kicker}</div><h2>${u.name}</h2><p>${u.desc}</p></div><div class="unit-count">${use("icon-star")}${u.count}</div></div><div class="path">`;
-      u.nodes.forEach((n, i) => {
-        const cls = "node" + (n.t === "boss" ? " node-boss" : n.t === "chest" ? " node-chest" : "") + (n.s === "locked" ? " is-locked" : n.s === "done" ? " is-done" : " is-current");
-        const face = n.t === "chest"
-          ? use(iconFor(n.t, n.s), "0 0 88 80")
-          : `<span class="art" style="background-image:url(art/${nodeArt(n.t, n.s)})"></span>`;
-        html += `<div class="row"><div class="node-wrap" style="--x:${OFFSETS[i % OFFSETS.length]}px"><button class="${cls}" type="button" data-status="${n.s}" disabled>${face}</button>${miniStars(n.stars || 0)}</div></div>`;
-      });
-      if (u.mascot) html += `<div class="row"><div class="mascot mascot-${u.mascot}"><div class="tally" data-tally="${u.mascot === "right" ? "happy" : "ready"}"></div></div></div>`;
-      html += `</div></section>`;
-    });
-    $("#showcase").innerHTML = html;
-    decorate($("#learn"));
-  }
-
-  // ---------- learn map ----------
-  const TONES = [["var(--green)", "var(--green-lip)"], ["var(--blue)", "var(--blue-lip)"], ["var(--purple)", "var(--purple-lip)"], ["var(--yellow)", "var(--yellow-lip)"]];
-  const OFFSETS = [0, -58, -92, -58, 0, 58, 92, 58];
-
-  function iconFor(kind, state) {
-    if (kind === "chest") return state === "locked" ? "icon-chest-locked" : "icon-chest";
-    if (kind === "boss") return state === "done" ? "icon-boss-done" : state === "locked" ? "icon-boss-locked" : "icon-boss";
-    return state === "done" ? "icon-lesson-done" : state === "locked" ? "icon-lesson-locked" : "icon-lesson";
-  }
-  function miniStars(n) {
-    if (!n) return `<div class="mini-stars"></div>`;
-    return `<div class="mini-stars">${[0, 1, 2].map((i) => starSvg(i < n)).join("")}</div>`;
-  }
-  // one unit on screen at a time, the current one unless the learner switched.
-  // The export's zigzag across the panel; the nodes are spread evenly down it, so a
-  // unit of four fills the same panel a unit of six does.
+  // ---------- the path screen, drawn twice ----------
+  // The export wrote one path screen. The practice view is that screen wired to this
+  // child's own progress; the learn view is the same markup filled with the export's
+  // own showcase units and no way in, which is what the learn view was before.
+  const TONES = [["var(--green)", "var(--green-lip)"], ["var(--blue)", "var(--blue-lip)"], ["var(--purple)", "#a95fd8"], ["var(--yellow)", "var(--yellow-lip)"]];
+  // the export's winding path, top left down to bottom right, no sharp reversals. The
+  // nodes are spread evenly down it, so a unit of four fills the panel a unit of six does.
   const SPOT_X = [22, 43, 64, 42, 23, 46];
   function spotsFor(count) {
-    const top = 16, bottom = 86;
+    const top = 20, bottom = 86;
     return Array.from({ length: count }, (unused, i) => [
       SPOT_X[i % SPOT_X.length],
       count > 1 ? top + i * (bottom - top) / (count - 1) : (top + bottom) / 2,
     ]);
+  }
+  function iconFor(kind, state) {
+    if (kind === "chest") return state === "locked" ? "icon-chest-locked" : "icon-chest";
+    if (kind === "boss") return state === "done" ? "icon-boss-done" : state === "locked" ? "icon-boss-locked" : "icon-boss";
+    return state === "done" ? "icon-lesson-done" : state === "locked" ? "icon-lesson-locked" : "icon-lesson";
   }
   // the path furniture is rendered art, one image per node state. A chest has no
   // render in the export, so it keeps the drawn icon of icons.svg.
@@ -223,6 +235,89 @@
     if (state === "done") return "n-done.png";
     return kind === "boss" ? "n-boss.png" : "start.png";
   }
+  function nodeFace(kind, state) {
+    return kind === "chest"
+      ? `<span class="chest">${use(iconFor(kind, state), "0 0 88 80")}</span>`
+      : `<span style="background-image:url(art/${nodeArt(kind, state)})"></span>`;
+  }
+  // one row of unit tiles, the export's three renders, the one on screen lit
+  function tileRow(count, at, action) {
+    return Array.from({ length: count }, (unused, i) =>
+      `<button type="button" class="${i === at ? "on" : ""}" data-action="${action}" data-u="${i}" aria-label="Unit ${i + 1}">` +
+      `<img src="art/tile-${i + 1}-${i === at ? "on" : "off"}.png" alt=""></button>`).join("");
+  }
+  // nodes: { kind, state, id, label, action }. An entry with no action is not a way in,
+  // which is the whole difference between the learn showcase and the practice path.
+  function pathHtml(nodes) {
+    const pts = spotsFor(nodes.length);
+    const d = pts.map(([x, y], i) => `${i ? "L" : "M"} ${x} ${y}`).join(" ");
+    let html = `<svg class="track" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${d}"></path></svg>`;
+    nodes.forEach((n, i) => {
+      const [x, y] = pts[i];
+      const cls = `node ${n.state === "locked" ? "locked" : n.state === "done" ? "done" : "current"}`;
+      const way = n.action ? ` data-action="${n.action}" data-node="${n.id}"` : " disabled";
+      html += `<button class="${cls}" type="button"${way} data-status="${n.state}" aria-label="${n.label}" ` +
+              `style="left:${x}%;top:${y}%">${nodeFace(n.kind, n.state)}</button>`;
+    });
+    return html;
+  }
+  function tone(root, card, i) {
+    const [c, lip] = TONES[i % TONES.length];
+    [root, card].forEach((el) => { if (el) { el.style.setProperty("--unit", c); el.style.setProperty("--unit-lip", lip); } });
+  }
+
+  // ---------- learn: the export's own showcase units, read only ----------
+  const SHOWCASE = [
+    { kicker: "Unit 1", name: "Meet your fingers", desc: "Numbers on every fingertip", done: 2,
+      say: "Your 6 times are next.", mood: "happy",
+      nodes: [["lesson", "done"], ["lesson", "done"], ["lesson", "current"], ["chest", "locked"], ["lesson", "locked"], ["boss", "locked"]] },
+    { kicker: "Unit 2", name: "Count the tens", desc: "Fingers down make tens", done: 0,
+      say: "Finish unit 1 first.", mood: "ready",
+      nodes: [["lesson", "locked"], ["lesson", "locked"], ["lesson", "locked"], ["chest", "locked"], ["boss", "locked"]] },
+    { kicker: "Unit 3", name: "Big numbers", desc: "Nine times and ten times", done: 0,
+      say: "The big ones come last.", mood: "thinking",
+      nodes: [["lesson", "locked"], ["lesson", "locked"], ["lesson", "locked"], ["boss", "locked"]] },
+  ];
+  const SHOWCASE_SHELL = `
+<div class="frame">
+  <div class="top">
+    <a class="back" href="#home" aria-label="Back"><img src="art/btn-back.png" alt=""></a>
+    <div><p class="sub">Learn</p><h1 id="lrn-crumb"></h1></div>
+  </div>
+  <div class="body">
+    <section class="unitcard" id="lrn-card">
+      <div class="head"><div class="kicker" id="lrn-kicker"></div><h2 id="lrn-name"></h2><p id="lrn-desc"></p></div>
+      <div class="mid">
+        <div class="metric"><span>Lessons done</span><b id="lrn-count"></b></div>
+        <div class="bar2"><i id="lrn-bar" style="width:0%"></i></div>
+        <div class="tallyspot"><div class="tally-art" id="lrn-tally" data-tally="happy" data-outfit aria-hidden="true"></div><p class="line" id="lrn-say"></p></div>
+      </div>
+      <div class="units" id="lrn-switch"></div>
+    </section>
+    <section class="pathwrap" id="lrn-path"></section>
+  </div>
+</div>`;
+  let showAt = 0;
+  function renderShowcase() {
+    const root = $("#learn");
+    if (!$("#lrn-card", root)) root.innerHTML = SHOWCASE_SHELL;
+    const u = SHOWCASE[showAt % SHOWCASE.length];
+    tone($(".frame", root), $("#lrn-card", root), showAt);
+    $("#lrn-crumb", root).textContent = u.name;
+    $("#lrn-kicker", root).textContent = u.kicker;
+    $("#lrn-name", root).textContent = u.name;
+    $("#lrn-desc", root).textContent = u.desc;
+    const scored = u.nodes.filter(([kind]) => kind !== "chest").length;
+    $("#lrn-count", root).textContent = `${u.done} of ${scored}`;
+    $("#lrn-bar", root).style.width = `${scored ? (u.done / scored) * 100 : 0}%`;
+    $("#lrn-say", root).textContent = u.say;
+    setTally($("#lrn-tally", root), u.mood);
+    $("#lrn-switch", root).innerHTML = tileRow(SHOWCASE.length, showAt, "showcase");
+    $("#lrn-path", root).innerHTML = pathHtml(u.nodes.map(([kind, state], i) => ({ kind, state, id: "", label: `${kind} ${i + 1}`, action: null })));
+    decorate(root);
+  }
+
+  // ---------- practice: the child's own path ----------
   function unitIndex() {
     if (unitAt !== null) return unitAt;
     const cur = L.currentNode(progress);
@@ -231,50 +326,31 @@
   function renderCourse() {
     const ui = unitIndex();
     const unit = L.UNITS[ui];
-    const tone = TONES[ui % TONES.length];
     const root = $("#practice");
-    root.style.setProperty("--unit", tone[0]);
-    root.style.setProperty("--unit-lip", tone[1]);
+    tone($(".frame", root), $("#card", root), ui);
     const nodes = L.allNodes().filter((n) => n.unitId === unit.id);
     const scored = nodes.filter((n) => n.kind !== "chest");
     const done = scored.filter((n) => (progress.stars[n.id] || 0) >= 1).length;
     const cur = L.currentNode(progress);
     const here = cur && cur.unitId === unit.id;
-    $("#crumb").textContent = unit.title;
-    $("#u-kicker").textContent = `Unit ${ui + 1}`;
-    $("#u-name").textContent = unit.title;
-    $("#u-desc").textContent = unit.subtitle;
-    $("#u-count").textContent = `${done} / ${scored.length}`;
-    $("#u-bar").style.width = `${scored.length ? (done / scored.length) * 100 : 0}%`;
+    $("#crumb", root).textContent = unit.title;
+    $("#u-kicker", root).textContent = `Unit ${ui + 1}`;
+    $("#u-name", root).textContent = unit.title;
+    $("#u-desc", root).textContent = unit.subtitle;
+    $("#u-count", root).textContent = `${done} of ${scored.length}`;
+    $("#u-bar", root).style.width = `${scored.length ? (done / scored.length) * 100 : 0}%`;
     const line = here
       ? (cur.kind === "chest" ? "A chest! Open it." : cur.kind === "boss" ? "The boss. Eight questions, three hearts." : `Next up: ${cur.title}.`)
       : done === scored.length ? "All done here. Replay for three stars." : "Finish the unit before this one first.";
-    $("#u-say").textContent = line;
-    if (line !== speech.lastLine) { speech.lastLine = line; say(line, $("#u-say"), $("#u-tally")); }
-    setTally($("#u-tally"), here ? "ready" : "happy");
-    $("#unit-switch").innerHTML = L.UNITS.map((u, i) => `<button type="button" class="${i === ui ? "on" : ""}" data-action="unit" data-u="${i}" aria-label="Unit ${i + 1}"><img src="art/tile-${i + 1}-${i === ui ? "on" : "off"}.png" alt=""></button>`).join("");
-    const pts = spotsFor(nodes.length);
-    const d = pts.map(([x, y], i) => `${i ? "L" : "M"} ${x} ${y}`).join(" ");
-    let html = `<svg class="track" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${d}"></path></svg>`;
-    nodes.forEach((n, i) => {
-      const [x, y] = pts[i];
+    $("#u-say", root).textContent = line;
+    if (line !== speech.lastLine) { speech.lastLine = line; say(line, $("#u-say", root), $("#u-tally", root)); }
+    setTally($("#u-tally", root), here ? "ready" : "happy");
+    $("#switch", root).innerHTML = tileRow(L.UNITS.length, ui, "unit");
+    $("#path", root).innerHTML = pathHtml(nodes.map((n) => {
       const state = L.nodeState(progress, n.id);
-      const cls = "node" + (n.kind === "boss" ? " node-boss" : n.kind === "chest" ? " node-chest" : "") +
-        (state === "locked" ? " is-locked" : state === "done" ? " is-done" : " is-current");
-      const pos = `left:${x}%;top:${y}%`;
-      // the current node is the way in: the render already says START, so the node
-      // itself carries the action and no second button is stacked on top of it
-      const action = state !== "current" ? "node" : n.kind === "chest" ? "chest" : "start";
-      const face = n.kind === "chest"
-        ? use(iconFor(n.kind, state), "0 0 88 80")
-        : `<span class="art" style="background-image:url(art/${nodeArt(n.kind, state)})"></span>`;
-      if (state === "current" && n.kind === "chest") {
-        html += `<button class="bubble" type="button" data-action="chest" data-node="${n.id}" style="left:${x}%;top:calc(${y}% - 66px)">Open</button>`;
-      }
-      html += `<button class="${cls}" type="button" data-action="${action}" data-node="${n.id}" data-status="${state}" aria-label="${n.title}" style="${pos}">${face}</button>`;
-      if (n.kind !== "chest" && progress.stars[n.id]) html += `<div class="mini-stars" style="${pos}">${[0, 1, 2].map((k) => starSvg(k < progress.stars[n.id])).join("")}</div>`;
-    });
-    $("#course").innerHTML = html;
+      return { kind: n.kind, state, id: n.id, label: n.title,
+               action: state !== "current" ? "node" : n.kind === "chest" ? "chest" : "start" };
+    }));
     decorate(root);
   }
   // the Practice door: the start check once per visit, then the path
@@ -1223,9 +1299,11 @@
   }
 
   // ---------- finish ----------
+  // The export's two panes, filled in place: the card, then the level up card behind it.
   function finish(outOfHearts) {
     const s = lesson;
     gateVoice(false);
+    const root = $("#finish");
     const total = s.total;
     const correct = s.serverCorrect === null || s.serverCorrect === undefined ? s.correct : s.serverCorrect;
     const res = L.recordLesson(progress, s.node.id, correct, total);
@@ -1243,55 +1321,68 @@
     const title = outOfHearts ? "Out of hearts" : fail ? "Almost there" : s.node.kind === "boss" ? "Boss defeated!" : res.stars === 3 ? "Perfect lesson!" : "Lesson complete!";
     const need = Math.ceil(total * 0.6);
     const sub = fail ? `Get ${need} of ${total} right to earn a star and open the next lesson.` : s.endTally || (res.unlocked ? "The next lesson is open." : "Come back for all three stars.");
-    $("#finish").className = `finish${fail ? " is-fail" : ""}`;
-    $("#finish").innerHTML = `
-      <div class="fn-pane" id="fn-1">
-        <div class="tally" data-tally="${fail ? "almost" : "happy"}" data-accessories="${before.accessories}"></div>
-        <h1>${title}</h1>
-        <p class="sub">${sub}</p>
-        <div class="fn-stars">${[0, 1, 2].map((i) => starSvg(i < res.stars)).join("")}</div>
-        <div class="fn-gain">${use("icon-xp")}<span id="fn-gain">+0</span></div>
-        <div class="fn-lvl">
-          <div class="fn-lvlhead"><b id="fn-n1">${before.name}</b><span id="fn-x1">${levelLabel(before)}</span></div>
-          <div class="fn-track"><i id="fn-f1" style="width:${before.percent}%;transition:none"></i></div>
-        </div>
-        <div class="btn-row">${fail
-          ? `<button class="btn2 red" data-action="retry" data-node="${s.node.id}">Try again</button><button class="btn2 ghost" data-action="home">Back to the path</button>`
-          : `<button class="btn2" data-action="home">Continue</button>`}</div>
-      </div>
-      <div class="fn-pane in" id="fn-2">
-        ${confetti()}
-        <div class="tally" data-tally="happy" data-accessories="${after.accessories}"></div>
-        <div class="newlevel">Level ${after.level}</div>
-        <h1>${after.name}</h1>
-        ${earned.length ? `<p class="earned">Tally got ${earned.map(accessoryText).join(" and ")}</p>` : `<p class="sub">Tally is proud of you.</p>`}
-        <div class="fn-lvl">
-          <div class="fn-lvlhead"><b>${after.name}</b><span>${levelLabel(after)}</span></div>
-          <div class="fn-track"><i id="fn-f2" style="width:0%"></i></div>
-        </div>
-        <div class="btn-row"><button class="btn2" data-action="home">Continue</button><button class="btn2 ghost" data-action="profile">See Tally</button></div>
-      </div>`;
+
+    const p1 = $("#p1", root), p2 = $("#p2", root);
+    p1.className = "pane";
+    p2.className = "pane in";
+    $("h1", p1).textContent = title;
+    $(".sub", p1).textContent = sub;
+    $("#gain", root).textContent = "0";
+    $("#n1", root).textContent = before.name;
+    $("#x1", root).textContent = levelLabel(before);
+    const fill = $("#f1", p1);
+    fill.style.transition = "none";
+    fill.style.width = `${before.percent}%`;
+    $("#t-done", root).setAttribute("data-tally", fail ? "almost" : "happy");
+    $("#t-done", root).setAttribute("data-accessories", before.accessories);
+    // the export gives the card one button. A lesson that failed needs the way back
+    // as well, so the second button of the level up card's row is borrowed for it.
+    $("#cont1", root).textContent = fail ? "Try again" : "Continue";
+    $("#cont1", root).dataset.action = fail ? "retry" : "home";
+    $("#cont1", root).dataset.node = s.node.id;
+    const back = $(".btn-row .ghost", p1);
+    if (fail && !back) {
+      const link = document.createElement("a");
+      link.className = "btn2 ghost";
+      link.href = "#practice";
+      link.dataset.action = "home";
+      link.textContent = "Back to the path";
+      $(".btn-row", p1).appendChild(link);
+    } else if (!fail && back) back.remove();
+
+    $("#n2", root).textContent = after.name;
+    $("#n3", root).textContent = after.name;
+    $("#x2", root).textContent = levelLabel(after);
+    $("#f2", root).style.width = "0";
+    $("#t-up", root).setAttribute("data-tally", "happy");
+    $("#t-up", root).setAttribute("data-accessories", after.accessories);
+    const earnedLine = $(".earned", p2);
+    earnedLine.hidden = earned.length === 0;
+    if (earned.length) $("#acc", root).textContent = earned.map((key) => L.ACCESSORY_NAMES[key]).join(" and ");
+    confetti($("#confetti", root));
+
     videoOff($(".practice-video", $("#lesson")));
     $("#lesson").hidden = true;
-    $("#finish").hidden = false;
+    root.hidden = false;
     document.body.dataset.view = "finish";
-    decorate($("#finish"));
-    // the title, the stars, the XP count and the level name are read and stay silent.
-    // Tally's one closing line is the sub, the sentence the server ended the node with,
-    // and it goes through the same door and the same beat as every other line.
-    say(sub, $("#fn-1 .sub"), $("#fn-1 .tally"));
+    decorate(root);
+    // the title, the XP count and the level name are read and stay silent. Tally's one
+    // closing line is the sub, the sentence the server ended the node with, and it goes
+    // through the same door and the same beat as every other line.
+    say(sub, $(".sub", p1), $("#t-done", root));
     countUp(gain, before, after);
   }
   // the XP counts up over a second, the bar and the level name follow; then the level up card
   function countUp(gain, before, after) {
-    const el = $("#fn-gain"), fill = $("#fn-f1"), nameEl = $("#fn-n1"), xpEl = $("#fn-x1");
+    const root = $("#finish");
+    const el = $("#gain", root), fill = $("#f1", $("#p1", root)), nameEl = $("#n1", root), xpEl = $("#x1", root);
     const t0 = performance.now(), dur = 1100;
     function tick(now) {
       if (!el || !el.isConnected) return;
       const k = Math.min(1, (now - t0) / dur);
       const shown = Math.round(gain * (1 - Math.pow(1 - k, 3)));
       const info = L.levelInfo(before.xp + shown);
-      el.textContent = `+${shown}`;
+      el.textContent = `${shown}`;
       nameEl.textContent = info.name; xpEl.textContent = levelLabel(info); fill.style.width = `${info.percent}%`;
       if (k < 1) requestAnimationFrame(tick);
       else if (after.level > before.level) setTimeout(levelUp, 1000);
@@ -1299,27 +1390,30 @@
     requestAnimationFrame(tick);
   }
   function levelUp() {
-    const a = $("#fn-1"), b = $("#fn-2");
-    if (!a || !b || $("#finish").hidden) return;
+    const root = $("#finish");
+    const a = $("#p1", root), b = $("#p2", root);
+    if (!a || !b || root.hidden) return;
     a.classList.add("out"); b.classList.add("show");
-    setTimeout(() => { const f = $("#fn-f2"); if (f) f.style.width = `${L.levelInfo(xp()).percent}%`; }, 500);
+    setTimeout(() => { const f = $("#f2", root); if (f) f.style.width = `${L.levelInfo(xp()).percent}%`; }, 500);
     // crossing a level is a Tally moment, not a label: one short line, the card's own
     // name read back. It waits its turn behind the closing line like anything else.
-    const named = $("#fn-2 h1");
-    say(`Level up. ${named ? named.textContent : ""}.`, null, $("#fn-2 .tally"));
+    const named = $("#n2", root);
+    say(`Level up. ${named ? named.textContent : ""}.`, null, $("#t-up", root));
   }
-  // glasses are the one plural: "Tally got glasses", "Tally got a wizard hat"
-  function accessoryText(key) {
-    const label = L.ACCESSORY_NAMES[key];
-    return key === "glasses" ? `<b>${label}</b>` : `a <b>${label}</b>`;
-  }
-  function confetti() {
+  function confetti(host) {
+    if (!host) return;
     const colors = ["#2563d9", "#36a9f5", "#2fae82", "#ef5a4f", "#f8c62c", "#8b6ee0"];
-    let out = `<div class="confetti" aria-hidden="true">`;
+    host.replaceChildren();
     for (let i = 0; i < 46; i++) {
-      out += `<i style="left:${Math.random() * 100}%;background:${colors[i % colors.length]};animation-duration:${1.8 + Math.random() * 1.6}s;animation-delay:${Math.random() * 0.7}s;--dx:${Math.round(Math.random() * 160 - 80)}px;--rot:${Math.round(Math.random() * 720 - 360)}deg"></i>`;
+      const bit = document.createElement("i");
+      bit.style.left = `${Math.random() * 100}%`;
+      bit.style.background = colors[i % colors.length];
+      bit.style.setProperty("--dx", `${Math.round(Math.random() * 220 - 110)}px`);
+      bit.style.setProperty("--rot", `${Math.round(Math.random() * 900 - 450)}deg`);
+      bit.style.animationDuration = `${2.4 + Math.random() * 1.8}s`;
+      bit.style.animationDelay = `${Math.random() * 1.1}s`;
+      host.appendChild(bit);
     }
-    return out + "</div>";
   }
   function toast(html) {
     const t = $("#toast");
@@ -1354,36 +1448,39 @@
   function accessoryLevels() {
     return Object.keys(L.ACCESSORIES).map(Number).sort((a, b) => a - b);
   }
+  // the export's own tick, drawn rather than taken from icons.svg so the row keeps
+  // the stroke colour its rules paint
+  const TICK = `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M 5 12.5 L 9.5 17 L 19 7" fill="none" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"></path></svg>`;
   function renderProfile() {
+    const root = $("#profile");
     const info = L.levelInfo(xp());
-    const who = name();
-    $("#pf-who").textContent = who ? `${who} and Tally` : "You and Tally";
-    $("#pf-level").textContent = info.level;
-    $("#pf-name").textContent = info.name;
-    $("#pf-xp").textContent = info.next ? `${info.inLevel} / ${info.span}` : `${info.xp} XP`;
-    $("#pf-fill").style.width = `${info.percent}%`;
-    $("#pf-next").textContent = info.next ? `${info.toNext} XP to ${info.next}` : "Top level. Tally has everything.";
+    $("#lnum", root).textContent = info.level;
+    $("#lname", root).textContent = info.name;
+    $("#lxp", root).textContent = info.next ? `${info.inLevel} / ${info.span}` : "Complete";
+    $("#lfill", root).style.width = `${info.percent}%`;
+    $("#nextline", root).textContent = info.next ? `Next: ${info.next}` : "Top level reached.";
     // the gear row: what Tally wears now, and what is still waiting for him
     const worn = new Set(info.accessories.split(" ").filter(Boolean));
-    $("#pf-wardrobe").innerHTML = accessoryLevels().map((level) => {
+    $("#wardrobe", root).innerHTML = accessoryLevels().map((level) => {
       const acc = L.ACCESSORIES[level];
       const wear = L.ACCESSORY_NAMES[acc];
       const on = worn.has(acc);
       return `<span class="slot${on ? " on" : ""}" title="${on ? wear : `${wear} at level ${level}`}"><img src="art/acc-${acc}.png" alt="${wear}"></span>`;
     }).join("");
-    $("#pf-list").innerHTML = L.LEVELS.map((lv, i) => {
+    $("#list", root).innerHTML = L.LEVELS.map((lv, i) => {
       const n = i + 1;
       const acc = L.earnedAt(n);
       const wear = acc ? L.ACCESSORY_NAMES[acc] : "";
       const cls = n < info.level ? " got" : n === info.level ? " now" : "";
       const item = acc ? `<img class="item" src="art/acc-${acc}.png" alt="${wear}" title="${wear}">` : "";
-      const tail = n <= info.level
-        ? `${n === info.level ? `<span class="tag">You are here</span>` : ""}<span class="mark">${use("icon-check")}</span>`
-        : `<span class="tag">${lv.at} XP</span>`;
-      return `<div class="pf-row${cls}"><span class="no">${n}</span><span class="nm">${lv.name}</span><span class="pf-side">${item}${tail}</span></div>`;
+      const tail = n === info.level ? `<span class="tag">You are here</span><span class="mark">${TICK}</span>`
+        : n < info.level ? `<span class="mark">${TICK}</span>`
+        : `<span class="pending"></span>`;
+      return `<div class="row${cls}"><span class="no">${n}</span><span class="nm">${lv.name}</span><span class="right-side">${item}${tail}</span></div>`;
     }).join("");
-    decorate($("#profile"));
+    decorate(root);
   }
+
 
   // ---------- events ----------
   document.addEventListener("click", (e) => {
@@ -1397,8 +1494,16 @@
     else if (action === "start") startLesson(id);
     else if (action === "chest") openChest(id);
     else if (action === "unit") { unitAt = Number(el.dataset.u); renderCourse(); }
-    else if (action === "profile") { leaveLesson(); go("profile"); }
+    else if (action === "showcase") { showAt = Number(el.dataset.u); renderShowcase(); }
+    else if (action === "profile") { e.preventDefault(); leaveLesson(); go("profile"); }
     else if (action === "mute") setMuted(!muted);
+    // switching learner: back to the welcome screen, where the name is the identity.
+    // Nothing is cleared, the pointer simply moves when the next name is typed.
+    else if (action === "switch") go("welcome");
+    else if (action === "child") {
+      const who = roster().find((c) => c.key === el.dataset.child);
+      if (who && setChild(who.name || who.key)) go("home");
+    }
     // help the child asked for, the only help that costs the first try bonus
     else if (action === "help") { if (lesson) sendLesson({ type: "hint" }); }
     // a refusal is not final: an explicit tap on the mic asks the browser again
@@ -1408,9 +1513,14 @@
       else { voice.wanted = true; startVoice(); }
       markMic();
     }
-    else if (action === "quit" || action === "home") backToMap();
-    else if (action === "retry") startLesson(id);
-    else if (action === "reset") { progress = L.emptyProgress(); unitAt = null; save(); try { localStorage.removeItem(KEY_LEARNER); } catch (err) { /* fine */ } renderCourse(); toast("Progress reset"); }
+    else if (action === "quit" || action === "home") { e.preventDefault(); backToMap(); }
+    else if (action === "retry") { e.preventDefault(); startLesson(id); }
+    // the dev reset is this child's record and no one else's
+    else if (action === "reset") {
+      progress = L.emptyProgress(); unitAt = null; save();
+      try { localStorage.removeItem(slot(KEY_LEARNER)); } catch (err) { /* fine */ }
+      renderHome(); toast("This child is back to zero");
+    }
   });
   function openChest(id) {
     const res = L.claimChest(progress, id);
@@ -1453,9 +1563,12 @@
   }
   if (params.get("dev") === "1") $$(".dev-reset").forEach((el) => { el.hidden = false; });
   // startLesson is on the surface so the camera lesson can be opened without the path
-  // screen: the two are wired by different hands, and a test of this screen should
-  // fail for this screen's own reasons.
-  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay, startLesson, get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); } };
+  // screen, and the child helpers so a test can switch child: the screens are wired by
+  // different hands and each one's test should fail for its own reasons.
+  window.Tenfold = { parseNumber, numbersIn, sentencesOf, pickVoice, speak, say, setMuted, voice, fitOverlay,
+    startLesson, addXp, setChild, roster,
+    get muted() { return muted; }, get lesson() { return lesson; }, get xp() { return xp(); },
+    get child() { return child(); }, get name() { return name(); } };
   route();
   markMute();
   watchCamera();

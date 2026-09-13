@@ -1129,3 +1129,121 @@ a.btn:hover, a.door:hover { color: var(--ink, var(--snow)); }
 #lesson .gh .zone-box { fill: rgba(255, 255, 255, 0.04); stroke: rgba(255, 255, 255, 0.5); stroke-width: 6; stroke-dasharray: 22 18; }
 #lesson .gh .hand-box { fill: rgba(247, 148, 51, 0.12); stroke: var(--orange); stroke-width: 9; }
 #lesson .gh text.num.lit { fill: #fff; }
+/* ---------- learn, which has no export page: the practice rules, for its markup ---------- */
+  #learn body.tablet{height:100vh;overflow:hidden;background:var(--polar);display:flex;align-items:center;justify-content:center}
+  #learn .frame{
+    position:relative;flex:none;width:1194px;height:834px;overflow:hidden;background:var(--snow);
+    transform:scale(var(--fit,1));transform-origin:center center;
+    display:flex;flex-direction:column;padding:26px 34px 24px;gap:20px;
+  }
+
+  #learn /* top bar */
+  .top{display:flex;align-items:center;gap:18px;flex:none}
+  #learn .back{width:72px;height:72px;flex:none;display:block;transition:transform 60ms ease}
+  #learn .back img{width:100%;height:100%;display:block;object-fit:contain}
+  #learn .back:active{transform:translateY(3px)}
+  #learn .top h1{margin:0;font-size:26px;font-weight:900;color:var(--eel)}
+  #learn .top .sub{margin:2px 0 0;font-size:15px;font-weight:800;color:var(--hare);letter-spacing:.6px;text-transform:uppercase}
+  #learn .levelbox{
+    margin-left:auto;display:flex;align-items:center;gap:10px;height:48px;padding:0 16px 0 8px;
+    border:2px solid var(--swan);border-radius:16px;background:var(--snow);text-decoration:none;
+  }
+  #learn .levelbox .avatar{width:36px;height:38px;flex:none;display:block;}
+  #learn .lvl{min-width:190px}
+  #learn .lvl-top{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin-bottom:5px}
+  #learn .lvl-top b{font-size:15px;font-weight:900;color:var(--eel);white-space:nowrap}
+  #learn .lvl-top span{font-size:13px;font-weight:800;color:var(--hare);white-space:nowrap}
+  #learn .lvl-bar{height:9px}
+  #learn .lvl-bar i{background:var(--green)}
+
+  #learn /* body */
+  .body{flex:1;display:grid;grid-template-columns:300px minmax(0,1fr);gap:26px;min-height:0}
+
+  #learn /* unit card */
+  .unitcard{
+    align-self:start;display:flex;flex-direction:column;gap:0;border-radius:26px;overflow:hidden;
+    background:var(--snow);box-shadow:0 0 0 2px var(--swan) inset;
+  }
+  #learn .unitcard .head{background:var(--unit);color:var(--snow);padding:16px 20px 18px;box-shadow:0 4px 0 var(--unit-lip)}
+  #learn .unitcard .kicker{font-size:13px;font-weight:900;letter-spacing:1px;text-transform:uppercase;opacity:.9}
+  #learn .unitcard h2{margin:2px 0 3px;font-size:25px;font-weight:900;line-height:1.1}
+  #learn .unitcard .head p{margin:0;font-size:14px;font-weight:700;opacity:.92}
+  #learn .unitcard .mid{padding:16px 20px 12px;display:flex;flex-direction:column;gap:12px}
+  #learn .metric{display:flex;align-items:center;justify-content:space-between;font-size:16px;font-weight:800;color:var(--wolf)}
+  #learn .metric b{color:var(--eel);font-size:19px}
+  #learn .bar2{position:relative;height:16px;border-radius:8px;background:var(--swan);overflow:hidden}
+  #learn .bar2 i{position:absolute;inset:0 auto 0 0;border-radius:8px;background:var(--unit)}
+  #learn .units{display:flex;gap:10px;padding:0 20px 16px}
+  #learn .units button{
+    flex:1;height:56px;padding:0;border:0;background:none;cursor:pointer;transition:transform 60ms ease;
+  }
+  #learn .units button img{height:100%;width:auto;display:block;margin:0 auto;object-fit:contain}
+  #learn .units button:active{transform:translateY(3px)}
+
+  #learn /* path */
+  .pathwrap{position:relative;border-radius:26px;background:var(--polar);overflow:hidden}
+  #learn .track{position:absolute;inset:0;width:100%;height:100%;z-index:0}
+  #learn .track path{fill:none;stroke:var(--swan);stroke-width:9;stroke-linecap:round;stroke-dasharray:3 15;vector-effect:non-scaling-stroke}
+  #learn .node{
+    z-index:1;position:absolute;width:112px;height:112px;margin:-56px 0 0 -56px;padding:0;border:0;
+    background:none;box-shadow:none;border-radius:0;
+    cursor:pointer;display:flex;align-items:center;justify-content:center;transition:transform 90ms ease;
+  }
+  #learn .node span{width:100%;height:100%;display:block;pointer-events:none;background-repeat:no-repeat;background-position:center;background-size:contain}
+  #learn .node:active{transform:translateY(5px)}
+  #learn .node.locked{cursor:default;opacity:.9}
+  #learn .node.locked:active{transform:none}
+
+  #learn .node.current{z-index:3;width:164px;height:214px;margin:-130px 0 0 -82px;animation:pulse 2.2s ease-in-out infinite}
+  #learn .node.current:active{transform:translateY(5px)}
+
+
+
+  #learn .tallyspot{display:flex;align-items:center;gap:4px;margin-top:6px}
+  #learn .tallyspot .tally-art{
+    width:92px;height:96px;flex:none;display:block;animation:bob 3s ease-in-out infinite;
+    
+  }
+  #learn .tallyspot .line{
+    position:relative;flex:1;margin:0 0 0 -8px;min-height:76px;
+    background:url("art/bubble-box.png") no-repeat center / 100% 100%;padding:14px 14px 16px 32px;
+    color:var(--eel);font-size:15px;font-weight:800;line-height:1.25;display:flex;align-items:center;
+  }
+
+/* Added because the export has no place for them, one screen each:
+   #learn, the read only showcase, borrows the practice rules above;
+   .node .chest, the chest has no render in the export and keeps the drawn icon;
+   .switcher, on the hub, the way back to the welcome screen to change child;
+   .known, on the welcome screen, the children this computer already knows;
+   .dev-reset, on the hub, only ever shown with ?dev=1;
+   .mute, the switch that silences Tally from any screen. */
+.node .chest { display: flex; align-items: center; justify-content: center; }
+.node .chest svg { width: 100%; height: 100%; }
+
+.switcher {
+  height: 40px; padding: 0 18px; border: 2px solid var(--swan); border-radius: 14px;
+  background: var(--snow); color: var(--wolf); font-family: var(--font); font-size: 15px; font-weight: 800;
+}
+.switcher:active { transform: translateY(2px); }
+
+.known { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; max-width: 420px; }
+.known-btn {
+  height: 44px; padding: 0 18px; border: 2px solid var(--swan); border-radius: 14px; background: var(--snow);
+  color: var(--eel); font-family: var(--font); font-size: 16px; font-weight: 800;
+}
+.known-btn:active { transform: translateY(2px); }
+
+.dev-reset {
+  align-self: flex-start; border: 2px dashed var(--swan); border-radius: 12px; background: none;
+  color: var(--hare); padding: 8px 14px; font-family: var(--font); font-size: 13px; font-weight: 800;
+}
+
+.mute {
+  position: fixed; right: 22px; bottom: 20px; z-index: 90; width: 44px; height: 44px; padding: 0;
+  display: grid; place-items: center; border: 2px solid var(--swan); border-radius: 14px;
+  background: var(--snow); color: var(--wolf);
+}
+.mute svg { width: 24px; height: 24px; grid-area: 1 / 1; }
+.mute .off, .mute.is-muted .on { display: none; }
+.mute.is-muted .off { display: block; }
+.mute.is-muted { color: var(--hare); border-style: dashed; }

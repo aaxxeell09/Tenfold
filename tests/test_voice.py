@@ -949,22 +949,22 @@ def test_only_tallys_bubble_is_spoken(page):
                  {"type": "node_end", "node_id": node, "correct": 5, "total": 5, "tally": "Lovely work."})
     tab.wait_for_selector("#finish", state="visible", timeout=10000)
     tab.wait_for_timeout(3600)      # past the XP count up and the level up card behind it
-    title = tab.inner_text("#fn-1 h1").strip()
+    title = tab.inner_text("#p1 h1").strip()
     assert title != ""
-    assert tab.inner_text("#fn-n1").strip() != ""
+    assert tab.inner_text("#n1").strip() != ""
     spoken = said(tab)
     assert "Lovely work." in spoken, "Tally's closing line was not spoken"
     assert title not in spoken, "the finish title was spoken"
     assert not any("XP" in line for line in spoken), "the XP count was spoken"
     # nothing else: the closing line, and the two sentences of the level up line
     extra = [line for line in spoken if line != "Lovely work."]
-    assert extra in ([], ["Level up.", tab.inner_text("#fn-2 h1").strip() + "."]), spoken
+    assert extra in ([], ["Level up.", tab.inner_text("#p2 h1").strip() + "."]), spoken
 
     # the profile: the level ladder, every name on screen and not one of them spoken
     tab.evaluate("() => { window.__spoken = []; location.hash = 'profile'; }")
     tab.wait_for_function("document.body.dataset.view === 'profile'", timeout=5000)
     tab.wait_for_timeout(800)
-    assert tab.inner_text("#pf-name").strip() != ""
+    assert tab.inner_text("#lname").strip() != ""
     assert said(tab) == [], "a level name was spoken"
 
 
@@ -1472,7 +1472,7 @@ def test_a_tap_on_tally_asks_for_help(page):
 # screen with text in it and no voice behind it is the bug this list catches.
 # Tally's three bubbles, plus the one closing line he keeps on the finish card. The
 # titles, the XP count and the level names are read on screen and never spoken.
-BUBBLES = ["#check-say", "#u-say", "#lesson .say", "#fn-1 .sub"]
+BUBBLES = ["#check-say", "#u-say", "#lesson .say", "#p1 .sub"]
 
 SILENT_BUBBLES = """
 (selectors) => {
@@ -1545,7 +1545,7 @@ def test_every_bubble_shown_is_spoken(page):
     tab.wait_for_selector("#finish", state="visible", timeout=10000)
     tab.wait_for_function("window.__spoken.some((u) => u.text.includes('Lovely work'))", timeout=10000)
     assert silent(tab) == []
-    tab.wait_for_selector("#fn-2.show", timeout=10000)
+    tab.wait_for_selector("#p2.show", timeout=10000)
     tab.wait_for_timeout(1600)
     assert silent(tab) == []
     assert errors == []
@@ -1578,8 +1578,8 @@ def test_every_tally_expression_has_a_render(page):
         assert response.status == 200, f"{expression} points at a missing {render}"
     # one host, every expression in turn: the base image follows the table
     for expression in EXPRESSIONS:
-        tab.evaluate("(e) => Tally.set(document.querySelector('#home .tally'), e)", expression)
-        src = tab.get_attribute("#home .tally .t-base", "src")
+        tab.evaluate("(e) => Tally.set(document.querySelector('#t-done'), e)", expression)
+        src = tab.get_attribute("#t-done .t-base", "src")
         assert src == f"art/{faces[expression]}", expression
     assert errors == []
 
@@ -1621,8 +1621,8 @@ def test_the_path_nodes_are_the_renders(page):
     tab.goto(url + "#practice", wait_until="domcontentloaded")
     tab.wait_for_selector('[data-action="start"]', timeout=10000)
     art = tab.eval_on_selector_all(
-        "#course .node",
-        "els => els.map((e) => [e.dataset.status, (e.querySelector('.art') || {}).style?.backgroundImage || 'icon'])")
+        "#path .node",
+        "els => els.map((e) => [e.dataset.status, e.querySelector('span').style.backgroundImage || 'icon'])")
     assert art, "the path drew no nodes"
     for status, image in art:
         if image == "icon":
@@ -1630,7 +1630,7 @@ def test_the_path_nodes_are_the_renders(page):
         expected = {"current": "start.png", "done": "n-done.png", "locked": "n-lock.png"}[status]
         assert expected in image, f"{status} node drawn with {image}"
     # the render carries the START bubble, so the node itself opens the lesson
-    assert tab.get_attribute('#course .node.is-current', "data-action") == "start"
+    assert tab.get_attribute('#path .node.current', "data-action") == "start"
     assert errors == []
 
 
@@ -1661,13 +1661,116 @@ def test_the_profile_shows_the_gear_tally_has_earned(page):
     # level 4 wears the glasses of level 2 and the headband of level 4, nothing else
     tab.evaluate("() => localStorage.setItem('tenfold.learner', JSON.stringify({ xp: 500 }))")
     tab.goto(url + "#profile", wait_until="domcontentloaded")
-    tab.wait_for_selector("#pf-wardrobe .slot", timeout=10000)
+    tab.wait_for_selector("#wardrobe .slot", timeout=10000)
     slots = tab.eval_on_selector_all(
-        "#pf-wardrobe .slot",
+        "#wardrobe .slot",
         "els => els.map((e) => [e.querySelector('img').getAttribute('src'), e.classList.contains('on')])")
     assert [s[0] for s in slots] == [
         "art/acc-glasses.png", "art/acc-headband.png", "art/acc-hat.png",
         "art/acc-cape.png", "art/acc-crown.png"]
     assert [s[1] for s in slots] == [True, True, False, False, False]
     assert tab.eval_on_selector_all("#pf-tally .t-acc", "els => els.length") == 2
+    assert errors == []
+
+
+# ---------------------------------------------------------------------------
+# Several children on one tablet. A child is the first name typed on the
+# welcome screen, trimmed and lowercased, and every record hangs off that key:
+# switching learner moves a pointer and erases nothing.
+# ---------------------------------------------------------------------------
+
+
+def name_child(tab, typed: str):
+    """Type a first name on the welcome screen and land on the hub."""
+    tab.evaluate("() => { location.hash = 'welcome'; }")
+    tab.wait_for_function("document.body.dataset.view === 'welcome'")
+    tab.fill("#welcome #name", typed)
+    tab.click("#welcome #form button[type=submit]")
+    tab.wait_for_function("document.body.dataset.view === 'home'")
+
+
+def path_states(tab):
+    tab.evaluate("() => { location.hash = 'practice'; }")
+    tab.wait_for_selector("#path .node", timeout=10000)
+    return tab.eval_on_selector_all("#path .node", "els => els.map((e) => e.dataset.status)")
+
+
+def test_two_children_keep_separate_xp_and_progress(page):
+    """Two children on one computer are two learners. Neither ever reads or
+    overwrites the other, and switching between them loses nothing."""
+    context, url = page
+    tab = context.new_page()
+    errors = []
+    tab.on("pageerror", lambda e: errors.append(str(e)))
+    tab.goto(url + "#welcome", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+
+    # Ilan plays: 120 XP and the first lesson behind him
+    name_child(tab, "Ilan")
+    assert tab.evaluate("Tenfold.child") == "ilan"
+    tab.evaluate("() => Tenfold.addXp(120)")
+    tab.evaluate("() => localStorage.setItem('tenfold.levels.v1.ilan',"
+                 " JSON.stringify({ stars: { 'u1-l1': 3 }, chests: {} }))")
+    tab.reload()
+    tab.wait_for_function("!!window.Tenfold")
+    assert tab.evaluate("Tenfold.xp") == 120
+    assert path_states(tab)[:2] == ["done", "current"]
+
+    # Axel sits down: a second child starts from zero, with none of Ilan's path
+    name_child(tab, "Axel")
+    assert tab.evaluate("Tenfold.child") == "axel"
+    assert tab.evaluate("Tenfold.xp") == 0
+    assert path_states(tab)[:2] == ["current", "locked"]
+    tab.evaluate("() => Tenfold.addXp(30)")
+
+    # Ilan comes back, spelled the way a child spells it: nothing of his was lost
+    name_child(tab, "  ILAN ")
+    assert tab.evaluate("Tenfold.child") == "ilan"
+    assert tab.evaluate("Tenfold.xp") == 120
+    assert path_states(tab)[:2] == ["done", "current"]
+
+    # and neither record was erased along the way
+    assert tab.evaluate("() => JSON.parse(localStorage.getItem('tenfold.learner.axel')).xp") == 30
+    assert tab.evaluate("() => JSON.parse(localStorage.getItem('tenfold.learner.ilan')).xp") == 120
+    assert tab.evaluate("() => JSON.parse(localStorage.getItem('tenfold.levels.v1.axel') || '{}').stars || {}") == {}
+    assert errors == []
+
+
+def test_the_play_before_a_name_belongs_to_the_first_child_only(page):
+    """A child who starts before typing a name keeps that XP once the name is
+    typed. The next child inherits nothing."""
+    context, url = page
+    tab = context.new_page()
+    tab.goto(url + "#home", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    tab.evaluate("() => Tenfold.addXp(40)")
+    name_child(tab, "Ilan")
+    assert tab.evaluate("Tenfold.xp") == 40
+    name_child(tab, "Axel")
+    assert tab.evaluate("Tenfold.xp") == 0
+
+
+def test_the_hub_names_the_child_and_is_the_way_back_to_the_welcome_screen(page):
+    """The hub says who is playing and carries the way out to switch child, and
+    the welcome screen offers the children this computer already knows."""
+    context, url = page
+    tab = context.new_page()
+    errors = []
+    tab.on("pageerror", lambda e: errors.append(str(e)))
+    tab.goto(url + "#welcome", wait_until="domcontentloaded")
+    tab.wait_for_function("!!window.Tenfold")
+    name_child(tab, "Ilan")
+    assert "Ilan" in tab.inner_text("#greeting")
+    assert tab.is_visible("#switch-child")
+
+    tab.click("#switch-child")
+    tab.wait_for_function("document.body.dataset.view === 'welcome'")
+    assert tab.is_visible("#known")
+    assert tab.inner_text('#known [data-child="ilan"]').strip() == "Ilan"
+    # the name typed is never put back on screen as markup
+    assert tab.eval_on_selector('#known [data-child="ilan"]', "e => e.innerHTML") == "Ilan"
+
+    tab.click('#known [data-child="ilan"]')
+    tab.wait_for_function("document.body.dataset.view === 'home'")
+    assert tab.evaluate("Tenfold.child") == "ilan"
     assert errors == []
