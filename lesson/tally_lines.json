@@ -18,6 +18,7 @@
   "wrong_answer_3": "Now check the top.",
   "rescue": "{tens} at the bottom, that makes {tens_value}. On top, {u1} times {u2} makes {units}. Together, {total}.",
   "success": "Yes. {a} times {b} is {total}.",
+  "next_one": "Next one.",
   "autonomous": "You solved that without a hint. I'll give you more space on the next one.",
   "pose_ack": "Yes, that's it.",
   "hands_back": "Good, I can see your hands.",

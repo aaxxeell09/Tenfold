@@ -493,6 +493,7 @@ def test_a_requested_hint_climbs_one_step_and_never_counts_as_nagging() -> None:
 
 # --- the second wrong answer, the third trigger of L4 ----------------------
 
+NEXT_LINE = json.loads(LINES_FILE.read_text(encoding="utf-8"))["next_one"]
 RESCUE_LINE = json.loads(LINES_FILE.read_text(encoding="utf-8"))["rescue"].format(
     tens=5, tens_value=50, u1=2, u2=3, units=6, total=56)
 
@@ -1634,8 +1635,8 @@ def test_a_correct_answer_calls_the_beat_with_its_parts() -> None:
         "pause_ms": 1200,
         "total_ms": 2500,
         "line": SUCCESS_LINE,
-        # The second line is not in lesson/tally_lines.json yet.
-        "next_line": None,
+        # The line that closes the beat, said as the next exercise fades in.
+        "next_line": NEXT_LINE,
     }
     assert list(BEAT_PARTS) == beat["parts"]
 

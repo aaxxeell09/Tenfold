@@ -256,8 +256,11 @@ def test_every_line_of_the_file_is_reachable() -> None:
     # The server's three: a camera that will not open, a camera that went away,
     # and a second tab. Read from the file by app/server.py.
     used |= set(live.SERVER_LINE_KEYS)
+    # The line that closes the success beat, said by the page as the next
+    # exercise fades in. The tutor renders it when the file carries it.
+    used |= {live.NEXT_LINE_KEY}
     assert set(raw) <= used, sorted(set(raw) - used)
-    for key in used - {live.NEXT_LINE_KEY}:
+    for key in used:
         assert key in raw, key
 
 
