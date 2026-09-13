@@ -152,8 +152,11 @@ FACTOR_PARAMS = ("supportive_mode_factor", "independent_mode_factor")
 # Tally is, so no learner factor and no mode factor ever scales them: they are
 # read as written and only clamped to their bounds.
 FRAME_PARAMS = ("pose_confirm_frames",)
+# pose_ready_delay_ms is the silence between the acknowledgement of a confirmed
+# pose and the canonical cue that follows it: the length of a two beat line, so
+# it is read as written like the other delivery timings.
 MS_PARAMS = ("pose_confirm_ms", "ack_delay_ms", "check_step_min_ms",
-             "answer_first_number_ms")
+             "answer_first_number_ms", "pose_ready_delay_ms")
 LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
 # The success beat, in milliseconds: how long the celebration itself runs, and
 # how long the silence after it lasts before the next exercise is announced.
@@ -174,10 +177,30 @@ LINE_KEYS = (
 )
 # One line per wrong answer on the same exercise, the last one repeating.
 WRONG_ANSWER_KEYS = ("wrong_answer_1", "wrong_answer_2", "wrong_answer_3")
+# The two beats of a confirmed pose: the acknowledgement, said at once and
+# allowed to cut, then the canonical cue pose_ready_delay_ms later. The
+# acknowledgement is not one of the twenty, so a file without it is not an
+# error: the beat then plays the canonical line alone, at once, as before.
+ACK_LINE_KEY = "pose_ack"
+POSE_READY_KEY = "pose_ready"
+# The lines of the older lesson path, lesson/tally.py, which keeps no text of
+# its own. They live in the same file because Tally has one voice and one place
+# to keep it; the live tutor never says them and never has to have them.
+LESSON_LINE_KEYS = (
+    "intro", "exercise_shown", "unknown_gesture", "hands_swapped",
+    "wrong_left_finger", "wrong_left_finger_detailed",
+    "wrong_right_finger", "wrong_right_finger_detailed",
+    "answer_correct", "count_fingers", "guided",
+    "retry", "retry_detailed", "review", "review_detailed",
+    "confidence", "confidence_detailed", "next_new", "next_new_detailed",
+    "level_up", "hint_1", "hint_1_detailed", "hint_3",
+    "same_hand_twice", "same_hand_twice_detailed",
+    "end_success", "end_success_detailed", "end_tired",
+)
 # Lines the file may carry and does not have to. "next_one" closes the success
 # beat, and lesson/tally_lines.json does not have it yet: until it does the beat
 # hands the page no second line at all rather than a line nobody wrote.
-OPTIONAL_LINE_KEYS = ("next_one",)
+OPTIONAL_LINE_KEYS = ("next_one", ACK_LINE_KEY) + LESSON_LINE_KEYS
 NEXT_LINE_KEY = "next_one"
 
 # The success beat. The page plays the parts in this order inside success_ms,
@@ -1364,30 +1387,62 @@ class Tutor:
     # -- the acknowledgement of a confirmed pose -----------------------------
 
     def _arm_ack(self, moment: float) -> None:
-        """The pose is confirmed: the line that says so is due at once.
+        """The pose is confirmed: two beats, not one sentence.
 
-        ack_delay_ms is zero by default, so the usual case is armed and released
-        inside the same tick. It is the one line that may cut another, and the
-        only one that never goes through _offer: min_verbal_gap, the unsolicited
-        budget and the ladder all leave it alone, because a child who has just
-        made the pose has to hear yes now or not at all.
+        First the acknowledgement, at once, which may cut whatever is being
+        said: a child who has just made the pose has to hear yes now or not at
+        all. Then, pose_ready_delay_ms later, the canonical cue that tells them
+        what to do with the pose they are holding.
+
+        ack_delay_ms still moves the first beat, and the second is measured from
+        it, so the pair keeps its shape wherever the first one lands. Neither
+        goes through _offer: min_verbal_gap, the unsolicited budget and the
+        ladder all leave the confirmation of a right pose alone.
+
+        A line file without the acknowledgement is not an error. The beat then
+        degrades to the canonical cue alone, said at once and allowed to cut,
+        which is exactly what this moment sounded like before the second beat.
         """
         if not self._open:
             return
-        line = self._render("pose_ready")
-        if line is None:
+        ack = self._render(ACK_LINE_KEY)
+        cue = self._render(POSE_READY_KEY)
+        due = moment + self.effective("ack_delay_ms") / MS_PER_S
+        if ack is None:
+            self._ack_line, self._ack_due = cue, due
+            self._cue_line = None
             return
-        self._ack_line = line
-        self._ack_due = moment + self.effective("ack_delay_ms") / MS_PER_S
+        self._ack_line, self._ack_due = ack, due
+        self._cue_line = cue
+        self._cue_due = due + self.effective("pose_ready_delay_ms") / MS_PER_S
 
     def _release_ack(self, moment: float) -> None:
-        """Hand the armed acknowledgement over once ack_delay_ms has passed."""
-        if self._ack_line is None or moment < self._ack_due:
+        """Hand the two beats over, in order, as each falls due.
+
+        One line rides one message, so when both are due on the same tick the
+        acknowledgement goes first and the cue waits for the next one: the child
+        never hears the second beat before the first.
+        """
+        if self._ack_line is not None:
+            if moment < self._ack_due:
+                return
+            line, self._ack_line = self._ack_line, None
+            self._say(line, moment)
+            self._pending_line = line
+            self._pending_cuts = True
             return
-        line, self._ack_line = self._ack_line, None
+        if self._cue_line is None or moment < self._cue_due:
+            return
+        line, self._cue_line = self._cue_line, None
+        if not self._open or self._paused:
+            # The exercise the cue was about is gone. Everything else about
+            # which line is said when is exactly as it was before the beat.
+            return
         self._say(line, moment)
         self._pending_line = line
-        self._pending_cuts = True
+        # The cue is not the yes. It waits its turn in the page's queue like
+        # every other line, so only one line of the pair may ever cut.
+        self._pending_cuts = False
 
     # -- perception helpers --------------------------------------------------
 
@@ -1676,6 +1731,8 @@ class Tutor:
         self._pending_cuts = False
         self._ack_line: str | None = None
         self._ack_due = 0.0
+        self._cue_line: str | None = None
+        self._cue_due = 0.0
         self._beat: dict[str, Any] | None = None
         self._answered = False
         self._answer_correct = False
