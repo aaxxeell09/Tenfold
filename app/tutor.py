@@ -148,7 +148,16 @@ DURATION_PARAMS = (
 )
 COUNT_PARAMS = ("max_unsolicited_verbal", "max_visibility_reminders")
 FACTOR_PARAMS = ("supportive_mode_factor", "independent_mode_factor")
-REQUIRED_PARAMS = ("fps",) + DURATION_PARAMS + COUNT_PARAMS + FACTOR_PARAMS
+# Latency parameters. They are how fast the machine answers, not how patient
+# Tally is, so no learner factor and no mode factor ever scales them: they are
+# read as written and only clamped to their bounds.
+FRAME_PARAMS = ("pose_confirm_frames",)
+MS_PARAMS = ("pose_confirm_ms", "ack_delay_ms", "check_step_min_ms",
+             "answer_first_number_ms")
+LATENCY_PARAMS = FRAME_PARAMS + MS_PARAMS
+REQUIRED_PARAMS = ((("fps",) + DURATION_PARAMS + COUNT_PARAMS + FACTOR_PARAMS)
+                   + LATENCY_PARAMS)
+MS_PER_S = 1000.0
 
 LINE_KEYS = (
     "launch", "hesitation_1", "hesitation_2", "visibility_none",
@@ -232,7 +241,7 @@ def load_params(path: Path | str = PARAMS_PATH) -> TutorParams:
         # The clamp is a no-op after the check above. It stays because the same
         # rule runs on every runtime product in effective().
         value = min(max(value, low), high)
-        if key == "fps" or key in COUNT_PARAMS:
+        if key == "fps" or key in COUNT_PARAMS or key in FRAME_PARAMS:
             values[key] = int(round(value))
             bounds[key] = (int(round(low)), int(round(high)))
         else:
@@ -283,7 +292,13 @@ class Observation:
 
 @dataclass(frozen=True)
 class Decision:
-    """The eight fields of the state message, as of now."""
+    """The nine fields of the state message, as of now.
+
+    tutor_line_cuts is the ninth and the only one about delivery rather than
+    pedagogy: true means this line may interrupt whatever is being spoken
+    instead of queueing behind it. Only the acknowledgement of a confirmed pose
+    ever sets it, so a page that ignores it still behaves as it did before.
+    """
 
     tutor_state: str = WORKING
     intervention_level: int = 0
@@ -293,6 +308,7 @@ class Decision:
     scored_math_error: bool = False
     first_try: bool = True
     mode: str = NORMAL
+    tutor_line_cuts: bool = False
 
     def as_fields(self) -> dict[str, Any]:
         return {
@@ -304,6 +320,7 @@ class Decision:
             "scored_math_error": self.scored_math_error,
             "first_try": self.first_try,
             "mode": self.mode,
+            "tutor_line_cuts": self.tutor_line_cuts,
         }
 
 
@@ -494,7 +511,7 @@ class Tutor:
         """global[key] scaled, then clamped. The clamp is always the last step."""
         raw = float(self.params.values[key])
         low, high = self.params.bound(key)
-        if key == "fps" or key in FACTOR_PARAMS:
+        if key == "fps" or key in FACTOR_PARAMS or key in LATENCY_PARAMS:
             return raw
         if key in COUNT_PARAMS:
             return float(_clamp(round(raw * self._help_factor), low, high))
@@ -702,6 +719,10 @@ class Tutor:
         self._collect_jitter(motion, obs, moment)
         self._update_hands(obs.hands_seen, moment)
         self._update_pose(obs, moment)
+        # The acknowledgement reads the raw clock, never a pedagogical one: the
+        # child who just reached the pose is moving, and movement must not hold
+        # back the one line that says the pose is right.
+        self._release_ack(moment)
         if obs.hint:
             self._hint = dict(obs.hint)
 
@@ -715,10 +736,14 @@ class Tutor:
                 self._correction_since = None
         self._update_paused(moment)
         line = self._run(moment, situation)
+        cuts = False
         if self._pending_line is not None:
+            # A line waiting from this same tick wins over anything the ladder
+            # picked: it is the acknowledgement, and it is allowed to cut.
             line, self._pending_line = self._pending_line, None
+            cuts, self._pending_cuts = self._pending_cuts, False
         self._flush_pending(moment)
-        return self._decision(line=line)
+        return self._decision(line=line, cuts=cuts)
 
     # -- the decision --------------------------------------------------------
 
@@ -1216,6 +1241,34 @@ class Tutor:
         self._last_line_ped = self._ped
         self._said_anything = True
 
+    # -- the acknowledgement of a confirmed pose -----------------------------
+
+    def _arm_ack(self, moment: float) -> None:
+        """The pose is confirmed: the line that says so is due at once.
+
+        ack_delay_ms is zero by default, so the usual case is armed and released
+        inside the same tick. It is the one line that may cut another, and the
+        only one that never goes through _offer: min_verbal_gap, the unsolicited
+        budget and the ladder all leave it alone, because a child who has just
+        made the pose has to hear yes now or not at all.
+        """
+        if not self._open:
+            return
+        line = self._render("pose_ready")
+        if line is None:
+            return
+        self._ack_line = line
+        self._ack_due = moment + self.effective("ack_delay_ms") / MS_PER_S
+
+    def _release_ack(self, moment: float) -> None:
+        """Hand the armed acknowledgement over once ack_delay_ms has passed."""
+        if self._ack_line is None or moment < self._ack_due:
+            return
+        line, self._ack_line = self._ack_line, None
+        self._say(line, moment)
+        self._pending_line = line
+        self._pending_cuts = True
+
     # -- perception helpers --------------------------------------------------
 
     def _motion(self, fingers: Sequence[Mapping[str, Any]]) -> float | None:
@@ -1321,10 +1374,7 @@ class Tutor:
             if self._condition(self._held_key) == SIT_CORRECT:
                 if not self._correct_pose_seen:
                     self._correct_pose_seen = True
-                    if self._pose_waived:
-                        confirmed = self._render("pose_ready")
-                        self._say(confirmed, moment)
-                        self._pending_line = confirmed
+                    self._arm_ack(moment)
 
     @staticmethod
     def _key_of(gesture: GestureState | None) -> tuple[int, int, bool] | None:
@@ -1477,6 +1527,9 @@ class Tutor:
         self._taught = 0
         self._suppressed: str | None = None
         self._pending_line: str | None = None
+        self._pending_cuts = False
+        self._ack_line: str | None = None
+        self._ack_due = 0.0
         self._answered = False
         self._answer_correct = False
         self._correct_pose_seen = False
@@ -1500,7 +1553,7 @@ class Tutor:
         self._raw_misses = 0
         self._gone_since = None
 
-    def _decision(self, line: str | None = None) -> Decision:
+    def _decision(self, line: str | None = None, cuts: bool = False) -> Decision:
         return Decision(
             tutor_state=self._state,
             intervention_level=self._level,
@@ -1510,8 +1563,9 @@ class Tutor:
             scored_math_error=self._math_errors > 0,
             first_try=self.first_try,
             mode=self._mode,
+            tutor_line_cuts=cuts and line is not None,
         )
 
     def state_fields(self) -> dict[str, Any]:
-        """The eight new fields of the state message, as of now."""
+        """The nine new fields of the state message, as of now."""
         return self._decision().as_fields()

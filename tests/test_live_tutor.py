@@ -126,6 +126,20 @@ class Harness:
                 said.append(self.last.tutor_line)
         return said
 
+    def feed_marked(self, seconds: float, gesture: GestureState | None = UNKNOWN,
+                    hands: int = 2, hint: dict[str, object] | None = None,
+                    ) -> list[tuple[str, bool]]:
+        """Like feed, but every line comes back with its cut mark."""
+        marked: list[tuple[str, bool]] = []
+        for _ in range(int(round(seconds * FPS))):
+            self.clock.tick()
+            obs = Observation(gesture=gesture, fingers=fingers(0.0, hands),
+                              hands_seen=hands, hint=hint)
+            self.last = self.tutor.observe(obs, self.clock.t)
+            if self.last.tutor_line:
+                marked.append((self.last.tutor_line, self.last.tutor_line_cuts))
+        return marked
+
     def kind(self, name: str) -> list[dict[str, object]]:
         return [line for line in self.log if line.get("kind") == name]
 
@@ -422,7 +436,10 @@ def test_the_correction_names_the_hand_or_the_two_hands_that_are_wrong() -> None
 def test_the_counting_nudge_counts_the_tens_then_the_fingers_above() -> None:
     harness = wrong_pose_harness()
     said = harness.feed(20.0, gesture=pose(8, 7, True))
-    assert said[:2] == ["Count the touching fingers and the ones below.",
+    # The acknowledgement of the confirmed pose comes first, then the two halves
+    # of the method in the order they are counted.
+    assert said[:3] == ["You have the pose. Now count the tens.",
+                        "Count the touching fingers and the ones below.",
                         "Now multiply the fingers above."]
 
 
@@ -1290,19 +1307,23 @@ def test_the_jsonl_sink_appends_one_object_per_line(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------
-# 14. the eight fields on the wire
+# 14. the nine fields on the wire
 # --------------------------------------------------------------------------
 
 
-def test_the_state_fields_are_the_eight_of_the_contract() -> None:
+def test_the_state_fields_are_the_nine_of_the_contract() -> None:
     harness = wrong_pose_harness()
     fields = harness.tutor.state_fields()
     assert set(fields) == {"tutor_state", "intervention_level", "tutor_line",
                            "tutor_visual", "scored_gesture_error",
-                           "scored_math_error", "first_try", "mode"}
+                           "scored_math_error", "first_try", "mode",
+                           "tutor_line_cuts"}
     assert fields["tutor_state"] == PROMPTING
     assert fields["intervention_level"] == 0
     assert fields["mode"] == NORMAL
+    # No line, nothing to cut.
+    assert fields["tutor_line"] is None
+    assert fields["tutor_line_cuts"] is False
 
 
 def test_every_visual_kind_is_one_of_the_six() -> None:
@@ -1362,3 +1383,127 @@ def test_a_line_held_back_by_speech_is_logged() -> None:
     harness.feed(1.0, gesture=pose(8, 9, False), hint=HINT)
     assert any(line["reason"] == "child_speaking"
                for line in harness.kind("decision"))
+
+
+# --------------------------------------------------------------------------
+# 16. the latency parameters and the acknowledgement that may cut
+# --------------------------------------------------------------------------
+
+
+ACK_LINE = "You have the pose. Now count the tens."
+
+# The five latency keys: what they are set to, and the bounds they live in.
+LATENCY_DEFAULTS: dict[str, tuple[float, tuple[float, float]]] = {
+    "pose_confirm_frames": (3, (2, 6)),
+    "pose_confirm_ms": (250, (120, 600)),
+    "ack_delay_ms": (0, (0, 300)),
+    "check_step_min_ms": (0, (0, 400)),
+    "answer_first_number_ms": (0, (0, 400)),
+}
+
+# Every timing that was in the file before the latency keys were added. Cutting
+# latency may not quietly move one of them.
+UNCHANGED_GLOBALS: dict[str, float] = {
+    "fps": 15, "hands_visible_stable": 0.5, "pose_stable": 0.8,
+    "initial_silence": 4.0, "idle_nudge": 5.0, "wrong_pose_prompt": 2.0,
+    "wrong_pose_error_after_help": 2.5, "correct_pose_nudge": 4.5,
+    "hint_2_delay": 9.0, "rescue_delay": 14.0, "no_hands_visual": 1.5,
+    "no_hands_voice": 3.0, "one_hand_voice": 2.5, "min_verbal_gap": 4.0,
+    "post_movement_silence": 2.0, "no_engagement_pause": 30.0,
+    "pose_memory": 2.0, "max_unsolicited_verbal": 3,
+    "max_visibility_reminders": 2, "supportive_mode_factor": 0.8,
+    "independent_mode_factor": 1.4, "live_sample_windows": 8,
+}
+
+
+def test_the_five_latency_keys_are_known_with_their_bounds() -> None:
+    raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
+    params = load_params(PARAMS_FILE)
+    for key, (value, bound) in LATENCY_DEFAULTS.items():
+        assert key in REQUIRED_PARAMS, key
+        assert raw["global"][key] == value, key
+        assert raw["bounds"][key] == list(bound), key
+        assert params.values[key] == value, key
+        assert params.bound(key) == bound, key
+
+
+def test_a_latency_key_is_clamped_and_never_scaled() -> None:
+    harness = Harness(factors={"pace_factor": 9.0, "help_factor": 9.0,
+                               "tutor_observations": 500})
+    for mode in (NORMAL, SUPPORTIVE, INDEPENDENT):
+        harness.tutor._mode = mode
+        for key, (value, (low, high)) in LATENCY_DEFAULTS.items():
+            assert low <= harness.tutor.effective(key) <= high, key
+            # Latency is how fast the machine answers, not how patient Tally is,
+            # so no learner factor and no mode factor touches it.
+            assert harness.tutor.effective(key) == value, key
+    raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
+    raw["global"]["ack_delay_ms"] = 900
+    path = Path(_tmp()) / "ack_out_of_bounds.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ParamsError) as excinfo:
+        load_params(path)
+    assert "ack_delay_ms" in str(excinfo.value) and "300" in str(excinfo.value)
+
+
+def test_the_acknowledgement_arrives_on_the_tick_the_pose_is_confirmed() -> None:
+    harness = wrong_pose_harness()
+    said: list[str] = []
+    while not said and harness.clock.t < 5.0:
+        said = harness.feed(STEP, gesture=pose(8, 7, True))
+    assert said == [ACK_LINE]
+    # The same tick the pose is confirmed, with ack_delay_ms at its default zero.
+    assert harness.last.tutor_state == POSE_READY
+    assert harness.clock.t == pytest.approx(0.8 + STEP, abs=STEP)
+
+
+def test_ack_delay_ms_moves_the_acknowledgement_and_nothing_else() -> None:
+    harness = wrong_pose_harness(params_with(ack_delay_ms=300))
+    said: list[str] = []
+    while not said and harness.clock.t < 5.0:
+        said = harness.feed(STEP, gesture=pose(8, 7, True))
+    assert said == [ACK_LINE]
+    # The pose is confirmed at pose_stable, the line waits the delay and lands
+    # on the first frame after it. Nothing else in the file moved with it.
+    assert 0.8 + 0.3 <= harness.clock.t <= 0.8 + 0.3 + 3 * STEP
+
+
+def test_only_the_acknowledgement_is_marked_as_able_to_cut() -> None:
+    harness = wrong_pose_harness()
+    marked = harness.feed_marked(20.0, gesture=pose(8, 9, False), hint=HINT)
+    assert marked, "the wrong pose has to have been spoken to at all"
+    assert not any(cuts for _, cuts in marked)
+    marked = harness.feed_marked(2.0, gesture=pose(8, 7, True))
+    assert marked[0] == (ACK_LINE, True)
+    assert [line for line, cuts in marked if cuts] == [ACK_LINE]
+
+
+def test_min_verbal_gap_never_holds_back_the_acknowledgement() -> None:
+    harness = wrong_pose_harness(params_with(min_verbal_gap=8.0))
+    said: list[str] = []
+    while not said and harness.clock.t < 25.0:
+        said = harness.feed(STEP, gesture=pose(8, 9, False), hint=HINT)
+    assert said, "a line has to have been said for the gap to be in force"
+    # The whole window below sits inside min_verbal_gap of that line, so it
+    # holds every paced line back. The acknowledgement comes out of it anyway.
+    marked = harness.feed_marked(1.5, gesture=pose(8, 7, True))
+    assert marked == [(ACK_LINE, True)]
+
+
+def test_the_grace_before_a_wrong_pose_is_scored_is_untouched() -> None:
+    params = load_params(PARAMS_FILE)
+    assert params.values["wrong_pose_prompt"] == 2.0
+    assert params.values["wrong_pose_error_after_help"] == 2.5
+    assert params.values["initial_silence"] == 4.0
+    harness = wrong_pose_harness()
+    harness.feed(4.0, gesture=pose(8, 9, False), hint=HINT)
+    assert harness.last.scored_gesture_error is False
+    harness.feed(16.0, gesture=pose(8, 9, False), hint=HINT)
+    assert harness.last.scored_gesture_error is True
+
+
+def test_no_other_value_in_the_params_file_moved() -> None:
+    raw = json.loads(PARAMS_FILE.read_text(encoding="utf-8"))
+    assert set(raw["global"]) == set(UNCHANGED_GLOBALS) | set(LATENCY_DEFAULTS)
+    for key, value in UNCHANGED_GLOBALS.items():
+        assert raw["global"][key] == value, key
